@@ -74,6 +74,41 @@ export function validateRequestHeaders(value: unknown, label: string, errors: st
   }
 }
 
+function validatePrepareConfig(value: unknown, errors: string[]): void {
+  if (value === undefined) return;
+  if (!isRecord(value)) {
+    errors.push('准备阶段配置必须是 JSON 对象');
+    return;
+  }
+  if (value.upload === undefined) return;
+  if (!isRecord(value.upload)) {
+    errors.push('准备阶段 upload 必须是 JSON 对象');
+    return;
+  }
+  if (typeof value.upload.enabled !== 'boolean') {
+    errors.push('准备阶段 upload.enabled 必须是布尔值');
+  }
+  if (value.upload.enabled !== true) return;
+  // 保留旧版只有 enabled 字段的协议可打开；执行准备阶段时再提示需要补齐配置。
+  if (value.upload.method !== undefined && value.upload.method !== 'POST') errors.push('准备阶段 upload.method 只支持 POST');
+  for (const field of [
+    'url', 'credentialHeader', 'fileListField', 'fileIdField', 'fileField',
+    'responseItemsPath', 'responseFileIdPath', 'responseUrlPath',
+  ]) {
+    if (value.upload[field] !== undefined && (typeof value.upload[field] !== 'string' || !value.upload[field].trim())) {
+      errors.push(`准备阶段 upload.${field} 不能为空`);
+    }
+  }
+  if (typeof value.upload.url === 'string') {
+    try {
+      const url = new URL(value.upload.url);
+      if (!['http:', 'https:'].includes(url.protocol)) errors.push('准备阶段 upload.url 只支持 HTTP 或 HTTPS');
+    } catch {
+      errors.push('准备阶段 upload.url 必须是有效的 HTTP 或 HTTPS 地址');
+    }
+  }
+}
+
 function validateTemplateVariables(
   request: Record<string, unknown>,
   allowSubmit: boolean,
@@ -432,6 +467,7 @@ export function validateModelExecutionProtocol(value: unknown): string[] {
     errors.push('调用协议 mode 只支持 sync 或 async');
   }
   validateAuthentication(protocol.auth, errors);
+  validatePrepareConfig(protocol.prepare, errors);
   if (protocol.streamFormat !== undefined && protocol.streamFormat !== 'openai-sse') {
     errors.push('流式响应格式只支持 openai-sse');
   }

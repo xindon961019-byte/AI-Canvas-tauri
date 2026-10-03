@@ -29,7 +29,7 @@ import AnimatedButton from '../shared/AnimatedButton';
 import ProviderBadge from '../shared/ProviderBadge';
 import { defaultModelGroups } from '../nodes/shared/defaultModels';
 import { shouldListProviderConnection } from './apiKeySettingsUtils';
-import { deleteAppSecret, isSecretStoreAvailable } from '../../services/providerSecretService';
+import { deleteAppSecret, isSecretStoreAvailable, readAppSecret, writeAppSecret } from '../../services/providerSecretService';
 import { testProviderConnection } from '../../services/testConnection';
 import { replaceLegacyApimartOmni } from '../../services/ai/apimartVideoModels';
 import DreaminaLoginModal from './DreaminaLoginModal';
@@ -107,6 +107,8 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
   const balanceRefreshActiveRef = useRef(true);
   // 凭据存在 Rust 侧的凭据存储里；不可用时只能本次会话有效，得在用户填写前就说清楚
   const [secretStoreAvailable, setSecretStoreAvailable] = useState(true);
+  const [materialUploadKey, setMaterialUploadKey] = useState('');
+  const [materialUploadKeySaving, setMaterialUploadKeySaving] = useState(false);
 
   const [dreaminaLoading, setDreaminaLoading] = useState(false);
   const [dreaminaStatusMsg, setDreaminaStatusMsg] = useState(() => t('首次登录时会自动准备即梦组件'));
@@ -234,8 +236,28 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     void isSecretStoreAvailable().then((available) => {
       if (!cancelled) setSecretStoreAvailable(available);
     });
+    void readAppSecret('creative-material-key').then((value) => {
+      if (!cancelled) setMaterialUploadKey(value || '');
+    }).catch(() => {});
     return () => { cancelled = true; };
   }, []);
+
+  const saveMaterialUploadKey = useCallback(async (value = materialUploadKey) => {
+    setMaterialUploadKeySaving(true);
+    try {
+      if (value.trim()) {
+        const saved = await writeAppSecret('creative-material-key', value.trim());
+        if (!saved) throw new Error('当前环境无法保存素材上传凭证');
+      } else {
+        await deleteAppSecret('creative-material-key');
+      }
+      useAppStore.getState().showToast(value.trim() ? '素材上传凭证已保存' : '素材上传凭证已清除');
+    } catch (error) {
+      useAppStore.getState().showToast(error instanceof Error ? error.message : '素材上传凭证保存失败', 'error');
+    } finally {
+      setMaterialUploadKeySaving(false);
+    }
+  }, [materialUploadKey]);
 
   useEffect(() => {
     balanceRefreshActiveRef.current = true;
@@ -578,6 +600,43 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
             {t('当前环境无法保存凭据，API Key 不会写入本地，仅本次会话有效。')}
           </p>
         )}
+        <section className="provider-config-section mb-4">
+          <div className="provider-section-heading">
+            <div>
+              <h4>素材上传凭证</h4>
+              <p>用于把本地图片和音频上传到公网素材服务。与视频接口 API Key 分开保存。</p>
+            </div>
+          </div>
+          <label className="provider-field">
+            <span>创想素材 Key</span>
+            <input
+              type="password"
+              value={materialUploadKey}
+              placeholder="请输入 X-Creative-Material-Key"
+              autoComplete="off"
+              onChange={(event) => setMaterialUploadKey(event.target.value)}
+            />
+            <small>只保存到应用安全凭据存储，不会写入 JSON、普通配置或导出的连接配置。</small>
+          </label>
+          <div className="flex gap-2">
+            <AnimatedButton
+              type="button"
+              className="provider-primary-btn"
+              disabled={materialUploadKeySaving || !secretStoreAvailable}
+              onClick={() => void saveMaterialUploadKey()}
+            >
+              {materialUploadKeySaving ? '保存中…' : '保存素材上传凭证'}
+            </AnimatedButton>
+            <AnimatedButton
+              type="button"
+              className="provider-text-btn"
+              disabled={materialUploadKeySaving || !materialUploadKey}
+              onClick={() => { setMaterialUploadKey(''); void saveMaterialUploadKey(''); }}
+            >
+              清除
+            </AnimatedButton>
+          </div>
+        </section>
         {providerItems.length === 0 ? (
           <div className="provider-empty-state">
             <span className="provider-empty-icon"><Icon icon="mdi:key-chain-variant" width="24" /></span>

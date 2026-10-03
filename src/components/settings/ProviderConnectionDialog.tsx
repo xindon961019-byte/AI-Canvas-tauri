@@ -571,12 +571,26 @@ export default function ProviderConnectionDialog({
   };
 
   const handleSave = async () => {
-    if (
-      !definition
-      || missingCredentials
-      || (!isWebSearchProvider && !isWorkflowApi && !workflowOnlyConnection && selectedModels.length === 0)
-      || !protocolValid
-    ) return;
+    if (!definition) {
+      setCatalogStatus('error');
+      setCatalogMessage(t('请先选择 API 厂商'));
+      return;
+    }
+    if (missingCredentials) {
+      setCatalogStatus('error');
+      setCatalogMessage(t('请先填写接口地址和 API Key'));
+      return;
+    }
+    if (!isWebSearchProvider && !isWorkflowApi && !workflowOnlyConnection && selectedModels.length === 0) {
+      setCatalogStatus('error');
+      setCatalogMessage(t('请至少选择一个模型'));
+      return;
+    }
+    if (!protocolValid) {
+      setCatalogStatus('error');
+      setCatalogMessage(t('当前调用协议校验未通过，请检查 JSON 格式和协议字段'));
+      return;
+    }
     try {
       if (isWorkflowApi) {
         if (!baseUrl.trim() || !workflowValid || !workflowDrafts.length) throw new Error(t('请完成工作流配置'));
@@ -617,7 +631,12 @@ export default function ProviderConnectionDialog({
         ? { runninghubWorkflowApiKey: workflowApiKey.trim() }
         : isWorkflowApi ? { workflowApiDrafts: workflowDrafts } : undefined,
     );
-    } catch (error) { setCatalogStatus('error'); setCatalogMessage(error instanceof Error ? error.message : t('保存失败')); }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('保存失败');
+      setCatalogStatus('error');
+      setCatalogMessage(message);
+      useAppStore.getState().showToast(message, 'error');
+    }
   };
 
   return createPortal(
@@ -797,7 +816,7 @@ export default function ProviderConnectionDialog({
               <AnimatedButton
                 type="button"
                 className="provider-primary-btn"
-                disabled={
+                aria-disabled={
                   missingCredentials
                   || (isWorkflowApi && !workflowValid)
                   || (!isWebSearchProvider && !isWorkflowApi && !workflowOnlyConnection && selectedModels.length === 0)

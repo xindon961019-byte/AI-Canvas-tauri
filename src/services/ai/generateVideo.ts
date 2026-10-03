@@ -21,6 +21,7 @@ import type {
   VideoGenerationOperation,
   VideoGenerationReferenceInput,
   VideoModelCapability,
+  ModelProtocolPrepareConfig,
 } from '../../types/aiTypes';
 import { extractModelName, resolveGeneralModel, resolveGeneralModelConnection } from './helpers';
 import { resolvePromptWithMediaRefs, type PromptCharacterBinding, type PromptMediaReferences } from './promptResolver';
@@ -68,6 +69,7 @@ import {
 } from './videoRequestResolver';
 import { getAsset } from './providers/volcengineAssetLibrary';
 import { readAppSecret } from '../providerSecretService';
+import { uploadCreativeMaterials } from '../creativeMaterialUploadService';
 import { quoteVolcengineVideo } from '../billing/volcenginePricing';
 import { createBillingRun, updateBillingRun } from '../billing/volcengineBillingService';
 
@@ -82,6 +84,52 @@ async function mapSequentially<T, R>(
     results.push(await mapper(items[index], index));
   }
   return results;
+}
+
+function materialFileName(reference: MediaReference, index: number): string {
+  const source = reference.url.split(/[?#]/, 1)[0];
+  // asset:// 地址中的本地路径通常被 percent-encode；先解码再取 basename，
+  // 否则上传接口会把整条本地路径当成素材名称。
+  let decoded = source;
+  try { decoded = decodeURIComponent(source); } catch { /* 使用原始地址继续提取 */ }
+  const name = decoded.split(/[\\/]/).pop()?.trim();
+  const safeName = name && name !== 'file' ? name : `${reference.kind}-${index}`;
+  // 创想素材接口要求 name 不超过 100 个字符；保留扩展名并截断过长的文件名。
+  if (safeName.length <= 100) return safeName;
+  const extensionIndex = safeName.lastIndexOf('.');
+  const extension = extensionIndex > 0 ? safeName.slice(extensionIndex) : '';
+  const stem = extension ? safeName.slice(0, extensionIndex) : safeName;
+  const maxStemLength = Math.max(1, 100 - extension.length);
+  return `${stem.slice(0, maxStemLength)}${extension}`;
+}
+
+/** 已有 HTTP(S) 公网地址直接复用；开启准备阶段时才上传本地引用。 */
+async function materializePreparedReferences(
+  references: readonly MediaReference[],
+  uploadConfig: NonNullable<ModelProtocolPrepareConfig['upload']>,
+  signal?: AbortSignal,
+): Promise<MediaReference[]> {
+  const needsUpload = references.filter((reference) => !isRemoteMediaUrl(reference.url));
+  if (needsUpload.length === 0) return [...references];
+  if (needsUpload.some((reference) => reference.kind === 'video')) {
+    throw new Error('HAYA 的创想素材批量接口只支持图片和音频，参考视频必须已经是 HTTP(S) 公网 URL');
+  }
+  const credential = await readAppSecret('creative-material-key');
+  if (!credential) throw new Error('未配置素材上传凭证，请在设置 → API Key → 素材上传凭证中填写');
+
+  const uploadInputs = needsUpload.map((reference, index) => ({
+    fileId: `haya-${Date.now()}-${index}`,
+    fileName: materialFileName(reference, index),
+    source: reference.url,
+    kind: reference.kind as 'image' | 'audio',
+  }));
+  const uploaded = await uploadCreativeMaterials(uploadInputs, credential, uploadConfig, signal);
+  const urlBySource = new Map(needsUpload.map((reference, index) => [reference, uploaded[index].url]));
+  return references.map((reference) => ({
+    ...reference,
+    url: urlBySource.get(reference) ?? reference.url,
+    sourceUrl: urlBySource.get(reference) ?? reference.sourceUrl ?? reference.url,
+  }));
 }
 
 function resolveImageUrlsSequentially(
@@ -461,15 +509,15 @@ export function buildCanonicalVideoProtocolVariables(
     .find((reference) => reference.role === 'first_frame')?.url;
   const lastImage = request.references.images
     .find((reference) => reference.role === 'last_frame')?.url;
-  const imageUrls = compatibility.imageUrls.length > 0 ? compatibility.imageUrls : undefined;
+  // 保持视频协议请求体的数组字段稳定存在；没有对应素材时渲染为 []，
+  // 不让模板渲染器因为 undefined 把 images/videos/audios 字段删掉。
+  const imageUrls = compatibility.imageUrls;
   const referenceImageUrlsValue = request.references.images
     .filter((reference) => reference.role === 'reference')
     .map((reference) => reference.url);
-  const referenceImageUrls = referenceImageUrlsValue.length > 0
-    ? referenceImageUrlsValue
-    : undefined;
-  const videoUrls = compatibility.videoUrls.length > 0 ? compatibility.videoUrls : undefined;
-  const audioUrls = compatibility.audioUrls.length > 0 ? compatibility.audioUrls : undefined;
+  const referenceImageUrls = referenceImageUrlsValue;
+  const videoUrls = compatibility.videoUrls;
+  const audioUrls = compatibility.audioUrls;
   // 带角色的参考图数组（[{ url, role }]），供协议模板按 image_with_roles 语义引用：
   // 首/尾帧保留原角色，其余参考图按 Seedance 约定写 reference_image；
   // 为空时置 undefined，让模板省略该字段而不是发出空数组。
@@ -544,8 +592,8 @@ export function buildCanonicalVideoProtocolVariables(
     audioUrls,
     audioUrl: audioUrls?.[0],
     referenceAudioUrls: audioUrls,
-    referenceUrls: referenceUrls.length > 0 ? referenceUrls : undefined,
-    inlineReferences: inlineReferences.length > 0 ? inlineReferences : undefined,
+    referenceUrls,
+    inlineReferences,
     n: compatibility.candidateCount,
     batchCount: compatibility.candidateCount,
   };
@@ -776,20 +824,38 @@ export async function generateVideo(
       references: originalReferences,
       capability: videoCapability,
     });
-    if (resolveModelExecutionProfile(gm.executionProfile)) {
+    const executionProtocol = resolveModelExecutionProfile(gm.executionProfile);
+    if (executionProtocol) {
+      const uploadConfig = executionProtocol.prepare?.upload;
+      if (uploadConfig?.enabled === true && (
+        uploadConfig.method !== 'POST'
+        || !uploadConfig.url
+        || !uploadConfig.credentialHeader
+        || !uploadConfig.fileListField
+        || !uploadConfig.fileIdField
+        || !uploadConfig.fileField
+        || !uploadConfig.responseItemsPath
+        || !uploadConfig.responseFileIdPath
+        || !uploadConfig.responseUrlPath
+      )) {
+        throw new Error('准备阶段上传配置不完整，请补齐上传地址、字段名和返回路径后重试');
+      }
+      const protocolReferences = executionProtocol.prepare?.upload?.enabled === true
+        ? await materializePreparedReferences(originalReferences, uploadConfig!, signal)
+        : originalReferences;
       const dataUrlBudget = createMediaDataUrlBudget('本次视频模型参考媒体');
       const remoteImageUrls = await resolveImageUrlsSequentially(
-        referenceInput.imageUrls,
+        protocolReferences.filter((reference) => reference.kind === 'image').map((reference) => reference.url),
         connection.providerConfigId,
         signal,
       );
       const videoUrls = await resolveGeneralProtocolMediaUrls(
-        originalReferences, 'video', dataUrlBudget, signal,
+        protocolReferences, 'video', dataUrlBudget, signal,
       );
       const audioUrls = await resolveGeneralProtocolMediaUrls(
-        originalReferences, 'audio', dataUrlBudget, signal,
+        protocolReferences, 'audio', dataUrlBudget, signal,
       );
-      const remoteReferences = replaceReferenceUrls(originalReferences, {
+      const remoteReferences = replaceReferenceUrls(protocolReferences, {
         image: remoteImageUrls,
         video: videoUrls,
         audio: audioUrls,

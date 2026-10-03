@@ -268,6 +268,30 @@ function assertReferenceMediaDeliverable(
   protocolSource: string,
   variables: ModelProtocolVariables,
 ): void {
+  // HAYA/Seedance 等接口使用固定的三数组请求体。某些历史协议在规范化后
+  // 仍会被通用覆盖检查误判；只要提交 body 明确完整接收这三类数组，直接
+  // 以提交字段为准，避免合法配置在发送前被拦截。
+  try {
+    const parsed = JSON.parse(protocolSource) as unknown;
+    const submitBody = isRecord(parsed) && isRecord(parsed.submit) ? parsed.submit.body : undefined;
+    const templates = new Set<string>();
+    const collect = (value: unknown) => {
+      if (typeof value === 'string') {
+        const match = /^{{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*}}$/.exec(value);
+        if (match) templates.add(match[1]);
+        return;
+      }
+      if (Array.isArray(value)) { value.forEach(collect); return; }
+      if (isRecord(value)) Object.values(value).forEach(collect);
+    };
+    collect(submitBody);
+    const hasImages = templates.has('imageUrls') || templates.has('referenceImageUrls');
+    const hasVideos = templates.has('videoUrls') || templates.has('referenceVideoUrls');
+    const hasAudios = templates.has('audioUrls') || templates.has('referenceAudioUrls');
+    if (hasImages && hasVideos && hasAudios) return;
+  } catch {
+    // 结构校验会在更早阶段报告 JSON 错误；这里继续使用通用覆盖检查。
+  }
   const unused = findUnusedReferenceVariables(protocolSource, variables);
   if (unused.length === 0) return;
   const exactHints = unused.flatMap((name) => (

@@ -1209,12 +1209,25 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
   ]);
 
   return (
-    <div ref={mentionEditorWrapRef} className={`mention-editor-wrap relative ${className}`}>
+    <div
+      ref={mentionEditorWrapRef}
+      className={`mention-editor-wrap relative nodrag nowheel ${className}`}
+      onPointerDown={(event) => {
+        // React Flow treats pointer-down events inside a node as a drag unless
+        // the editor explicitly claims them. Keep the prompt editor focusable
+        // while preserving normal pointer behavior for mention chips/dropdowns.
+        if (event.target === event.currentTarget) editorRef.current?.focus();
+        event.stopPropagation();
+      }}
+    >
       <div
         ref={editorRef}
         contentEditable
         suppressContentEditableWarning
-        className={`prompt-editor${!prompt ? ' is-empty' : ''}`}
+        role="textbox"
+        aria-multiline="true"
+        tabIndex={0}
+        className={`prompt-editor nodrag nowheel${!prompt ? ' is-empty' : ''}`}
         data-placeholder={placeholder}
         onInput={handleInput}
         onKeyDown={handleKeyDown}
@@ -1229,6 +1242,7 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
           onBlur?.();
           emitDOM();
         }}
+        onPointerDown={(event) => event.stopPropagation()}
         spellCheck={false}
       />
 

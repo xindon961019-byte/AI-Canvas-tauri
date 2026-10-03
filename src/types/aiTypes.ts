@@ -64,6 +64,23 @@ export interface ModelProtocolRequestTemplate {
   body?: ProtocolJsonValue;
 }
 
+/** 提交前可选的本地素材准备步骤。未配置时不得隐式上传参考素材。 */
+export interface ModelProtocolPrepareConfig {
+  upload?: {
+    enabled: boolean;
+    method: 'POST';
+    url: string;
+    credentialHeader: string;
+    fileListField: string;
+    fileIdField: string;
+    fileField: string;
+    responseItemsPath: string;
+    responseFileIdPath: string;
+    responseUrlPath: string;
+    responseStatusPath?: string;
+  };
+}
+
 export type ModelProtocolPollBackoff = 'fixed' | 'linear' | 'exponential';
 
 export interface ModelProtocolPollRetryConfig {
@@ -144,6 +161,7 @@ export interface ModelExecutionProtocolV1 {
   auth?: ModelProtocolAuthConfig;
   /** 对话助手仅接受显式声明的 OpenAI SSE 兼容流。 */
   streamFormat?: 'openai-sse';
+  prepare?: ModelProtocolPrepareConfig;
   submit: ModelProtocolRequestTemplate;
   /** 同步响应类型，缺省为 JSON；异步协议固定使用 JSON。 */
   responseType?: ModelProtocolResponseType;
@@ -169,6 +187,7 @@ export interface ModelExecutionProtocolV2 {
   auth?: ModelProtocolAuthConfig;
   /** 对话助手仅接受显式声明的 OpenAI SSE 兼容流。 */
   streamFormat?: 'openai-sse';
+  prepare?: ModelProtocolPrepareConfig;
   submit: ModelProtocolRequestTemplate;
   response: ModelProtocolResponseConfig;
   poll?: ModelProtocolPollTemplate;
