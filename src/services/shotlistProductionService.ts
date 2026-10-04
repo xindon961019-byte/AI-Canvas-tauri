@@ -69,7 +69,9 @@ export function prepareShotlistProduction(scope: ShotlistScope, nodeId: string, 
       data.directorStatus = 'idle';
     }
     nodes.push({ id: targetId, type: data.type, parentId: sheet.parentId, position: { ...position }, data });
-    connect(targetId, nodeId);
+    // 导演台读取分镜要求；视频、配音仍作为制作成果回连。
+    if (kind === 'director') connect(nodeId, targetId);
+    else connect(targetId, nodeId);
     return { rowId: row.id, nodeId: targetId, status: 'created' as const };
   });
   if (nodes.length) {

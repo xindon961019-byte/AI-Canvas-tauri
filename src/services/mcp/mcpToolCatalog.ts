@@ -21,6 +21,8 @@ export const MCP_CATALOG_MAX_BYTES = 64 * 1024;
 const MAX_SEARCH_RESULTS = 8;
 const MAX_DESCRIBE_TOOLS = 3;
 
+const MCP_CONNECTION_RULES = '画布连线规则：sourceId（提供内容）→ targetId（消费内容），右出左入（sourceHandle=right、targetHandle=left）；上游放左、下游放右，水平间距至少 80 画布单位。分镜表 → 导演台，镜头说明 → 导演台，不要把导演台反接回分镜表。创建或制作工具可能自动连线，prompt 中的 @ 节点引用也会在创建时自动连线，不要重复连接。操作前后用 canvas_query(detail=true) 核对实际方向、端口与 layout.warning，发现异常先修正再继续。';
+
 // 只补类别词汇；具体工具的名称、说明和 schema 全部来自注册中心。
 const categories: Record<string, { title: string; keywords: string }> = {
   app: { title: '应用状态', keywords: '应用 状态 application status models 模型' },
@@ -80,7 +82,7 @@ export const MCP_DESCRIBE_SCHEMA: AgentToolSchema = {
 export const MCP_CALL_DESCRIPTOR: McpToolDescriptor = {
   name: MCP_CALL_TOOL_NAME,
   title: '调用 AI Canvas 工具',
-  description: '用 tools_search / tools_describe 获取真实工具名和参数后，在 name 和 arguments 中提交一次调用；已知参数可直接复用。可能写入、删除或调用付费模型，按目标工具权限执行；写入和生成失败后不要自动重试。不支持递归调用发现入口。',
+  description: `${MCP_CONNECTION_RULES}\n用 tools_search / tools_describe 获取真实工具名和参数后，在 name 和 arguments 中提交一次调用；已知参数可直接复用。可能写入、删除或调用付费模型，按目标工具权限执行；写入和生成失败后不要自动重试。不支持递归调用发现入口。`,
   inputSchema: {
     type: 'object', required: ['name', 'arguments'], additionalProperties: false,
     properties: {
@@ -103,9 +105,12 @@ export function decodeMcpToolCallEnvelope(input: unknown): McpToolCallEnvelope {
 }
 
 export function toMcpToolDescriptor(definition: AgentToolDefinition): McpToolDescriptor {
+  const showConnectionRules = isMcpDiscoveryTool(definition.id)
+    || definition.id === 'canvas_create_nodes' || definition.id === 'shotlist_prepare_production';
   return {
     name: definition.id, title: definition.title,
-    description: definition.description, inputSchema: definition.inputSchema,
+    description: showConnectionRules ? `${MCP_CONNECTION_RULES}\n${definition.description}` : definition.description,
+    inputSchema: definition.inputSchema,
   };
 }
 
@@ -157,7 +162,8 @@ function score(tool: AgentToolDefinition, query: string, terms: string[]): numbe
 }
 
 export function serializeMcpCatalogResult(result: McpToolCatalogResult): string {
-  const json = JSON.stringify(result);
+  const { hint, ...catalog } = result;
+  const json = JSON.stringify({ hint: `${MCP_CONNECTION_RULES}${hint ? `\n${hint}` : ''}`, ...catalog });
   if (new TextEncoder().encode(json).byteLength > MCP_CATALOG_MAX_BYTES) {
     throw new Error('工具定义超过单次返回预算，请减小 limit、改用 summary，或使用 tools_describe 每次读取一个工具；本次未返回不完整的 schema。');
   }

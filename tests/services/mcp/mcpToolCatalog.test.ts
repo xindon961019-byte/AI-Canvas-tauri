@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   clearAgentToolRegistryForTests,
+  getAgentTool,
   registerAgentTool,
   type AgentToolContext,
   type AgentToolDefinition,
@@ -10,8 +11,10 @@ import {
   describeMcpToolCatalog,
   getConfiguredMcpToolExposure,
   MCP_CATALOG_MAX_BYTES,
+  MCP_CALL_DESCRIPTOR,
   searchMcpToolCatalog,
   serializeMcpCatalogResult,
+  toMcpToolDescriptor,
 } from '../../../src/services/mcp/mcpToolCatalog';
 
 const context: Omit<AgentToolContext, 'signal'> = {
@@ -36,6 +39,45 @@ beforeEach(() => {
 });
 
 describe('MCP tool catalog', () => {
+  it('shows connection rules before the initial discovery descriptions and full-mode creation tools', () => {
+    for (const id of ['tools_describe', 'canvas_create_nodes', 'shotlist_prepare_production']) register(id);
+    const descriptors = [MCP_CALL_DESCRIPTOR, ...[
+      'tools_search', 'tools_describe', 'canvas_create_nodes', 'shotlist_prepare_production',
+    ].map((id) => toMcpToolDescriptor(getAgentTool(id)!))];
+    for (const descriptor of descriptors) {
+      expect(descriptor.description.startsWith('画布连线规则：')).toBe(true);
+      expect(descriptor.description).toContain('sourceId（提供内容）→ targetId（消费内容）');
+      expect(descriptor.description).toContain('sourceHandle=right、targetHandle=left');
+      expect(descriptor.description).toContain('水平间距至少 80');
+      expect(descriptor.description).toContain('分镜表 → 导演台');
+      expect(descriptor.description).toContain('不要重复连接');
+      expect(descriptor.description).toContain('canvas_query(detail=true)');
+      expect(descriptor.description).toContain('layout.warning');
+    }
+    expect(descriptors[1].inputSchema).toBe(getAgentTool('tools_search')!.inputSchema);
+    expect(MCP_CALL_DESCRIPTOR.annotations?.readOnlyHint).toBe(false);
+  });
+
+  it('keeps connection rules first in navigation, search and describe responses without clipping contracts', () => {
+    const results = [
+      searchMcpToolCatalog(context, {}),
+      searchMcpToolCatalog(context, { category: 'canvas' }),
+      searchMcpToolCatalog(context, { query: 'canvas_query', detail: 'schema' }),
+      searchMcpToolCatalog(context, { query: 'unmatched-xyz' }),
+      searchMcpToolCatalog(context, { category: 'canvas', offset: 99 }),
+      describeMcpToolCatalog(context, { names: ['canvas_query'] }),
+    ];
+    for (const result of results) {
+      const serialized = serializeMcpCatalogResult(result);
+      expect(serialized.startsWith('{"hint":"画布连线规则：')).toBe(true);
+      const decoded = JSON.parse(serialized);
+      expect(decoded.hint).toContain('不要把导演台反接回分镜表');
+      expect(decoded.tools).toEqual(result.tools);
+      if (result.hint) expect(decoded.hint.endsWith(result.hint)).toBe(true);
+      expect(result.hint?.startsWith('画布连线规则：')).not.toBe(true);
+    }
+  });
+
   it('defaults old or invalid settings to compact discovery', () => {
     for (const value of [undefined, null, '', 'invalid', 1, 'compact']) {
       expect(getConfiguredMcpToolExposure(value)).toBe('compact');

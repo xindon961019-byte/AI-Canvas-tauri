@@ -5,6 +5,7 @@ import type { Edge, Node } from '@xyflow/react';
 import { getLastCanvasPointerPosition } from '../../canvasPointerService';
 import { workflowExecution } from '../../workflowExecutionService';
 import { useAppStore } from '../../../store/useAppStore';
+import { isBatchConnectableNode } from '../../../store/store.nodes';
 import { generateId } from '../../../store/store.utils';
 import type { BaseNodeData, NodeType } from '../../../types';
 import { resolveShotVideoDuration } from '../../../types/shotlist';
@@ -262,7 +263,8 @@ interface UpdateNodesInput extends NodeTargetInput {
 }
 
 interface ConnectNodesInput {
-  sourceId: string;
+  sourceId?: string;
+  sourceIds?: string[];
   targetId: string;
 }
 
@@ -691,10 +693,11 @@ async function executeCanvasCommand(
 
 /**
  * 节点框大小按内容推断，避免一批节点全是同样的 280x160：
- * 视觉节点按画面比例撑开，正文已经就位的文本节点按行数撑高，其余用默认值。
+ * 分镜表使用专属默认尺寸，视觉节点按比例撑开，文本节点按正文行数撑高。
  * 布局排布和真正落库的节点共用这里，两边尺寸必须一致，否则会算错碰撞。
  */
 function getNodeDimensions(input: CreateNodeInput): { width: number; height: number } {
+  if (input.type === 'ai-shotlist') return { width: 800, height: 400 };
   if (input.aspectRatio && VISUAL_NODE_TYPES.has(input.type)) {
     return {
       width: DEFAULT_NODE_WIDTH,
@@ -783,8 +786,9 @@ function resolveCreateNodePositions(
 
   const columns = Math.min(3, autoEntries.length);
   const rows = Math.ceil(autoEntries.length / columns);
+  const maxNodeWidth = Math.max(...autoEntries.map(({ input }) => getNodeDimensions(input).width));
   const maxNodeHeight = Math.max(...autoEntries.map(({ input }) => getNodeDimensions(input).height));
-  const clusterWidth = columns * DEFAULT_NODE_WIDTH + (columns - 1) * AGENT_NODE_COLUMN_GAP;
+  const clusterWidth = columns * maxNodeWidth + (columns - 1) * AGENT_NODE_COLUMN_GAP;
   const clusterHeight = rows * maxNodeHeight + (rows - 1) * AGENT_NODE_ROW_GAP;
 
   const buildLayout = (anchor: CanvasPoint) => autoEntries.map(({ input, index }, layoutIndex) => {
@@ -794,7 +798,7 @@ function resolveCreateNodePositions(
     return {
       index,
       position: {
-        x: input.x ?? Math.round(anchor.x + column * (DEFAULT_NODE_WIDTH + AGENT_NODE_COLUMN_GAP)),
+        x: input.x ?? Math.round(anchor.x + column * (maxNodeWidth + AGENT_NODE_COLUMN_GAP)),
         y: input.y ?? Math.round(anchor.y + row * (maxNodeHeight + AGENT_NODE_ROW_GAP)),
       },
       dimensions,
@@ -1385,65 +1389,93 @@ export function registerCanvasAgentTools(): Array<() => void> {
       id: 'canvas_connect_nodes',
       title: '连接画布节点',
       description: [
-        '在两个已存在的画布节点之间创建一条连线，方向是 sourceId（提供内容）→ targetId（消费内容）。',
+        '把 sourceIds 中的输出节点统一连到 targetId 接收节点；每次 1–50 个，整批校验后一次写入、一次撤销，重复节点和已有连线自动跳过。',
+        '兼容旧参数 sourceId；sourceId 与 sourceIds 必须且只能提供一种。方向固定为输出节点 → 接收节点。',
         '端口固定为右出左入（sourceHandle=right、targetHandle=left），不会自动移动节点。连接前先用 canvas_query(detail=true) 检查位置：上游放左、下游放右，目标左边界应在源节点右边界之后并预留至少 80 画布单位；否则先用 canvas_update_nodes 调整。连接后检查返回的 layout.warning。',
         '连线会把上游节点的输出作为下游生成节点的参考输入，所以 targetId 必须是生成器节点：',
-        'source-* 与 comment 只能作为 sourceId。',
+        'source-* 与 comment 只能作为输出节点。导演台不能反接回它所属的分镜表；批量连接只支持可见的普通节点，不含分组、笔记和插件节点。',
+        '返回 connections 中每条线的实际端口、是否已连接和布局提醒，以及 createdCount、skippedCount；单源同时保留旧的 sourceId、layout 返回字段。',
       ].join(''),
       inputSchema: {
         type: 'object',
-        required: ['sourceId', 'targetId'],
+        required: ['targetId'],
         additionalProperties: false,
         properties: {
-          sourceId: { type: 'string', minLength: 1, maxLength: 120 },
-          targetId: { type: 'string', minLength: 1, maxLength: 120 },
+          sourceIds: { type: 'array', minItems: 1, maxItems: 50,
+            items: { type: 'string', minLength: 1, maxLength: 120 },
+            description: '要输出内容的节点 ID 列表，推荐使用；不能与 sourceId 同时传入。' },
+          sourceId: { type: 'string', minLength: 1, maxLength: 120, description: '旧版单个输出节点 ID，与 sourceIds 二选一。' },
+          targetId: { type: 'string', minLength: 1, maxLength: 120, description: '接收所有输出的一个生成节点 ID。' },
         },
       },
       effect: 'canvas_write',
       authorize: authorizeCurrentProject,
-      summarizeInput: (input) => `连接 ${input.sourceId} → ${input.targetId}`,
+      summarizeInput: (input) => `连接 ${input.sourceIds?.length ?? 1} 个输出节点 → ${input.targetId}`,
       execute: async (context, input) => {
         assertCanvasRevision(context);
+        if ((input.sourceId !== undefined) === (input.sourceIds !== undefined)) {
+          const message = 'sourceId 与 sourceIds 必须且只能提供一种';
+          return { status: 'error', summary: message, modelContent: message };
+        }
+        const requested = input.sourceIds ?? [input.sourceId!];
+        if (requested.length < 1 || requested.length > 50) {
+          const message = '每次请提供 1 到 50 个输出节点';
+          return { status: 'error', summary: message, modelContent: message };
+        }
+        const sourceIds = [...new Set(requested)];
         const store = useAppStore.getState();
-        const sourceNode = store.nodes.find((node) => node.id === input.sourceId);
+        const sources = sourceIds.map((id) => store.nodes.find((node) => node.id === id));
         const targetNode = store.nodes.find((node) => node.id === input.targetId);
-        if (!sourceNode || !targetNode) {
+        if (sources.some((node) => !node) || !targetNode) {
           return { status: 'error', summary: '源节点或目标节点不存在', modelContent: '源节点或目标节点不存在' };
         }
-        if (input.sourceId === input.targetId) {
+        if (sourceIds.includes(input.targetId)) {
           return { status: 'error', summary: '不能连接节点自身', modelContent: '不能连接节点自身' };
         }
         // 素材节点没有输入，连进去的线永远不会被读取，多半是模型把两端写反了
         if (isSourceOnlyNode(targetNode)) {
-          const message = `目标节点「${targetNode.data.label}」是素材节点，只能作为连线起点；两端写反了就交换 sourceId 与 targetId`;
+          const message = `目标节点「${targetNode.data.label}」是素材节点，只能作为输出节点；请核对输出节点列表与接收节点是否写反`;
           return { status: 'error', summary: message, modelContent: message };
         }
-        const layout = describeConnectionLayout(input.sourceId, input.targetId, store.nodes);
-        const existing = store.edges.find((edge) => edge.source === input.sourceId && edge.target === input.targetId);
-        if (existing) {
-          return {
-            status: 'success', summary: layout?.warning ? '节点已经连接，但布局需调整' : '节点已经连接',
-            modelContent: JSON.stringify({
-              sourceId: input.sourceId, targetId: input.targetId, alreadyConnected: true,
-              sourceHandle: existing.sourceHandle ?? null, targetHandle: existing.targetHandle ?? null,
-              layout, revision: store.getCurrentRevision(),
-            }),
-          };
+        if (targetNode.data.type === 'ai-shotlist' && sources.some((node) => node!.data.type === 'ai-director'
+          && node!.data.shotlistProductionSource?.kind === 'director'
+          && node!.data.shotlistProductionSource.nodeId === input.targetId)) {
+          const message = '导演台不能反接回它所属的分镜表，请使用分镜表 → 导演台';
+          return { status: 'error', summary: message, modelContent: message };
         }
-        store.onConnect({
-          source: input.sourceId,
-          target: input.targetId,
-          sourceHandle: 'right',
-          targetHandle: 'left',
+        if (sourceIds.length > 1 && [...sources, targetNode].some((node) => !isBatchConnectableNode(node!)
+          || (node!.parentId && store.nodes.find((parent) => parent.id === node!.parentId)?.data.groupCollapsed))) {
+          const message = '批量连接只支持可见的普通节点，请先展开分组并核对节点类型';
+          return { status: 'error', summary: message, modelContent: message };
+        }
+        const connections = sourceIds.map((sourceId) => {
+          const existing = store.edges.find((edge) => edge.source === sourceId && edge.target === input.targetId);
+          return {
+            sourceId, targetId: input.targetId, alreadyConnected: !!existing,
+            sourceHandle: existing ? existing.sourceHandle ?? null : 'right',
+            targetHandle: existing ? existing.targetHandle ?? null : 'left',
+            layout: describeConnectionLayout(sourceId, input.targetId, store.nodes),
+          };
         });
-        useAppStore.getState().incrementRevision();
+        const pending = connections.filter((connection) => !connection.alreadyConnected);
+        if (pending.length) {
+          if (sourceIds.length > 1) store.connectSelectedNodes(sourceIds, input.targetId, context.projectId);
+          else store.onConnect({ source: sourceIds[0], target: input.targetId, sourceHandle: 'right', targetHandle: 'left' });
+          // Store 可能拒绝失效的连接，先核对结果再报告成功。
+          if (pending.some((connection) => !useAppStore.getState().edges.some((edge) =>
+            edge.source === connection.sourceId && edge.target === input.targetId))) {
+            return { status: 'error', summary: '连接未写入，请重新读取当前项目与节点', modelContent: '连接未写入，请重新读取当前项目与节点' };
+          }
+          useAppStore.getState().incrementRevision();
+        }
+        const needsLayout = connections.some((connection) => connection.layout?.warning);
         return {
           status: 'success',
-          summary: layout?.warning ? '已创建节点连线，但布局需调整' : '已创建节点连线',
+          summary: `${pending.length ? `已创建 ${pending.length} 条连线` : '节点已经连接'}${needsLayout ? '，但布局需调整' : ''}`,
           modelContent: JSON.stringify({
-            sourceId: input.sourceId,
-            targetId: input.targetId,
-            sourceHandle: 'right', targetHandle: 'left', layout,
+            ...(connections.length === 1 ? connections[0] : {}),
+            sourceIds, targetId: input.targetId, connections,
+            createdCount: pending.length, skippedCount: requested.length - pending.length,
             revision: useAppStore.getState().getCurrentRevision(),
           }),
         };

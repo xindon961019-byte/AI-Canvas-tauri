@@ -27,7 +27,7 @@ import GooeyBtn from './shared/GooeyBtn';
 import ResizeHandle from './shared/ResizeHandle';
 import { useNodeRename } from './shared/useNodeRename';
 import { useAppStore } from '../../store/useAppStore';
-import { saveDataUrlToProjectData, buildNodeFileName } from '../../services/fileService';
+import { saveDataUrlToProjectData, buildNodeFileName, isTauriEnv } from '../../services/fileService';
 import { collectDirectorImageUrls } from '../../services/directorDeskService';
 import {
   DIRECTOR_RUNTIME_OPTIONS,
@@ -48,13 +48,16 @@ import {
   subscribeDirectorNodeOperations,
 } from '../../services/directorNodeOperationService';
 import type { DirectorNodeOperationRequest, DirectorOperationSnapshot } from '../../types/directorOperation';
-import { subscribeDirectorPrevisOpen } from '../../services/directorPrevisService';
+import { loadDirectorPrevisScene, saveDirectorPrevisOutput, subscribeDirectorPrevisOpen } from '../../services/directorPrevisService';
 import LazyLoadBoundary, { LazyLoadFallback } from '../shared/LazyLoadBoundary';
 
 const DirectorPrevisDialog = lazy(() => import('../director/DirectorPrevisDialog'));
 
 const DEFAULT_W = 320;
 const DEFAULT_H = 240;
+
+// 多个导演节点一起载入时，逐个截图并释放 WebGL，避免互相打断 revision 守卫。
+let previsCaptureQueue = Promise.resolve();
 
 function formatBlenderJobStatus(status: DirectorOperationSnapshot): string {
   const phaseLabels: Record<string, string> = {
@@ -142,6 +145,64 @@ function DirectorDeskNode({
   const width = (data.nodeWidth as number) || DEFAULT_W;
   const height = (data.nodeHeight as number) || DEFAULT_H;
   const deskTheme: 'dark' | 'light' = theme === 'light' ? 'light' : 'dark';
+  const projectId = useAppStore((s) => s.currentProjectId);
+  const previsReference = data.directorPrevisScene;
+  const capturedPrevis = useRef(captureUrls.length ? previsReference?.sha256 : undefined);
+  const lastPrevisImage = useRef(data.imageUrl);
+  const captureBinding = useRef({ projectId, instanceId });
+
+  useEffect(() => {
+    if (captureBinding.current.projectId !== projectId || captureBinding.current.instanceId !== instanceId) {
+      captureBinding.current = { projectId, instanceId };
+      capturedPrevis.current = data.imageUrl ? previsReference?.sha256 : undefined;
+      lastPrevisImage.current = data.imageUrl;
+    }
+    // 面板里手动同步过的当前帧已经是最新输出，不再用起始帧覆盖它。
+    if (data.imageUrl && data.imageUrl !== lastPrevisImage.current) {
+      capturedPrevis.current = previsReference?.sha256;
+    }
+    lastPrevisImage.current = data.imageUrl;
+    if (runtimeKind !== 'ai-threejs' || !projectId || !previsReference || !isTauriEnv()
+      || previsOpen || data.status === 'loading' || capturedPrevis.current === previsReference.sha256) return;
+    const controller = new AbortController();
+    previsCaptureQueue = previsCaptureQueue.then(async () => {
+      if (controller.signal.aborted) return;
+      const state = useAppStore.getState();
+      const current = state.nodes.find((node) => node.id === id)?.data;
+      if (state.currentProjectId !== projectId || current?.directorInstanceId !== instanceId
+        || current?.directorRuntimeKind !== 'ai-threejs' || current.status === 'loading'
+        || current?.directorPrevisScene?.sha256 !== previsReference.sha256) return;
+      setBusy('同步预演截图…');
+      try {
+        await saveDirectorPrevisOutput(id, 'image', async (signal) => {
+          const scene = await loadDirectorPrevisScene(projectId, previsReference);
+          signal.throwIfAborted();
+          const { createDirectorPrevisRenderer } = await import('../../services/directorPrevisRenderer');
+          signal.throwIfAborted();
+          const mount = document.createElement('div');
+          mount.className = 'fixed invisible pointer-events-none h-48 w-80';
+          document.body.appendChild(mount);
+          let renderer: ReturnType<typeof createDirectorPrevisRenderer> | undefined;
+          try {
+            renderer = createDirectorPrevisRenderer(mount, scene);
+            // 未打开面板时，播放位置从零开始；只截摄影机画面。
+            return renderer.capture(0);
+          } finally {
+            renderer?.dispose();
+            mount.remove();
+          }
+        }, controller.signal);
+        capturedPrevis.current = previsReference.sha256;
+      } catch (error) {
+        if (!controller.signal.aborted && !isAbortError(error)) {
+          showToast('预演自动截图失败，可点击“同步当前帧”重试', 'error');
+        }
+      } finally {
+        if (!controller.signal.aborted) setBusy(null);
+      }
+    });
+    return () => { controller.abort(); setBusy(null); };
+  }, [data.imageUrl, data.status, id, instanceId, previsOpen, previsReference, projectId, runtimeKind, showToast]);
 
   useEffect(() => {
     if (runtimeKind !== 'ai-threejs') return;

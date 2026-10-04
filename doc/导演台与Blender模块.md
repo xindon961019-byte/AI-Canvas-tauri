@@ -24,8 +24,9 @@
 - 两个生成入口共享节点加载状态、重复请求保护与取消；修改已有场景时先校验并载入当前场景。项目、实例、运行时、场景引用、提示词、模型或显式引用的节点/画面变化后不发布结果；失败保留上一场景。浮动输入框关闭后允许后台生成，弹窗发起的操作在弹窗关闭时取消；控制器只在内存。
 - 预演使用独立合同和 `directorPrevisScene`，不覆盖 Blender Scene/Manifest。场景保存在 `director/previs/<SHA-256>.json`，节点只保存项目相对引用、摘要与大小；读取验证摘要、字节数与合同。文件保留到项目删除，支持撤销、重开、复制及整体导入导出。
 - 预演生成/保存/媒体回写绑定项目、节点实例、运行时、场景引用与画布派生守卫。弹窗关闭会取消其发起的操作，上下文变化使在途结果失效；失败保留上一场景。截图与 24fps MP4 只渲染摄影机视角，空间辅助轨迹不进入输出；编码失败显式报错。普通运行时帧/视频 RPC 不自动回退，预演输出由面板宿主执行。
+- 桌面端的 AI 预演节点已有场景但没有截图时自动补截；场景引用更新后刷新摄影机起始帧，包括 MCP 写入和节点生成。面板打开时暂缓自动截图，手动同步的当前帧保持不变。多个节点排队渲染并立即释放 WebGL，复用输出保存与派生守卫；失败保留旧图并提示手动重试，不自动调用模型或导出视频。
 - MCP 可用 `director_get_previs_schema` 读取合同和完整示例，由外部大模型生成白名单场景 JSON；通过已有 `canvas_create_nodes` 创建 `ai-director`（或查询已有节点），`director_set_runtime` 选择 `ai-threejs`，再以 `director_set_previs_scene` 写入完整 `sceneJson` 字符串。`director_get_previs_scene` 返回已保存场景，未保存时为 `null`；修改前可读回场景。场景响应走 MCP 瞬时完整内容，避开模型结果截断，不把原始 JSON 放进消息或任务摘要。用户双击节点即可播放、调整和输出。
-- 这三项预演工具只在当前项目的 MCP 控制会话开放；两项读取为 `read`，写入为 `canvas_write`，复用 Registry/Policy 与预演写回守卫。MCP 自主执行，无需逐次审批；不额外调用应用内模型，不执行外部 JS，不自动生成媒体，不自动重试写入。
+- 这三项预演工具只在当前项目的 MCP 控制会话开放；两项读取为 `read`，写入为 `canvas_write`，复用 Registry/Policy 与预演写回守卫。MCP 自主执行，无需逐次审批；不额外调用应用内模型，不执行外部 JS，不自动重试写入。场景写入后的截图由节点自动同步，不额外发起付费媒体生成。
 - 网页模式可查看、播放和调整示例，场景与输出的项目文件保存需要 Tauri 桌面端；真实模型/原生存储/编码验收与前端浏览器验证分开记录。
 - Blender 固定包 1.5.0 声明 Windows x86_64、macOS x86_64/aarch64 目标，版本策略接受 4.5.x、5.0.x、5.1.x、5.2.x 稳定系列，不锁补丁号；预发行版和未纳入的系列不自动放行。安装还须与应用架构匹配；版本策略不代表 Blender 官方为每个架构提供所有版本。跨平台/版本的真实桌面验收状态见专项计划。
 - 唯一安装自动使用；多个安装或未发现时由系统选择器手选。Windows 选择 `blender.exe`，macOS 选择 `.app`，原生仅解析其固定 `Contents/MacOS/Blender`。手选结果只保存在本机原生私有目录；旧安装失效不阻断其他安装发现。macOS 有界扫描系统/用户 Applications、固定 Steam 路径和 PATH，不扫描整盘。
@@ -39,6 +40,7 @@
 
 - 定向回归：[Scene 服务](../tests/services/directorSceneService.test.ts)、[Blender 运行时](../tests/services/directorBlenderRuntimeService.test.ts)、[节点操作](../tests/services/directorNodeOperationService.test.ts)；原生测试按专项计划选择。
 - AI 预演回归：[合同](../tests/services/directorPrevisSchema.test.ts)、[插值](../tests/services/directorPrevisRenderer.test.ts)、[生成与写回](../tests/services/directorPrevisService.test.ts)、[弹窗文件失效保护](../tests/components/directorPrevisDialog.test.tsx)。数字设置统一复用 UI Kit NumberStepper。
+- 节点自动截图回归：[导演节点](../tests/components/directorDeskVideoExport.test.tsx)，覆盖已有场景补截、场景更新、手动截图保留、多节点排队、资源释放、失败和过期写回；组件测试模拟渲染器与项目文件。浏览器已验证隐藏容器生成 1920×1080 的摄影机 PNG 并释放容器；原生项目保存仍需桌面验收。
 - 引用生成回归：[节点生成与真实协议请求体](../tests/services/generationPrevis.test.ts)、[完整分镜表引用](../tests/services/shotlistMention.test.ts)，覆盖显式图片/整表、图片上限、取消、项目变化及旧运行时路由；模型响应和项目文件服务使用模拟实现，实际模型生成与原生保存仍需桌面验收。
 - MCP 预演回归：[导演工具](../tests/services/chat/directorTools.test.ts) 覆盖完整 MCP 发现/创建/选择/写入/读回链路、大场景完整响应、输入校验、撤销重做、取消、过期结果与脱敏；项目文件使用模拟服务，不替代桌面客户端实机验收。
 - 架构决策：[双运行时与场景权威](./adr/0010-director-dual-runtime-and-blender-scene-authority.md)、[轻量运行资源](./adr/0003-director-desk-prebuilt-runtime.md)。

@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Node } from '@xyflow/react';
 import { useAppStore } from '../../../src/store/useAppStore';
 import { registerCanvasAgentTools } from '../../../src/services/chat/tools/canvasTools';
+import { registerShotlistAgentTools } from '../../../src/services/chat/tools/shotlistTools';
+import { validateAgentToolInput } from '../../../src/services/chat/agentToolSchemas';
 import {
   clearAgentToolRegistryForTests,
   getAgentTool,
@@ -56,6 +58,74 @@ beforeEach(() => {
 });
 
 describe('canvas agent tools', () => {
+  it('connects the shotlist and per-shot briefs into downstream directors', async () => {
+    registerShotlistAgentTools();
+    useAppStore.setState({ projectLoadStatus: 'ready' });
+    const created = await getAgentTool('canvas_create_nodes')!.execute(context(), { nodes: [
+      { type: 'ai-shotlist', label: '雨夜分镜', prompt: '雨夜车站重逢', x: 1000, y: 1000 },
+    ] });
+    expect(created.status).toBe('success');
+    const sheetId = JSON.parse(created.modelContent).nodes[0].id;
+    const edited = await getAgentTool('shotlist_update_rows')!.execute(context(), {
+      nodeId: sheetId, mode: 'append', rows: [
+        { content: '旅人走入车站', duration: 5 },
+        { content: '两人重逢', duration: 7 },
+      ],
+    });
+    expect(edited.status).toBe('success');
+    const rowIds = useAppStore.getState().nodes.find((item) => item.id === sheetId)!.data.shotlistRows!.map((row) => row.id);
+    const prepared = await getAgentTool('shotlist_prepare_production')!.execute(context(), {
+      nodeId: sheetId, rowIds, kind: 'director',
+    });
+    expect(prepared.status).toBe('success');
+    const state = useAppStore.getState();
+    const directors = state.nodes.filter((item) => item.type === 'ai-director');
+    expect(directors).toHaveLength(2);
+    for (const director of directors) {
+      expect(state.edges).toContainEqual(expect.objectContaining({
+        source: sheetId, target: director.id, sourceHandle: 'right', targetHandle: 'left',
+      }));
+      const incoming = state.edges.filter((edge) => edge.target === director.id);
+      expect(incoming).toHaveLength(2);
+      const brief = state.nodes.find((item) => item.id === incoming.find((edge) => edge.source !== sheetId)!.source)!;
+      expect(brief.type).toBe('source-text');
+      expect(brief.position.x + brief.data.nodeWidth!).toBeLessThanOrEqual(director.position.x - 80);
+      expect(director.data.shotlistProductionSource?.nodeId).toBe(sheetId);
+    }
+    expect(state.edges.some((edge) => edge.target === sheetId && directors.some((director) => director.id === edge.source))).toBe(false);
+    expect(state.nodes.find((item) => item.id === sheetId)!.data.prompt).toBe('雨夜车站重逢');
+    expect(executeGeneration).not.toHaveBeenCalled();
+  });
+
+  it('creates shotlists at the manual default size and keeps mixed batches apart', async () => {
+    const result = await getAgentTool('canvas_create_nodes')!.execute(context(), { nodes: [
+      { type: 'ai-shotlist', label: '雨夜分镜' },
+      { type: 'ai-text', label: '镜头说明', content: '蓝衣旅人走向等候者。' },
+      { type: 'ai-shotlist', label: '重逢分镜' },
+      { type: 'ai-shotlist', label: '下一行分镜' },
+    ] });
+    expect(result.status).toBe('success');
+    const created = useAppStore.getState().nodes.slice(2);
+    for (const sheet of created.filter((item) => item.type === 'ai-shotlist')) {
+      expect(sheet.data).toMatchObject({ nodeWidth: 800, nodeHeight: 400 });
+    }
+    const read = await getAgentTool('canvas_query')!.execute(context(), {
+      nodeIds: created.map((item) => item.id), detail: true,
+    });
+    const reported = JSON.parse(read.modelContent).nodes;
+    expect(reported[0].size).toEqual({ width: 800, height: 400 });
+    for (const [index, item] of created.entries()) {
+      for (const other of created.slice(index + 1)) {
+        const separated = item.position.x + item.data.nodeWidth! <= other.position.x
+          || other.position.x + other.data.nodeWidth! <= item.position.x
+          || item.position.y + item.data.nodeHeight! <= other.position.y
+          || other.position.y + other.data.nodeHeight! <= item.position.y;
+        expect(separated).toBe(true);
+      }
+    }
+    expect(executeGeneration).not.toHaveBeenCalled();
+  });
+
   it('creates image, video and audio nodes with explicit generation settings and reads them back', async () => {
     const result = await getAgentTool('canvas_create_nodes')!.execute(context(), { nodes: [
       { type: 'ai-image', label: '竖屏分镜', prompt: '小满在酒馆门口', aspectRatio: '9:16', imageSize: '2K', batchCount: 2 },
@@ -657,6 +727,98 @@ describe('canvas agent tools', () => {
       sourceHandle: 'right',
       targetHandle: 'left',
     });
+  });
+
+  it('connects an output list once, skips duplicates and restores the batch with one undo', async () => {
+    const beforeEdges = [{ id: 'existing', source: 'image', target: 'target', sourceHandle: 'right', targetHandle: 'left' }];
+    useAppStore.setState({ nodes: [
+      node('image', { type: 'source-image' }, { x: 0, y: 0 }),
+      node('brief', { type: 'source-text', output: '镜头说明' }, { x: 0, y: 250 }),
+      node('target', { prompt: '原提示词' }, { x: 1000, y: 0 }),
+    ], edges: beforeEdges });
+    const commit = vi.spyOn(useAppStore.getState(), 'commitToHistory');
+    const revision = useAppStore.getState().getCurrentRevision();
+    const tool = getAgentTool('canvas_connect_nodes')!;
+    const result = await tool.execute(context(), { sourceIds: ['image', 'image', 'brief'], targetId: 'target' });
+    expect(result.status).toBe('success');
+    expect(JSON.parse(result.modelContent)).toMatchObject({
+      sourceIds: ['image', 'brief'], targetId: 'target', createdCount: 1, skippedCount: 2,
+      connections: [
+        { sourceId: 'image', targetId: 'target', alreadyConnected: true, sourceHandle: 'right', targetHandle: 'left' },
+        { sourceId: 'brief', targetId: 'target', alreadyConnected: false, sourceHandle: 'right', targetHandle: 'left' },
+      ],
+    });
+    expect(useAppStore.getState().edges).toHaveLength(2);
+    expect(useAppStore.getState().nodes.find((item) => item.id === 'target')!.data.prompt).toContain('@{brief:brief}');
+    expect(useAppStore.getState().getCurrentRevision()).toBe(revision + 1);
+    expect(commit).toHaveBeenCalledTimes(1);
+    const repeated = await tool.execute(context(), { sourceIds: ['image', 'brief'], targetId: 'target' });
+    expect(JSON.parse(repeated.modelContent)).toMatchObject({ createdCount: 0, skippedCount: 2 });
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().getCurrentRevision()).toBe(revision + 1);
+    await useAppStore.getState().undo();
+    expect(useAppStore.getState().edges).toEqual(beforeEdges);
+    await useAppStore.getState().redo();
+    expect(useAppStore.getState().edges).toContainEqual(expect.objectContaining({
+      source: 'brief', target: 'target', sourceHandle: 'right', targetHandle: 'left',
+    }));
+  });
+
+  it('accepts one output in a list and keeps the old single-source result fields', async () => {
+    const tool = getAgentTool('canvas_connect_nodes')!;
+    expect(validateAgentToolInput(tool.inputSchema, { sourceIds: ['n2'], targetId: 'n1' }).valid).toBe(true);
+    expect(validateAgentToolInput(tool.inputSchema, { sourceId: 'n2', targetId: 'n1' }).valid).toBe(true);
+    expect(validateAgentToolInput(tool.inputSchema, { sourceIds: Array(51).fill('n2'), targetId: 'n1' }).valid).toBe(false);
+    const result = await tool.execute(context(), { sourceIds: ['n2'], targetId: 'n1' });
+    expect(result.status).toBe('success');
+    expect(JSON.parse(result.modelContent)).toMatchObject({
+      sourceId: 'n2', targetId: 'n1', sourceHandle: 'right', targetHandle: 'left', createdCount: 1,
+    });
+  });
+
+  it.each([
+    { targetId: 'n1' },
+    { sourceId: 'n2', sourceIds: ['n2'], targetId: 'n1' },
+    { sourceIds: [], targetId: 'n1' },
+    { sourceIds: ['n2', 'missing'], targetId: 'n1' },
+    { sourceIds: ['n2', 'n1'], targetId: 'n1' },
+    { sourceIds: ['n1'], targetId: 'n2' },
+  ])('rejects an invalid output list without partial writes: %j', async (input) => {
+    const before = useAppStore.getState();
+    const revision = before.getCurrentRevision();
+    const commit = vi.spyOn(before, 'commitToHistory');
+    const result = await getAgentTool('canvas_connect_nodes')!.execute(context(), input);
+    expect(result.status).toBe('error');
+    expect(useAppStore.getState().edges).toBe(before.edges);
+    expect(useAppStore.getState().nodes).toBe(before.nodes);
+    expect(commit).not.toHaveBeenCalled();
+    expect(useAppStore.getState().getCurrentRevision()).toBe(revision);
+  });
+
+  it.each(['sourceId', 'sourceIds'] as const)('rejects a director feeding its own shotlist through %s', async (field) => {
+    useAppStore.setState({ nodes: [
+      node('sheet', { type: 'ai-shotlist' }),
+      node('director', { type: 'ai-director', shotlistProductionSource: { nodeId: 'sheet', rowId: 'row', kind: 'director' } }),
+      node('other'),
+    ], edges: [] });
+    const result = await getAgentTool('canvas_connect_nodes')!.execute(context(), {
+      ...(field === 'sourceId' ? { sourceId: 'director' } : { sourceIds: ['other', 'director'] }), targetId: 'sheet',
+    });
+    expect(result.status).toBe('error');
+    expect(result.summary).toContain('分镜表 → 导演台');
+    expect(useAppStore.getState().edges).toEqual([]);
+    expect(useAppStore.getState().history).toEqual([]);
+  });
+
+  it('rejects a collapsed batch source before writing any other connection', async () => {
+    const source = { ...node('n2', { type: 'source-text' }), parentId: 'group' };
+    useAppStore.setState({ nodes: [useAppStore.getState().nodes[0], source,
+      node('other', { type: 'source-image' }), { ...node('group', { groupCollapsed: true }), type: 'group' },
+    ], edges: [] });
+    const result = await getAgentTool('canvas_connect_nodes')!.execute(context(), { sourceIds: ['other', 'n2'], targetId: 'n1' });
+    expect(result.status).toBe('error');
+    expect(result.summary).toContain('展开分组');
+    expect(useAppStore.getState().edges).toEqual([]);
   });
 
   it('removes only the edges matching the given endpoints', async () => {
