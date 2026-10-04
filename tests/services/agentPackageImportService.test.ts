@@ -89,6 +89,27 @@ describe('agentPackageImportService', () => {
     expect(mocks.invoke).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['文件夹', selectAgentPackageFolder, 'G:/agents/drama'],
+    ['压缩包', selectAgentPackageArchive, 'G:/agents/drama.tar.gz'],
+  ] as const)('%s 导入保留原生字符串错误，供面板显示具体失败原因', async (_label, select, path) => {
+    mocks.open.mockResolvedValue(path);
+    const message = '智能体压缩包包含不允许的链接或设备文件';
+    mocks.invoke.mockRejectedValue(message);
+
+    await expect(select()).rejects.toBeInstanceOf(Error);
+    await expect(select()).rejects.toThrow(message);
+  });
+
+  it('导入不改写既有 Error 或未知错误，由面板保留错误详情或使用兜底文案', async () => {
+    mocks.open.mockResolvedValue('G:/agents/drama.tar.gz');
+    const error = new Error('磁盘可用空间不足');
+    mocks.invoke.mockRejectedValueOnce(error);
+    await expect(selectAgentPackageArchive()).rejects.toBe(error);
+    mocks.invoke.mockRejectedValueOnce(null);
+    await expect(selectAgentPackageArchive()).rejects.toBeNull();
+  });
+
   it('通过脱敏 sourceId 移除原生来源注册', async () => {
     const result = {
       sourceId: 'source-1',

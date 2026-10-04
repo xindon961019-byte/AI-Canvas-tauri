@@ -45,6 +45,7 @@ const MAX_SCAN_DEPTH: usize = 64;
 const FREE_SPACE_RESERVE: u64 = 256 * 1024 * 1024;
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_ARCHIVE_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_INSTRUCTION_BYTES: u64 = 256 * 1024;
 const MAX_INSTRUCTION_CHARS: usize = 24_000;
 const MAX_READ_TEXT_BYTES: u64 = 1024 * 1024;
@@ -895,6 +896,21 @@ fn preflight_archive(path: &Path) -> Result<ArchivePreflight, String> {
         }
         let entry = item.map_err(|_| "无法读取智能体压缩包条目".to_string())?;
         let entry_type = entry.header().entry_type();
+        // 全局 PAX 是归档元数据，不是可落盘的文件；局部 PAX 仍由 tar 解析实际路径。
+        if entry_type.is_pax_global_extensions() {
+            let size = entry
+                .header()
+                .size()
+                .map_err(|_| "智能体压缩包元数据大小无效".to_string())?;
+            if size > MAX_ARCHIVE_METADATA_BYTES {
+                return Err("智能体压缩包元数据超过大小限制".to_string());
+            }
+            expanded_bytes = expanded_bytes.saturating_add(size);
+            if expanded_bytes > MAX_EXPANDED_BYTES {
+                return Err("智能体压缩包展开后总体积超过限制".to_string());
+            }
+            continue;
+        }
         if !entry_type.is_file() && !entry_type.is_dir() {
             return Err("智能体压缩包包含不允许的链接或设备文件".to_string());
         }
@@ -949,6 +965,20 @@ fn extract_archive(path: &Path, staging: &Path) -> Result<(), String> {
         }
         let mut entry = item.map_err(|_| "无法读取智能体压缩包条目".to_string())?;
         let entry_type = entry.header().entry_type();
+        if entry_type.is_pax_global_extensions() {
+            let size = entry
+                .header()
+                .size()
+                .map_err(|_| "智能体压缩包元数据大小无效".to_string())?;
+            if size > MAX_ARCHIVE_METADATA_BYTES {
+                return Err("智能体压缩包元数据超过大小限制".to_string());
+            }
+            expanded_bytes = expanded_bytes.saturating_add(size);
+            if expanded_bytes > MAX_EXPANDED_BYTES {
+                return Err("智能体压缩包展开后总体积超过限制".to_string());
+            }
+            continue;
+        }
         if !entry_type.is_file() && !entry_type.is_dir() {
             return Err("智能体压缩包包含不允许的链接或设备文件".to_string());
         }
@@ -1612,6 +1642,137 @@ mod tests {
             discover_package_root(&staging).unwrap(),
             staging.join("demo")
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn archive_accepts_global_pax_metadata_without_extracting_it() {
+        let root = temporary_directory("global-pax-archive");
+        let archive = root.join("github.tar.gz");
+        let metadata = b"15 comment=git\n";
+        write_test_archive(
+            &archive,
+            &[
+                ("pax_global_header", metadata, EntryType::XGlobalHeader),
+                ("demo/AGENTS.md", b"# Agent", EntryType::Regular),
+                ("demo/skills/a/SKILL.md", b"# Skill", EntryType::Regular),
+            ],
+        );
+        let preflight = preflight_archive(&archive).expect("全局 PAX 元数据应通过预检");
+        assert_eq!(preflight.expanded_bytes, 14 + metadata.len() as u64);
+        let staging = root.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        extract_archive(&archive, &staging).expect("含 PAX 元数据的归档应解压");
+        assert!(!staging.join("pax_global_header").exists());
+        let package_root = discover_package_root(&staging).unwrap();
+        assert_eq!(package_root, staging.join("demo"));
+        let preview = inspect_source(
+            &package_root,
+            "src_pax_archive",
+            AgentSourceType::Archive,
+            "demo",
+        )
+        .expect("解压结果应通过智能体扫描");
+        assert_eq!(preview.health, "ready");
+        assert_eq!(preview.skill_count, 1);
+        assert_eq!(preview.file_count, 2);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn archive_with_global_pax_still_rejects_links_and_special_files() {
+        for entry_type in [
+            EntryType::Symlink,
+            EntryType::Link,
+            EntryType::Char,
+            EntryType::Block,
+            EntryType::Fifo,
+        ] {
+            let root = temporary_directory("global-pax-unsafe-entry");
+            let archive = root.join("unsafe.tar.gz");
+            write_test_archive(
+                &archive,
+                &[
+                    (
+                        "pax_global_header",
+                        b"15 comment=git\n",
+                        EntryType::XGlobalHeader,
+                    ),
+                    ("AGENTS.md", b"# Agent", EntryType::Regular),
+                    ("unsafe", b"", entry_type),
+                ],
+            );
+            assert_eq!(
+                preflight_archive(&archive).unwrap_err(),
+                "智能体压缩包包含不允许的链接或设备文件"
+            );
+            let staging = root.join("staging");
+            fs::create_dir_all(&staging).unwrap();
+            assert_eq!(
+                extract_archive(&archive, &staging).unwrap_err(),
+                "智能体压缩包包含不允许的链接或设备文件"
+            );
+            fs::remove_dir_all(root).ok();
+        }
+    }
+
+    #[test]
+    fn archive_rejects_oversized_global_pax_metadata() {
+        let root = temporary_directory("oversized-global-pax");
+        let archive = root.join("oversized.tar.gz");
+        let metadata = vec![b'a'; MAX_ARCHIVE_METADATA_BYTES as usize + 1];
+        write_test_archive(
+            &archive,
+            &[
+                ("pax_global_header", &metadata, EntryType::XGlobalHeader),
+                ("AGENTS.md", b"# Agent", EntryType::Regular),
+            ],
+        );
+        assert_eq!(
+            preflight_archive(&archive).unwrap_err(),
+            "智能体压缩包元数据超过大小限制"
+        );
+        let staging = root.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        assert_eq!(
+            extract_archive(&archive, &staging).unwrap_err(),
+            "智能体压缩包元数据超过大小限制"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn archive_checks_effective_paths_after_local_pax_extensions() {
+        let root = temporary_directory("unsafe-local-pax-path");
+        let archive = root.join("unsafe-path.tar.gz");
+        write_test_archive(
+            &archive,
+            &[
+                (
+                    "pax_global_header",
+                    b"15 comment=git\n",
+                    EntryType::XGlobalHeader,
+                ),
+                ("AGENTS.md", b"# Agent", EntryType::Regular),
+                (
+                    "pax_local_header",
+                    b"22 path=../escape.txt\n",
+                    EntryType::XHeader,
+                ),
+                ("safe.txt", b"blocked", EntryType::Regular),
+            ],
+        );
+        assert_eq!(
+            preflight_archive(&archive).unwrap_err(),
+            "智能体包包含越界路径"
+        );
+        let staging = root.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        assert_eq!(
+            extract_archive(&archive, &staging).unwrap_err(),
+            "智能体包包含越界路径"
+        );
+        assert!(!root.join("escape.txt").exists());
         fs::remove_dir_all(root).ok();
     }
 

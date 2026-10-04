@@ -121,16 +121,14 @@ export default function HistoryTimelinePanel() {
     >
       <span
         aria-hidden="true"
-        className="canvas-history-hint absolute right-0 top-0 flex h-12 w-4 items-center justify-end
-                   transition-opacity duration-150"
+        className="canvas-history-hint absolute right-0 top-0 flex h-12 w-4 items-center justify-end"
       >
-        <span className="h-8 w-0.5 rounded-full bg-canvas-text-muted/35" />
+        <span className="h-8 w-0.5 shrink-0 rounded-full bg-canvas-text-muted opacity-60" />
       </span>
       <div
         className="canvas-history-panel glass-bevel glass-bevel--floating
                    absolute right-0 top-0
-                   pointer-events-none opacity-0
-                   transition-opacity duration-150 ease-out"
+                   pointer-events-none opacity-0"
       >
       <div className="canvas-history-panel__head">
         <AnimatedButton

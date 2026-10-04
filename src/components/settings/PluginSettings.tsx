@@ -14,6 +14,7 @@ import type { PluginMarketplaceItem } from '../../services/plugins/pluginMarketp
 import { parsePluginManifest } from '../../services/plugins/pluginManifest';
 import { getPythonPluginRuntimeStatus } from '../../services/plugins/pluginRuntime';
 import { useAppStore } from '../../store/useAppStore';
+import { isExternalDropCaptured, setExternalDropCaptured } from '../../utils/dropCapture';
 import { getNodeTypeConfig } from '../../types';
 import type {
   PluginCategory,
@@ -337,6 +338,8 @@ async function resolveResourcePayloads(
 
 export default function PluginSettings() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const dropZoneRef = useRef<HTMLDivElement>(null);
+  const busyRef = useRef(false);
   const plugins = useAppStore((state) => state.installedPlugins);
   const installPluginBundle = useAppStore((state) => state.installPluginBundle);
   const setPluginEnabled = useAppStore((state) => state.setPluginEnabled);
@@ -468,7 +471,8 @@ export default function PluginSettings() {
   };
 
   const installFiles = async (files: PluginUploadFile[]) => {
-    if (files.length === 0) return;
+    if (busyRef.current || files.length === 0) return;
+    busyRef.current = true;
     setBusy(true);
     try {
       const manifests = files.filter(({ file }) => file.name === 'manifest.json');
@@ -494,6 +498,7 @@ export default function PluginSettings() {
     } catch (error) {
       showToast(pluginOperationErrorMessage(error, '插件安装失败'), 'error');
     } finally {
+      busyRef.current = false;
       setBusy(false);
       if (inputRef.current) inputRef.current.value = '';
     }
@@ -501,7 +506,8 @@ export default function PluginSettings() {
 
   // Tauri 原生目录选择/拖拽共用按 Manifest 读取的安装链。
   const installFromPaths = async (paths: string[], requireManifest = false) => {
-    if (busy || paths.length === 0) return;
+    if (busyRef.current || paths.length === 0) return;
+    busyRef.current = true;
     setBusy(true);
     try {
       const bundle = await readLocalPluginPackage(paths, requireManifest);
@@ -519,6 +525,7 @@ export default function PluginSettings() {
     } catch (error) {
       showToast(pluginOperationErrorMessage(error, '插件安装失败'), 'error');
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
@@ -530,21 +537,43 @@ export default function PluginSettings() {
   });
 
   useEffect(() => {
+    const previouslyCaptured = isExternalDropCaptured();
+    setExternalDropCaptured(true);
+    return () => setExternalDropCaptured(previouslyCaptured);
+  }, []);
+
+  useEffect(() => {
     if (!isTauriEnv()) return;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     void (async () => {
-      const { listen } = await import('@tauri-apps/api/event');
+      const { getCurrentWebview } = await import('@tauri-apps/api/webview');
       if (cancelled) return;
-      unlisten = await listen<{ paths: string[] }>('tauri://drag-drop', (event) => {
-        void installFromPathsRef.current(event.payload?.paths ?? []);
+      const release = await getCurrentWebview().onDragDropEvent(async ({ payload }) => {
+        if (cancelled) return;
+        if (payload.type === 'leave') {
+          setDragOver(false);
+          return;
+        }
+        const rect = dropZoneRef.current?.getBoundingClientRect();
+        const scale = window.devicePixelRatio || 1;
+        const x = payload.position.x / scale;
+        const y = payload.position.y / scale;
+        const inside = !!rect && x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+        setDragOver(inside && payload.type !== 'drop' && !busyRef.current);
+        if (payload.type !== 'drop' || !inside) return;
+        await installFromPathsRef.current(payload.paths, true);
       });
-    })();
+      if (cancelled) release();
+      else unlisten = release;
+    })().catch(() => {
+      if (!cancelled) showToast('拖放接收不可用，请点击选择插件文件夹', 'error');
+    });
     return () => {
       cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, [showToast]);
 
   const openPluginDirectory = async () => {
     if (busy) return;
@@ -582,11 +611,12 @@ export default function PluginSettings() {
 
   const handleDrop = async (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    event.stopPropagation();
     setDragOver(false);
-    if (busy) return;
+    // 桌面拖放由 WebView 事件处理；浏览器继续使用 DataTransfer。
+    if (isTauriEnv() || busyRef.current) return;
     try {
       const files = await droppedPluginFiles(event.dataTransfer);
-      // Tauri 原生拖拽下 DataTransfer 是空的，交给全局事件处理，避免误报和重复安装
       if (files.length === 0) return;
       await installFiles(files);
     } catch (error) {
@@ -605,6 +635,7 @@ export default function PluginSettings() {
             </p>
           </div>
           <motion.div
+            ref={dropZoneRef}
             className={`ui-dropzone mt-3${dragOver ? ' is-dragover' : ''}${busy ? ' pointer-events-none opacity-60' : ''}`}
             role="button"
             tabIndex={busy ? -1 : 0}
@@ -619,6 +650,7 @@ export default function PluginSettings() {
             }}
             onDragOver={(event) => {
               event.preventDefault();
+              event.stopPropagation();
               if (!busy) setDragOver(true);
             }}
             onDragLeave={() => setDragOver(false)}

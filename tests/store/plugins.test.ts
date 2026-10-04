@@ -987,3 +987,115 @@ describe('可信 Python 插件状态边界', () => {
     expect(getState().installedPlugins).toHaveLength(0);
   });
 });
+
+describe('插件注册表损坏的修复入口', () => {
+  it.each([
+    '插件信任注册表损坏',
+    '插件信任注册表及备份均损坏',
+  ])('exposes repair after a first install fails with %s', async (message) => {
+    // Tauri invoke 的原生错误可能直接是字符串；暂存与回滚均读取同一个注册表。
+    nativeMocks.invoke.mockRejectedValue(message);
+    const { slice, getState } = createSlice();
+
+    await expect(slice.installPluginBundle(pythonManifestText, pythonSource, {
+      trustedPythonConfirmed: true,
+    })).rejects.toThrow(`${message}；恢复原生插件注册失败：${message}`);
+
+    expect(getState().pluginRegistryRepairRequired).toBe(true);
+    expect(getState().installedPlugins).toEqual([]);
+    expect(dbMocks.savePluginToDb).not.toHaveBeenCalled();
+    expect(nativeMocks.invoke).not.toHaveBeenCalledWith('repair_plugin_registry');
+  });
+
+  it.each(['activation', 'rollback'])('exposes repair when update %s detects corruption', async (phase) => {
+    const previous = {
+      ...createInstalledPluginFixture('com.example.python-tool'),
+      manifest: JSON.parse(pythonManifestText),
+      source: pythonSource,
+    } as InstalledPlugin;
+    if (phase === 'rollback') {
+      dbMocks.savePluginToDb.mockRejectedValueOnce(new Error('IndexedDB save failed'));
+    }
+    nativeMocks.invoke.mockImplementation(async (command: string) => {
+      if (command === 'stage_plugin_revision') {
+        return { pluginId: previous.id, sourceDigest: SOURCE_DIGEST_B, revisionDigest: REVISION_DIGEST_B };
+      }
+      throw new Error(phase === 'activation' ? '插件信任注册表损坏' : '插件信任注册表及备份均损坏');
+    });
+    const { slice, getState } = createSlice([previous]);
+
+    await expect(slice.installPluginBundle(pythonManifestText, pythonSource, {
+      trustedPythonConfirmed: true,
+    })).rejects.toThrow('恢复原生插件注册失败');
+
+    expect(getState().pluginRegistryRepairRequired).toBe(true);
+    expect(getState().installedPlugins[0].sourceDigest).toBe(SOURCE_DIGEST_A);
+    expect(dbMocks.savePluginToDb).toHaveBeenLastCalledWith(previous);
+    expect(nativeMocks.invoke).not.toHaveBeenCalledWith('repair_plugin_registry');
+  });
+
+  it.each([true, false])('exposes repair when changing enabled to %s detects corruption', async (enabled) => {
+    const plugin = { ...createInstalledPluginFixture('corrupt-toggle'), enabled: !enabled };
+    nativeMocks.invoke.mockRejectedValue(new Error('插件信任注册表损坏'));
+    const { slice, getState } = createSlice([plugin]);
+
+    await expect(slice.setPluginEnabled(plugin.id, enabled)).rejects.toThrow('插件信任注册表损坏');
+
+    expect(getState().pluginRegistryRepairRequired).toBe(true);
+    expect(getState().installedPlugins[0].enabled).toBe(false);
+    expect(dbMocks.savePluginToDb).not.toHaveBeenCalled();
+  });
+
+  it('exposes repair when rolling back a toggle detects corruption', async () => {
+    const plugin = createInstalledPluginFixture('corrupt-toggle-rollback');
+    nativeMocks.invoke.mockResolvedValueOnce(null).mockRejectedValueOnce('插件信任注册表损坏');
+    dbMocks.savePluginToDb.mockRejectedValueOnce(new Error('IndexedDB save failed'));
+    const { slice, getState } = createSlice([plugin]);
+
+    await expect(slice.setPluginEnabled(plugin.id, false)).rejects.toThrow(
+      'IndexedDB save failed；恢复原生插件启停状态失败：插件信任注册表损坏',
+    );
+
+    expect(getState().pluginRegistryRepairRequired).toBe(true);
+    expect(getState().installedPlugins[0].enabled).toBe(false);
+  });
+
+  it.each(['无法读取插件信任注册表', '插件信任注册表路径不安全', '用户已取消插件原生高风险授权'])(
+    'does not expose repair for ordinary install or toggle errors: %s', async (message) => {
+      nativeMocks.invoke.mockRejectedValue(message);
+      const plugin = { ...createInstalledPluginFixture('ordinary-error'), enabled: false };
+      const { slice, getState } = createSlice([plugin]);
+
+      await expect(slice.installPluginBundle(pythonManifestText, pythonSource, {
+        trustedPythonConfirmed: true,
+      })).rejects.toThrow(message);
+      await expect(slice.setPluginEnabled(plugin.id, true)).rejects.toBe(message);
+
+      expect(getState().pluginRegistryRepairRequired).toBe(false);
+      expect(getState().installedPlugins).toEqual([plugin]);
+    },
+  );
+
+  it('keeps repair available after cancellation and allows installation after confirmed repair', async () => {
+    nativeMocks.invoke.mockRejectedValue('插件信任注册表损坏');
+    const { slice, getState } = createSlice();
+    await expect(slice.installPluginBundle(pythonManifestText, pythonSource, {
+      trustedPythonConfirmed: true,
+    })).rejects.toThrow('插件信任注册表损坏');
+
+    nativeMocks.invoke.mockRejectedValueOnce('用户已取消插件信任注册表修复');
+    await expect(slice.repairPluginRegistry()).rejects.toBe('用户已取消插件信任注册表修复');
+    expect(getState().pluginRegistryRepairRequired).toBe(true);
+
+    nativeMocks.invoke.mockResolvedValueOnce(true);
+    await slice.repairPluginRegistry();
+    expect(getState().pluginRegistryRepairRequired).toBe(false);
+
+    mockNativeSuccess();
+    await slice.installPluginBundle(pythonManifestText, pythonSource, {
+      trustedPythonConfirmed: true,
+    });
+    expect(getState().installedPlugins).toHaveLength(1);
+    expect(getState().installedPlugins[0].enabled).toBe(true);
+  });
+});

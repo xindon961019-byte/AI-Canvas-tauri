@@ -408,7 +408,12 @@
 
 /* 内置聊天助手展开时整体左移，让出助手面板的宽度（数值跟随 .chat-panel） */
 .canvas-history-wrap {
-  transition: transform 0.28s ease-out;
+  transition: transform var(--transition-smooth);
+}
+
+.canvas-history-hint {
+  transform-origin: right center;
+  transition: opacity var(--transition-base), transform var(--transition-smooth);
 }
 
 /* React 显式保持打开状态；展开后父级命中区覆盖整块面板。 */
@@ -429,6 +434,7 @@
 
 .canvas-history-wrap[data-open='true'] .canvas-history-hint {
   opacity: 0;
+  transform: translateX(4px) scaleY(0.6);
 }
 
 .canvas-history-btn--on {
@@ -443,6 +449,9 @@
 
 .canvas-history-panel {
   width: 208px;
+  transform: translateX(8px) scale(0.98);
+  transform-origin: right top;
+  transition: opacity var(--transition-base), transform var(--transition-smooth);
   border: 1px solid var(--theme-border);
   border-radius: 12px;
   background: var(--floating-surface-bg, color-mix(in srgb, var(--theme-surface) 60%, transparent));
@@ -555,6 +564,64 @@
   background: color-mix(in srgb, var(--brand) 22%, transparent);
   color: var(--brand);
   font-size: 9px;
+}
+
+/* 顶部项目栏与操作记录共用短促的边缘展开节奏，命中区不随动画缩放。 */
+.session-project-hint {
+  opacity: 0.6;
+  transform: translateX(-50%);
+  transition: opacity var(--transition-base), transform var(--transition-smooth);
+}
+
+.session-project-nav {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-8px) scale(0.98);
+  transform-origin: center top;
+  transition: opacity var(--transition-base), transform var(--transition-smooth);
+}
+
+.session-project-tabs[data-settings-open='true'] .session-project-nav,
+.session-project-tabs:focus-within .session-project-nav {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+.session-project-tabs[data-settings-open='true'] .session-project-hint,
+.session-project-tabs:focus-within .session-project-hint {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-4px) scaleX(0.6);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .session-project-tabs:hover .session-project-nav {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+
+  .session-project-tabs:hover .session-project-hint {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-4px) scaleX(0.6);
+  }
+}
+
+.canvas-history-wrap:focus-within .canvas-history-panel,
+.canvas-history-wrap:focus-within .canvas-history-hint,
+.session-project-tabs:focus-within .session-project-nav,
+.session-project-tabs:focus-within .session-project-hint {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-history-wrap,
+  .canvas-history-hint,
+  .canvas-history-panel,
+  .session-project-hint,
+  .session-project-nav {
+    transition: none;
+  }
 }
 
 /* Custom cursors over @xyflow/react's own rules: its stylesheet is imported from

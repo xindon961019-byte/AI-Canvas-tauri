@@ -219,6 +219,9 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
       get().showToast(previous ? `已更新插件「${manifest.name}」` : `已安装插件「${manifest.name}」`);
       return plugin;
     } catch (error) {
+      if (isPluginRegistryCorruption(error)) {
+        set({ pluginRegistryRepairRequired: true });
+      }
       const rollbackFailures: string[] = [];
       let nativeRollbackSucceeded = false;
       if (previous && !previous.sourceDigest && !previousLeaseRevoked) {
@@ -234,6 +237,9 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
         await restoreNativePluginRevision(previous, manifest.id);
         nativeRollbackSucceeded = true;
       } catch (rollbackError) {
+        if (isPluginRegistryCorruption(rollbackError)) {
+          set({ pluginRegistryRepairRequired: true });
+        }
         rollbackFailures.push(`恢复原生插件注册失败：${errorMessage(rollbackError)}`);
       }
       try {
@@ -279,6 +285,9 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
         await invoke('set_plugin_registration_enabled', { pluginId: id, enabled: false });
       }
     } catch (error) {
+      if (isPluginRegistryCorruption(error)) {
+        set({ pluginRegistryRepairRequired: true });
+      }
       if (!enabled) {
         throw new Error(
           `插件已在当前会话停用，但原生停用状态未确认：${errorMessage(error)}`,
@@ -293,6 +302,9 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
       try {
         await invoke('set_plugin_registration_enabled', { pluginId: id, enabled: plugin.enabled });
       } catch (rollbackError) {
+        if (isPluginRegistryCorruption(rollbackError)) {
+          set({ pluginRegistryRepairRequired: true });
+        }
         throw new Error(
           `${errorMessage(error)}；恢复原生插件启停状态失败：${errorMessage(rollbackError)}`,
           { cause: rollbackError },

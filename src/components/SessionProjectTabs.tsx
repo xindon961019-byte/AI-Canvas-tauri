@@ -117,28 +117,19 @@ export default function SessionProjectTabs() {
 
   return (
     <div
-      className="group/session fixed left-1/2 top-3 z-[150] max-w-[min(72vw,640px)]
+      className="session-project-tabs group/session fixed left-1/2 top-3 z-[150] max-w-[min(72vw,640px)]
                  -translate-x-1/2 select-none sm:max-w-[min(52vw,640px)]"
+      data-settings-open={settingsOpen ? 'true' : 'false'}
     >
       <span
         aria-hidden="true"
-        className={`pointer-events-none absolute left-1/2 top-1 h-0.5 w-8 -translate-x-1/2
-                    rounded-full bg-canvas-text-muted/35 transition-opacity duration-150 ${
-                      settingsOpen
-                        ? 'opacity-0'
-                        : 'group-hover/session:opacity-0 group-focus-within/session:opacity-0'
-                    }`}
+        className="session-project-hint pointer-events-none absolute left-1/2 top-1 h-0.5 w-8
+                   rounded-full bg-canvas-text-muted"
       />
       <nav
         aria-label="最近打开的项目"
-        className={`app-header max-w-full rounded-2xl border border-canvas-border bg-canvas-surface/60 p-1
-                    shadow-lg shadow-black/30 backdrop-blur-xl
-                    transition-[transform,opacity] duration-200 ease-out will-change-transform
-                    motion-reduce:transition-opacity ${
-                      settingsOpen
-                        ? 'translate-y-0 opacity-100 pointer-events-auto'
-                        : '-translate-y-[calc(100%+0.5rem)] opacity-0 pointer-events-none group-hover/session:translate-y-0 group-hover/session:opacity-100 group-hover/session:pointer-events-auto group-focus-within/session:translate-y-0 group-focus-within/session:opacity-100 group-focus-within/session:pointer-events-auto'
-                    }`}
+        className="session-project-nav app-header max-w-full rounded-2xl border border-canvas-border bg-canvas-surface/60 p-1
+                   shadow-lg shadow-black/30 backdrop-blur-xl"
       >
         <div
           ref={tabListRef}

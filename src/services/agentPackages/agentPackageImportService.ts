@@ -37,6 +37,12 @@ function isSupportedArchive(path: string): boolean {
     || lower.endsWith('.tar.gz');
 }
 
+/** Rust Result 的错误经 invoke 返回字符串，转为 Error 后面板才能展示具体原因。 */
+function rethrowImportError(error: unknown): never {
+  if (typeof error === 'string' && error.trim()) throw new Error(error.trim());
+  throw error;
+}
+
 /** 选择本地文件夹并生成只读链接预览；用户取消时返回 null。 */
 export async function selectAgentPackageFolder(): Promise<AgentPackageImportPreview | null> {
   const selected = selectedSinglePath(await open({
@@ -45,7 +51,8 @@ export async function selectAgentPackageFolder(): Promise<AgentPackageImportPrev
     title: '选择智能体文件夹',
   }));
   if (!selected) return null;
-  return invoke<AgentPackageImportPreview>('agent_source_link', { sourcePath: selected });
+  return invoke<AgentPackageImportPreview>('agent_source_link', { sourcePath: selected })
+    .catch(rethrowImportError);
 }
 
 /** 选择受支持的智能体压缩包并导入到托管目录；用户取消时返回 null。 */
@@ -60,7 +67,8 @@ export async function selectAgentPackageArchive(): Promise<AgentPackageImportPre
   if (!isSupportedArchive(selected)) {
     throw new Error('仅支持 .aicanvas-agent、.tgz 或 .tar.gz 智能体包');
   }
-  return invoke<AgentPackageImportPreview>('agent_package_import_archive', { archivePath: selected });
+  return invoke<AgentPackageImportPreview>('agent_package_import_archive', { archivePath: selected })
+    .catch(rethrowImportError);
 }
 
 /**
