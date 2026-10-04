@@ -285,10 +285,27 @@ function assertReferenceMediaDeliverable(
       if (isRecord(value)) Object.values(value).forEach(collect);
     };
     collect(submitBody);
-    const hasImages = templates.has('imageUrls') || templates.has('referenceImageUrls');
-    const hasVideos = templates.has('videoUrls') || templates.has('referenceVideoUrls');
-    const hasAudios = templates.has('audioUrls') || templates.has('referenceAudioUrls');
-    if (hasImages && hasVideos && hasAudios) return;
+    // 只要求协议接收实际存在的素材类型。某些模型（例如 Mini 480p）
+    // 明确不支持参考视频，此时 videoUrls 为空，不能因为缺少 videos
+    // 字段而把已经完整接收的图片/音频误判为不完整。
+    const deliveredTypes = [
+      {
+        values: readProtocolReferenceStrings('imageUrls', variables.imageUrls)
+          .concat(readProtocolReferenceStrings('referenceImageUrls', variables.referenceImageUrls)),
+        delivered: templates.has('imageUrls') || templates.has('referenceImageUrls'),
+      },
+      {
+        values: readProtocolReferenceStrings('videoUrls', variables.videoUrls)
+          .concat(readProtocolReferenceStrings('referenceVideoUrls', variables.referenceVideoUrls)),
+        delivered: templates.has('videoUrls') || templates.has('referenceVideoUrls'),
+      },
+      {
+        values: readProtocolReferenceStrings('audioUrls', variables.audioUrls)
+          .concat(readProtocolReferenceStrings('referenceAudioUrls', variables.referenceAudioUrls)),
+        delivered: templates.has('audioUrls') || templates.has('referenceAudioUrls'),
+      },
+    ];
+    if (deliveredTypes.every(({ values, delivered }) => values.length === 0 || delivered)) return;
   } catch {
     // 结构校验会在更早阶段报告 JSON 错误；这里继续使用通用覆盖检查。
   }
