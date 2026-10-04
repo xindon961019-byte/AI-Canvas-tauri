@@ -34,6 +34,42 @@ export function samplePrevisObject(object: PrevisObject, time: number, smooth: b
   return { time, position: vectorLerp(a.position, b.position, t), rotation: vectorLerp(a.rotation, b.rotation, t) };
 }
 
+/** Fit once to the full motion envelope, so camera playback never moves the shadow texel grid. */
+export function configurePrevisShadow(light: THREE.DirectionalLight, objectBounds: THREE.Box3, maxTextureSize: number): void {
+  const bounds = objectBounds.isEmpty()
+    ? new THREE.Box3(new THREE.Vector3(-1, 0, -1), new THREE.Vector3(1, 2, 1)) : objectBounds.clone();
+  const direction = new THREE.Vector3(0.3, 0.8, 0.4).normalize();
+  const corners = (box: THREE.Box3) => [box.min.x, box.max.x].flatMap((x) =>
+    [box.min.y, box.max.y].flatMap((y) => [box.min.z, box.max.z].map((z) => new THREE.Vector3(x, y, z))));
+  // Include the ground receiving the cast shadows, without fitting the 2000m ground mesh.
+  for (const point of corners(bounds)) {
+    if (point.y >= -0.01) bounds.expandByPoint(point.clone().addScaledVector(direction, -(point.y + 0.01) / direction.y));
+  }
+  const center = bounds.getCenter(new THREE.Vector3());
+  light.position.copy(center).addScaledVector(direction, bounds.getSize(new THREE.Vector3()).length() + 1);
+  light.target.position.copy(center);
+  light.updateMatrixWorld(true);
+  light.target.updateMatrixWorld(true);
+  light.shadow.updateMatrices(light);
+  const camera = light.shadow.camera;
+  const lightBounds = new THREE.Box3().setFromPoints(corners(bounds).map((point) => point.applyMatrix4(camera.matrixWorldInverse)));
+  const resolution = 2 ** Math.floor(Math.log2(Math.max(1, Math.min(2048, maxTextureSize))));
+  const extent = lightBounds.getSize(new THREE.Vector3());
+  const padding = Math.max(0.1, Math.max(extent.x, extent.y) / resolution * 4);
+  Object.assign(camera, {
+    left: lightBounds.min.x - padding, right: lightBounds.max.x + padding,
+    bottom: lightBounds.min.y - padding, top: lightBounds.max.y + padding,
+    near: Math.max(0.1, -lightBounds.max.z - padding), far: -lightBounds.min.z + padding,
+  });
+  camera.updateProjectionMatrix();
+  light.shadow.mapSize.set(resolution, resolution);
+  light.shadow.bias = -0.0001;
+  const texelSize = Math.max(camera.right - camera.left, camera.top - camera.bottom) / resolution;
+  // World-space normal offset removes self-shadow stripes; cap it to preserve contact shadows.
+  light.shadow.normalBias = THREE.MathUtils.clamp(texelSize * 1.5, 0.001, 0.03);
+  light.shadow.needsUpdate = true;
+}
+
 export interface DirectorPrevisRenderer {
   render: (time: number, view: DirectorPrevisView) => void;
   capture: (time: number) => string;
@@ -100,12 +136,22 @@ export function createDirectorPrevisRenderer(mount: HTMLElement, input: Director
   for (const obj of data.objects) {
     const object = objects.get(obj.id)!;
     const poses = [{ position: obj.position, rotation: obj.rotation }, ...obj.keyframes];
+    if (obj.keyframes.some((pose) => pose.rotation.some((angle, i) => angle !== obj.rotation[i]))) {
+      object.position.set(0, 0, 0);
+      object.rotation.set(0, 0, 0);
+      const localBounds = new THREE.Box3().setFromObject(object);
+      const radius = new THREE.Vector3(...[0, 1, 2].map((i) =>
+        Math.max(Math.abs(localBounds.min.getComponent(i)), Math.abs(localBounds.max.getComponent(i))))).length();
+      const diameter = new THREE.Vector3().setScalar(radius * 2);
+      for (const pose of poses) bounds.union(new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(...pose.position), diameter));
+    }
     for (const pose of poses) {
       object.position.set(...pose.position);
       object.rotation.set(...pose.rotation.map(THREE.MathUtils.degToRad) as PrevisVector);
       bounds.expandByObject(object);
     }
   }
+  const shadowBounds = bounds.clone();
   for (const frame of data.camera.keyframes) bounds.expandByPoint(new THREE.Vector3(...frame.position));
   const center = bounds.getCenter(new THREE.Vector3());
   const span = Math.max(8, bounds.getSize(new THREE.Vector3()).length());
@@ -116,12 +162,9 @@ export function createDirectorPrevisRenderer(mount: HTMLElement, input: Director
   scene.add(ground);
   scene.add(new THREE.HemisphereLight(0xffffff, 0x586171, 2));
   const light = new THREE.DirectionalLight(0xffffff, 3);
-  light.position.copy(center).add(new THREE.Vector3(span * 0.3, span * 0.8, span * 0.4));
-  light.target.position.copy(center);
   light.castShadow = true;
-  light.shadow.mapSize.set(1024, 1024);
-  Object.assign(light.shadow.camera, { left: -span, right: span, top: span, bottom: -span, near: 0.1, far: span * 4 });
-  light.shadow.bias = -0.0001;
+  configurePrevisShadow(light, shadowBounds, renderer.capabilities.maxTextureSize);
+  light.shadow.autoUpdate = data.objects.some((object) => object.keyframes.length > 0);
   scene.add(light, light.target);
 
   const aspect = previsAspectRatio(data);
@@ -150,6 +193,7 @@ export function createDirectorPrevisRenderer(mount: HTMLElement, input: Director
   marker.add(solid(new THREE.ConeGeometry(0.18, 0.35, 4), new THREE.MeshBasicMaterial({ color: pathColor }), [0, 0, -0.28]));
   marker.children[1].rotation.x = -Math.PI / 2;
   helpers.add(marker);
+  helpers.traverse((object) => { object.castShadow = false; object.receiveShadow = false; });
   scene.add(helpers);
   let disposed = false;
   let exporting = false;

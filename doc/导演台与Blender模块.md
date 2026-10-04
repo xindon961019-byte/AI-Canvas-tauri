@@ -20,6 +20,7 @@
 
 - 三种运行时共用导演节点的选择、历史、持久化与下游媒体语义；各自维护场景，不能互相冒充。旧节点仍默认轻量网页。轻量导演台与 Blender 始终隐藏节点浮动对话框，切换到这两种运行时时立即关闭；只有 AI 镜头预演显示该输入框。
 - `ai-threejs` 为主窗口的「AI 镜头预演」弹窗，复用已配置文本模型。模型只能生成有界 JSON，不能提供 JS、网页、URL、脚本或原生命令。Y-up 米制简模与 position/target/焦距/横滚关键帧支持 1–60 秒预演、人物走位、分段缓动和三种画幅；不声明物理模拟或自动避障。
+- 预演阴影按物体全程运动与地面投影范围固定拟合，不随摄影机移动；旋转物体用包围球覆盖中间姿态。贴图最多 2048 并按显卡上限回退，采用有界法线偏移减少自阴影条纹；静态场景复用阴影贴图，辅助标记不投影。预览、截图和视频共用此设置。
 - AI 预演可由节点浮动输入框直接生成，也可在弹窗内通过同一 MentionEditor 输入 `@` 或点击连线素材引用；仅连线不发送。整表逐行包含镜号、景别、运镜、内容、台词、时长、音效/音乐、转场、备注与绑定画面。图片走既有受限 Base64 文本/VLM 协议，需支持视觉输入的模型，最多 6 张、单张 8 MiB、合计 24 MiB。节点生成使用所选或项目默认文本模型，成功保存为预演引用，不生成普通文本输出。
 - 两个生成入口共享节点加载状态、重复请求保护与取消；修改已有场景时先校验并载入当前场景。项目、实例、运行时、场景引用、提示词、模型或显式引用的节点/画面变化后不发布结果；失败保留上一场景。浮动输入框关闭后允许后台生成，弹窗发起的操作在弹窗关闭时取消；控制器只在内存。
 - 预演使用独立合同和 `directorPrevisScene`，不覆盖 Blender Scene/Manifest。场景保存在 `director/previs/<SHA-256>.json`，节点只保存项目相对引用、摘要与大小；读取验证摘要、字节数与合同。文件保留到项目删除，支持撤销、重开、复制及整体导入导出。
@@ -40,6 +41,7 @@
 
 - 定向回归：[Scene 服务](../tests/services/directorSceneService.test.ts)、[Blender 运行时](../tests/services/directorBlenderRuntimeService.test.ts)、[节点操作](../tests/services/directorNodeOperationService.test.ts)；原生测试按专项计划选择。
 - AI 预演回归：[合同](../tests/services/directorPrevisSchema.test.ts)、[插值](../tests/services/directorPrevisRenderer.test.ts)、[生成与写回](../tests/services/directorPrevisService.test.ts)、[弹窗文件失效保护](../tests/components/directorPrevisDialog.test.tsx)。数字设置统一复用 UI Kit NumberStepper。
+- 阴影修复验证：渲染插值/阴影视锥、场景合同、预演弹窗与导演节点截图/视频导出 4 个回归文件共 59 项测试通过，类型、测试类型、定向 ESLint 与临时目录生产构建通过。浏览器走廊示例的起点、跟拍中段、环绕与空间视图已检查，原人物条纹消失、地面投影保留；不同桌面 GPU 的播放性能仍需实机验证。
 - 节点自动截图回归：[导演节点](../tests/components/directorDeskVideoExport.test.tsx)，覆盖已有场景补截、场景更新、手动截图保留、多节点排队、资源释放、失败和过期写回；组件测试模拟渲染器与项目文件。浏览器已验证隐藏容器生成 1920×1080 的摄影机 PNG 并释放容器；原生项目保存仍需桌面验收。
 - 引用生成回归：[节点生成与真实协议请求体](../tests/services/generationPrevis.test.ts)、[完整分镜表引用](../tests/services/shotlistMention.test.ts)，覆盖显式图片/整表、图片上限、取消、项目变化及旧运行时路由；模型响应和项目文件服务使用模拟实现，实际模型生成与原生保存仍需桌面验收。
 - MCP 预演回归：[导演工具](../tests/services/chat/directorTools.test.ts) 覆盖完整 MCP 发现/创建/选择/写入/读回链路、大场景完整响应、输入校验、撤销重做、取消、过期结果与脱敏；项目文件使用模拟服务，不替代桌面客户端实机验收。
