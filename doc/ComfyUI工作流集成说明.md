@@ -323,6 +323,8 @@ Qwen 验证入口为 `builtinWorkflows.test.ts`、`audioSpeechSettings.test.ts` 
 
 面板保持打开不关：ComfyUI 那边存回来后列表会实时刷新，方便接着改默认节点。连接检查失败会返回错误，保留已有编辑窗口及未保存草稿。
 
+设置页与工作流编辑入口的原生开窗请求共用串行锁。同源窗口恢复显示并复用；初始 `about:blank` 状态最多等待 5 秒，不据此关闭加载中的窗口。切换服务器时，发出关闭请求后最多等待 5 秒，确认旧 WebView 已注销才创建同名窗口；关闭被取消或状态超时会返回可重试错误，不强制销毁页面。回归入口为 Rust `comfyui::tests`，覆盖加载过渡、延迟注销与超时；真实 WebView2 的窗口显示仍需桌面环境验收。
+
 ### 11.1 助手动态工作流与服务器绑定
 
 [comfyAgentService.ts](../src/services/comfyAgentService.ts) 负责助手的模型发现、动态工作流校验、执行和成功后的保存；[comfyTools.ts](../src/services/chat/tools/comfyTools.ts) 通过既有 Registry 暴露给内部助手与 MCP。

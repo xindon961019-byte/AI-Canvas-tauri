@@ -1,14 +1,13 @@
 /**
  * character/CharacterReferenceGallery — 角色参考图画廊。
- * 用等宽排版（justifiedRows）把主视觉、头像、全身、表情、转面、服装等参考图铺成网格，
- * 支持选中、编辑与裁剪预览，并向上汇报实际铺开的图片框供浮层贴边定位。
+ * 参考图按预览区高度等比排列为一行，超出宽度时横向滚动。
+ * 支持选中、编辑与裁剪预览，并向上汇报实际图片区域尺寸。
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import type { CharacterReferenceImage } from '../../types/dramaAssets';
 import ViewportImage from '../shared/ViewportImage';
 import { CHARACTER_REFERENCE_KIND_LABELS } from './characterReferencePresentation';
-import { justifiedRows } from './justifiedRows';
 
 const GAP = 8;
 
@@ -22,7 +21,7 @@ interface CharacterReferenceGalleryProps {
   selectedId: string | null;
   onSelect: (referenceId: string) => void;
   onEdit: (referenceId: string) => void;
-  /** 汇报实际铺开的图片框；容器留白时浮层要贴图片边缘而不是容器边缘 */
+  /** 汇报实际铺开的图片区域尺寸 */
   onStageResize?: (stage: ReferenceStageBox | null) => void;
 }
 
@@ -57,11 +56,17 @@ export default function CharacterReferenceGallery({
     });
   };
 
-  const layout = useMemo(
-    // 比例未知的先按 1 排，onLoad 拿到真实尺寸后自动重排
-    () => justifiedRows(references.map((item) => ratios[item.id] ?? 1), box.width, box.height, GAP),
-    [box.height, box.width, ratios, references],
-  );
+  const layout = useMemo(() => {
+    if (!references.length || box.width <= 0 || box.height <= 0) return null;
+    // 比例未知的先按 1 排，图片加载后保持满高并按真实比例更新宽度。
+    const width = references.reduce((sum, item) => sum + (ratios[item.id] ?? 1) * box.height, 0)
+      + GAP * (references.length - 1);
+    return {
+      width,
+      height: box.height,
+      rows: [{ items: references.map((_, index) => index), height: box.height }],
+    };
+  }, [box.height, box.width, ratios, references]);
 
   useEffect(() => {
     onStageResize?.(layout ? { width: layout.width, height: layout.height } : null);

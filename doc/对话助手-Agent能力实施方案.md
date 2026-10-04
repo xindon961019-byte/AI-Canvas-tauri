@@ -85,6 +85,8 @@ A–D 历史联合复核未覆盖真实桌面 WebView、双窗口审批、真实
 
 ## 验证入口
 
+- Agent Package 归档预览与导入支持全局 PAX 元数据，局部 PAX 的实际路径仍经过原生校验；异常导入保留可读错误详情，元数据不作为文件或脚本执行。前端回归入口为 [agentPackageImportService.test.ts](../tests/services/agentPackageImportService.test.ts)，原生回归位于 `agent_package::tests`；具体导入健康与权限边界仍以当前源码为准。
+
 - 权限：[policyEngine.test.ts](../tests/services/chat/policyEngine.test.ts)；控制与预算：[agentTaskControl.test.ts](../tests/services/chat/agentTaskControl.test.ts)、[agentBudgetService.test.ts](../tests/services/chat/agentBudgetService.test.ts)。
 - 执行诊断：[agentRuntimeDiagnostics.test.ts](../tests/services/chat/agentRuntimeDiagnostics.test.ts)；Agent Package：[Store 测试](../tests/store/agentPackages.test.ts)、[Skill 接入测试](../tests/services/agentPackageSkillService.test.ts)。
 - 代码变更按范围运行定向 Vitest、ESLint、应用/测试类型检查；涉及原生网页或包读取时补充对应 Rust 检查。

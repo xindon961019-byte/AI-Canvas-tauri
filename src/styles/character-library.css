@@ -263,22 +263,16 @@
   padding: 10px;
 }
 
-/* 悬浮在形象参考右下角：自下而上依次是角色卡、角色声音、画布图片节点选择条。
-   图片按容器高度等比缩小时四周会留 letterbox 空白，所以这里贴的是 justifiedRows
-   算出的图片框（--character-stage-*），而不是 gallery 容器边缘——否则卡片会正好
-   跨在图片与面板底色的分界线上，半深半浅。窄图下卡片保留可读宽度，允许使用
-   图片旁的留白，但始终限制在 gallery 内。 */
+/* 固定在预览区域右下角：自下而上依次是角色卡、角色声音、画布图片节点选择条。
+   位置与尺寸只受预览容器约束，不随参考图片的尺寸或排列变化。 */
 .character-library-dock {
-  --stage-w: min(100%, var(--character-stage-width, 100%));
-  --stage-h: min(100%, var(--character-stage-height, 100%));
-  --dock-width: min(560px, max(320px, calc(var(--stage-w) - 20px)), calc(100% - 20px));
   position: absolute;
-  right: clamp(10px, calc((100% - var(--stage-w)) / 2 + 10px), calc(100% - var(--dock-width) - 10px));
-  bottom: calc((100% - var(--stage-h)) / 2 + 10px);
+  right: 10px;
+  bottom: 10px;
   z-index: 2;
   display: flex;
-  width: var(--dock-width);
-  max-height: calc(var(--stage-h) - 20px);
+  width: min(560px, calc(100% - 20px));
+  max-height: calc(100% - 20px);
   flex-direction: column;
   gap: 8px;
 }
@@ -466,14 +460,16 @@
   flex-direction: column;
 }
 
-/* 按图片宽高比分行铺满（行宽、行高由 justifiedRows 算好写在 style 上） */
+/* 参考图按预览区高度铺满一行；宽度不足时滚动，浮窗独立固定在 gallery 中。 */
 .character-reference-grid {
   display: flex;
+  min-width: 0;
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
   gap: 8px;
 }
 
@@ -481,6 +477,7 @@
   display: flex;
   min-height: 0;
   flex: 0 0 auto;
+  margin-inline: auto;
   gap: 8px;
 }
 

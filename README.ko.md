@@ -10,7 +10,7 @@
 
 AI Canvas Tauri는 텍스트, 이미지, 비디오, 오디오, 프레임 단위 애니메이션, Markdown, 샷 리스트, 360° 파노라마, 손글씨 노트를 연결 가능한 캔버스 노드로 구성합니다. 하나의 프로젝트 안에서 생성 파이프라인을 구성하고, 캐릭터 라이브러리와 로컬 에셋을 관리하고, ComfyUI 워크플로를 실행하고, 대화형 어시스턴트로 캔버스를 조회·수정하고, 미디어를 생성하고, 읽기 전용 하위 에이전트를 파견하고, 허가된 파일을 읽고, 프로젝트 메모리를 축적할 수 있습니다. 프로젝트는 시리즈와 에피소드로 나눌 수 있으며, 숏폼 드라마의 각 회차는 하나의 캔버스를 갖고 캐릭터 라이브러리와 에셋은 시리즈 전체에서 공유합니다.
 
-![Version](https://img.shields.io/badge/version-0.9.7-6366f1)
+![Version](https://img.shields.io/badge/version-0.9.23-6366f1)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24c8db)
 ![React](https://img.shields.io/badge/React-19-61dafb)
 ![React Flow](https://img.shields.io/badge/React_Flow-12-ff0072)
@@ -38,7 +38,7 @@ AI Canvas Tauri는 텍스트, 이미지, 비디오, 오디오, 프레임 단위 
 | 사용자 플러그인 | 로컬 폴더, 마켓, GitHub Release에서 JavaScript/신뢰하는 Python 플러그인을 설치해 도구·노드·호스트 관리 UI를 확장합니다. JavaScript는 QuickJS에서, Python은 현재 사용자 권한으로 실행합니다. 소스 및 전체 revision 해시를 확인하고 비활성화되거나 교체된 버전의 결과 쓰기를 차단합니다. |
 | 대본 및 샷 제작 | 원작의 장 탐색, 회차 집필, 대본 스냅샷, 샷 수정 및 이미지 보완, 음성/비디오/디렉터 노드 준비를 지원합니다. 대사 자막과 준비된 더빙을 타임라인에 보내고 캐릭터 동작 미디어를 @로 참조할 수 있습니다. |
 | 내장 비디오 편집 | 독립 편집기에서 여러 트랙, 자르기, 분할, 변형, 전환, 텍스트, 스티커, 볼륨을 편집하고 패스스루 또는 합성으로 내보냅니다. MCP로 편집 프로젝트 수정, 백그라운드 내보내기, 미디어 분석, 프레임 추출도 가능합니다. |
-| 대화형 에이전트 | 다중 대화, 스트리밍, Plan/B/C 모드, 도구, 승인 카드, 작업 타임라인, 컨텍스트 압축 및 프로젝트 메모리. |
+| 대화형 에이전트 | 다중 대화, 스트리밍, Plan/B/C 모드, 도구, 승인 및 프로젝트 메모리. 이어지는 대화에서 최근의 완전한 턴과 민감 정보를 제거한 도구 결과를 유지하며, 긴 작업은 컨텍스트를 압축합니다. 내장·독립 창에서 초안, 모델 목록과 작업 화면을 공유하고 Agent Package 가져오기도 지원합니다. |
 | 읽기 전용 하위 에이전트 | 전문 역할을 설정하면 주 작업이 필요에 따라 병렬 실행하고 정제된 읽기 전용 결과를 돌려받습니다. |
 | 캐릭터 및 창작 에셋 | 프로젝트/글로벌 캐릭터 카드, 참조 이미지, 음성, 동작 미디어를 관리하며 인물·장면·소품 추출, 설명 및 이미지 연결을 지원합니다. |
 | MCP 외부 제어 | 기본적으로 꺼져 있습니다. 로컬 stdio와 추가 설정 확인이 필요한 Streamable HTTP를 지원하며 필요한 도구만 검색하는 방식이 기본입니다. 미디어 가져오기, 이미지 분할 업로드, 시스템 붙여넣기, 화면 캔버스 가져오기, 편집 프로젝트 제어가 가능합니다. 자율 모드로 실행하지만 사용자 선택 질문은 직접 답해야 합니다. |
@@ -46,9 +46,11 @@ AI Canvas Tauri는 텍스트, 이미지, 비디오, 오디오, 프레임 단위 
 | 시리즈 및 회차 | 각 회차는 독립 캔버스를 사용하고 캐릭터, 메모리, 미디어 폴더는 시리즈 전체에서 공유합니다. 대본을 읽어 회차를 일괄 생성할 수 있습니다. |
 | 에셋 라이브러리 및 미리보기 | Tab으로 왼쪽 패널을 열고 프로젝트 파일, 글로벌 에셋, 창작 에셋, 노드 목록을 탐색합니다. 카드에서 노드 위치 찾기와 연결, 번호순 전체 화면 이미지 보기, 비디오 팝업 재생, 출력 기록 고정을 지원합니다. 복구 가능한 삭제 및 데스크톱 .aicanvas 패키지도 제공합니다. |
 | 가이드 및 도움말 | 첫 실행 가이드, 용도별 도움말, 오프라인 설명서에서 @ 참조, ComfyUI 입력, 단축키 및 사용자 지정 API를 안내합니다. |
-| 두 가지 3D 디렉터 런타임 | 경량 디렉터는 필요할 때 실행 리소스를 설치합니다. Blender 편집은 Windows x86_64와 macOS Intel/Apple Silicon 및 안정판 4.5·5.0·5.1·5.2 계열을 지원합니다. 저장 후 돌아올 때 카메라 PNG와 .blend 프로젝트를 모두 검증합니다. |
+| 세 가지 디렉터 런타임 | 경량 디렉터, Blender 편집, AI 샷 프리비즈를 지원합니다. 명시적으로 참조한 샷 리스트나 이미지에서 제한된 JSON 장면을 생성하고 재생·스크린샷·MP4 출력을 제공합니다. MCP로 계약을 조회하고 장면을 읽거나 쓸 수 있습니다. Blender는 Windows x86_64, macOS Intel/Apple Silicon과 안정판 4.5·5.0·5.1·5.2 계열을 지원하며 카메라 PNG와 .blend를 검증합니다. |
+| 외관 및 마우스 오버 | 페이지·캔버스·노드·연결선·핸들을 전체 외관 프리셋으로 관리하고 사용자 프리셋과 `.aicanvas-theme` 가져오기/내보내기를 지원합니다. 상단 프로젝트 바와 오른쪽 위 작업 기록은 작은 선에서 펼쳐지며 가벼운 전환 효과와 동작 줄이기 설정을 지원합니다. |
+| 비디오 배치 및 로컬 사용량 | 입력을 사전 검사하고 비디오를 순서대로 제출하며, 재실행 후 미완료 작업을 자동으로 다시 제출하지 않습니다. Volcengine Ark 이미지/비디오 노드의 데스크톱 장부는 가격 스냅샷, 사용량 조회, Excel 내보내기를 지원합니다. 추정·계산 금액은 공식 청구서가 아닙니다. |
 
-문서는 0.9.7 및 2026-09-11까지의 후속 소스 업데이트를 다룹니다. 배포된 설치 파일에는 이후 기능이 없을 수 있습니다. 조작 방법은 [사용 설명서](site/manual.html), 구현 범위와 검증 상태는 [모듈 안내](doc/文档导航.md) (중국어)를 참고하세요.
+2026-10-04에 0.9.23 소스와 대조했습니다. 설치 파일의 기능은 해당 버전에 따라 다르며, 코드와 자동 검사만으로 실제 모델·데스크톱 다중 창·각 플랫폼의 검증 완료를 뜻하지는 않습니다. 조작 방법은 [사용 설명서](site/manual.html), 구현 범위와 검증 상태는 [모듈 안내](doc/文档导航.md) (중국어)를 참고하세요.
 
 ## 기술 스택
 
@@ -122,6 +124,7 @@ npm run tauri build
 - [모듈 문서 안내 (중국어)](doc/文档导航.md)
 - [개발 가이드](doc/开发指南.md): 환경, 명령어, 디렉터리, 개발 규약, 디버깅, FAQ (중국어)
 - [아키텍처 설명](doc/架构说明.md): 핵심 모듈, 데이터 흐름, 보안 경계, 성능 설계 (중국어)
+- [플러그인 개발 규약 (중국어)](doc/插件开发规范.md): Manifest, JavaScript/Python, 노드, UI, 권한 및 릴리스
 - [ComfyUI 워크플로 통합 설명](doc/ComfyUI工作流集成说明.md): 가져오기, IO 노드 감지, 콘텐츠·파라미터 주입, 결과 회수 (중국어)
 - [대화형 캔버스 어시스턴트 기능 방안](doc/对话式画布助手-功能方案.md)
 - [대화형 어시스턴트 에이전트 역량 구현 방안](doc/对话助手-Agent能力实施方案.md)
@@ -151,6 +154,7 @@ npm run tauri build
   <a href="https://github.com/zhurui0523" title="zhurui0523"><img src="https://images.weserv.nl/?url=github.com/zhurui0523.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="zhurui0523" /></a>
   <a href="https://github.com/stars-one" title="stars-one"><img src="https://images.weserv.nl/?url=github.com/stars-one.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="stars-one" /></a>
   <a href="https://github.com/luckcatlin2000" title="luckcatlin2000"><img src="https://images.weserv.nl/?url=github.com/luckcatlin2000.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="luckcatlin2000" /></a>
+  <a href="https://github.com/Lazzz-y" title="Lazzz-y"><img src="https://images.weserv.nl/?url=github.com/Lazzz-y.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="Lazzz-y" /></a>
   <a href="https://github.com/xiaozangao" title="xiaozangao"><img src="https://images.weserv.nl/?url=github.com/xiaozangao.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="xiaozangao" /></a>
   <a href="https://github.com/orlova851986-debug" title="orlova851986-debug"><img src="https://images.weserv.nl/?url=github.com/orlova851986-debug.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="orlova851986-debug" /></a>
 </p>

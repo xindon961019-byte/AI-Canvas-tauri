@@ -10,7 +10,7 @@
 
 AI Canvas Tauri organizes text, images, video, audio, frame-by-frame animation, Markdown, shot lists, 360° panoramas and hand-drawn notes into connectable canvas nodes. In a single project you can orchestrate generation pipelines, manage a character library and local assets, run ComfyUI workflows, and use the conversational assistant to query or modify the canvas, generate media, dispatch read-only sub-agents, read authorized files, and accumulate project memory. Projects can also be split into series and episodes — each episode of a short drama gets its own canvas, while the character library and assets are shared across the whole series.
 
-![Version](https://img.shields.io/badge/version-0.9.7-6366f1)
+![Version](https://img.shields.io/badge/version-0.9.23-6366f1)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24c8db)
 ![React](https://img.shields.io/badge/React-19-61dafb)
 ![React Flow](https://img.shields.io/badge/React_Flow-12-ff0072)
@@ -38,7 +38,7 @@ AI Canvas Tauri organizes text, images, video, audio, frame-by-frame animation, 
 | User plugins | Install JavaScript or trusted Python plugins from local folders, the marketplace or GitHub Releases. Plugins extend tools, nodes and host-managed UI. JavaScript uses QuickJS; Python has the current user’s permissions. Source and full revision digests bind execution; disabled or replaced revisions cannot write results back. |
 | Scripts & shot production | Browse source chapters, write episodes, preserve script snapshots, revise shots, fill missing frames, prepare voice/video/director nodes and send dialogue captions and ready voice-overs to the timeline. Reference character action media with @. |
 | Built-in video editing | A separate editor provides multiple tracks, trimming, splitting, transforms, transitions, text, stickers and volume controls, with passthrough or composited export. MCP also exposes project editing, background export, media probing and frame extraction. |
-| Conversational Agent | Multiple conversations, streaming, Plan/B/C modes, tools, approval cards, task timelines, context compression and project memory. |
+| Conversational Agent | Multiple conversations, streaming, Plan/B/C modes, tools, approvals and project memory. Follow-ups retain complete recent turns and sanitized tool results; long tasks can compress context. Embedded and separate windows share drafts, model catalogs and task views. Supports Agent Package imports. |
 | Read-only sub-agents | Define domain roles and let the main task dispatch parallel read-only sub-agents; sanitized results return to the main task. |
 | Characters & creative assets | Project/global character cards, reference images, voices and action media, plus extraction, descriptions and image binding for characters, scenes and props. |
 | External MCP control | Disabled by default. Supports local stdio and Streamable HTTP with an additional configuration confirmation; on-demand tool discovery is the default. Import media, upload images in chunks, paste system content, capture the canvas and control editing projects. MCP runs autonomously, while user-choice questions still require the user. |
@@ -46,9 +46,11 @@ AI Canvas Tauri organizes text, images, video, audio, frame-by-frame animation, 
 | Series & episodes | Each episode has its own canvas; the series shares characters, project memory and media directories. The assistant can create episodes in batches from a script. |
 | Asset library & previews | Tab toggles the left asset drawer with project files, global assets, creative assets and the current node list. Locate and connect nodes from cards, browse full-screen images by display number, play floating video previews and pin output history. Includes recoverable deletion and desktop .aicanvas project packages. |
 | Onboarding & help | First-run guidance, a scenario-based Help Center and an offline manual covering references, ComfyUI inputs, shortcuts and custom APIs. |
-| Dual-runtime director desk | The lightweight desk installs its runtime on demand. Blender editing supports Windows x86_64 and macOS Intel/Apple Silicon with stable 4.5, 5.0, 5.1 and 5.2 series. Save-and-return validates both the camera PNG and the .blend project. |
+| Three director runtimes | Lightweight desk, Blender editing and AI shot previs. Explicit shot-list or image references produce bounded JSON scenes with playback, screenshots and MP4 output; MCP can read the contract and read/write scenes. Blender supports Windows x86_64, macOS Intel/Apple Silicon and stable 4.5, 5.0, 5.1 and 5.2 series. Save-and-return validates the camera PNG and .blend project. |
+| Appearance & hover controls | Full appearance presets cover pages, canvas, nodes, edges and handles, with custom presets and `.aicanvas-theme` import/export. Hint lines reveal the top project bar and upper-right operation history with subtle motion and reduced-motion support. |
+| Video batches & local usage | Video batches check inputs and submit serially; unfinished tasks are not resubmitted automatically after reopening. The desktop ledger for Volcengine Ark image/video nodes stores price snapshots, supports usage queries and Excel export. Estimated or calculated amounts are not official bills. |
 
-These documents cover 0.9.7 and subsequent source updates through 2026-09-11. Released installers may not include later features. See the [user manual](site/manual.html) and [module index](doc/文档导航.md) (in Chinese) for operations, ownership and validation boundaries.
+Checked against 0.9.23 source on 2026-10-04. Installer capabilities depend on their version; source and automated checks do not establish real-model, desktop multi-window or cross-platform acceptance. See the [user manual](site/manual.html) and [module index](doc/文档导航.md) (in Chinese) for operations, ownership and validation boundaries.
 
 ## Tech Stack
 
@@ -122,6 +124,7 @@ npm run tauri build
 - [Module documentation (Chinese)](doc/文档导航.md)
 - [开发指南](doc/开发指南.md): environment, commands, directories, conventions, debugging and FAQ (in Chinese)
 - [架构说明](doc/架构说明.md): core modules, data flow, security boundaries and performance design (in Chinese)
+- [Plugin development guide (Chinese)](doc/插件开发规范.md): manifests, JavaScript/Python runtimes, nodes, UI, permissions and releases
 - [ComfyUI 工作流集成说明](doc/ComfyUI工作流集成说明.md): import, IO node detection, content/parameter injection and result retrieval (in Chinese)
 - [对话式画布助手功能方案](doc/对话式画布助手-功能方案.md)
 - [对话助手 Agent 能力实施方案](doc/对话助手-Agent能力实施方案.md)
@@ -151,6 +154,7 @@ Development QQ group: 873354155
   <a href="https://github.com/zhurui0523" title="zhurui0523"><img src="https://images.weserv.nl/?url=github.com/zhurui0523.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="zhurui0523" /></a>
   <a href="https://github.com/stars-one" title="stars-one"><img src="https://images.weserv.nl/?url=github.com/stars-one.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="stars-one" /></a>
   <a href="https://github.com/luckcatlin2000" title="luckcatlin2000"><img src="https://images.weserv.nl/?url=github.com/luckcatlin2000.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="luckcatlin2000" /></a>
+  <a href="https://github.com/Lazzz-y" title="Lazzz-y"><img src="https://images.weserv.nl/?url=github.com/Lazzz-y.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="Lazzz-y" /></a>
   <a href="https://github.com/xiaozangao" title="xiaozangao"><img src="https://images.weserv.nl/?url=github.com/xiaozangao.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="xiaozangao" /></a>
   <a href="https://github.com/orlova851986-debug" title="orlova851986-debug"><img src="https://images.weserv.nl/?url=github.com/orlova851986-debug.png&amp;w=128&amp;h=128&amp;fit=cover&amp;mask=circle" width="64" height="64" alt="orlova851986-debug" /></a>
 </p>

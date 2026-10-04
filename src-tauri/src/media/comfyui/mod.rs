@@ -47,6 +47,9 @@ const COMFYUI_BRIDGE_SCRIPT: &str = include_str!("bridge.js");
 const MAX_WORKFLOW_JSON_LENGTH: usize = 16 * 1024 * 1024;
 const COMFYUI_ACTION_PATH: &str = "/__ai_canvas_comfy_action__";
 const COMFYUI_CONNECT_TIMEOUT: Duration = Duration::from_millis(700);
+const COMFYUI_WINDOW_STATE_TIMEOUT: Duration = Duration::from_secs(5);
+// 设置页与工作流编辑入口共用固定标签，检查、关闭和创建必须在同一把锁内。
+static COMFYUI_WINDOW_OPEN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const TAKE_SAVE_PAYLOAD_SCRIPT: &str = r#"(() => {
   const payload = window.__AI_CANVAS_PENDING_SAVE_PAYLOAD__ ?? null;
   delete window.__AI_CANVAS_PENDING_SAVE_PAYLOAD__;
@@ -734,6 +737,25 @@ fn notify_comfyui_download(webview: &tauri::Webview, path: Option<&Path>, succes
     ));
 }
 
+/// 等待原生窗口状态稳定；超时保留现有窗口，不强行销毁可能含有草稿的页面。
+async fn wait_for_comfyui_window_state<T>(
+    mut inspect: impl FnMut() -> Result<Option<T>, String>,
+    timeout: Duration,
+    timeout_message: &str,
+) -> Result<T, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(value) = inspect()? {
+            return Ok(value);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(timeout_message.to_string());
+        }
+        tokio::time::sleep(remaining.min(Duration::from_millis(50))).await;
+    }
+}
+
 /// Tauri command: 在应用内的独立 Webview 窗口中打开 ComfyUI 页面。
 #[tauri::command]
 pub async fn open_comfyui_window(
@@ -750,6 +772,7 @@ pub async fn open_comfyui_window(
 ) -> Result<Option<ComfyUIWorkflowOpenResult>, String> {
     crate::path_policy::ensure_trusted_caller(&webview)?;
     let url = parse_comfyui_url(&comfy_url)?;
+    let _open_guard = COMFYUI_WINDOW_OPEN_LOCK.lock().await;
     if is_local_comfyui_url(&url) {
         // 服务短暂离线只返回错误，不能关闭还保存着未提交草稿的编辑窗口。
         ensure_local_comfyui_reachable(&url).await?;
@@ -765,11 +788,20 @@ pub async fn open_comfyui_window(
     )?;
 
     if let Some(window) = app.get_webview_window(COMFYUI_WINDOW_LABEL) {
+        // WebView2 初始地址可能仍是 about:blank；此时不能把加载中的窗口当作旧服务关闭。
+        let current = wait_for_comfyui_window_state(
+            || {
+                let current = window
+                    .url()
+                    .map_err(|_| "无法读取 ComfyUI 窗口状态，请稍后重试".to_string())?;
+                Ok((current.as_str() != "about:blank").then_some(current))
+            },
+            COMFYUI_WINDOW_STATE_TIMEOUT,
+            "ComfyUI 窗口仍在加载，请稍后重试",
+        )
+        .await?;
         // 只要还是同一个 ComfyUI 服务就复用窗口：前端自己改过的路径/查询串不算“换了地址”
-        if window
-            .url()
-            .is_ok_and(|current| is_same_comfyui_origin(&current, &url))
-        {
+        if is_same_comfyui_origin(&current, &url) {
             if let Some(script) = editor_script {
                 window
                     .eval(scope_comfyui_script(&url, &script))
@@ -793,6 +825,18 @@ pub async fn open_comfyui_window(
         window
             .close()
             .map_err(|e| format!("关闭旧 ComfyUI 窗口失败: {e}"))?;
+        // close 只排入关闭请求；等管理器注销 WebView 后才能复用固定标签。
+        wait_for_comfyui_window_state(
+            || {
+                Ok(app
+                    .get_webview_window(COMFYUI_WINDOW_LABEL)
+                    .is_none()
+                    .then_some(()))
+            },
+            COMFYUI_WINDOW_STATE_TIMEOUT,
+            "旧 ComfyUI 窗口尚未关闭，请先关闭该窗口后重试",
+        )
+        .await?;
     }
 
     let mut initialization_script = COMFYUI_BRIDGE_SCRIPT.to_string();
@@ -887,12 +931,84 @@ mod tests {
         build_comfy_args, build_editor_script, comfyui_socket_endpoint,
         ensure_local_comfyui_reachable, is_local_comfyui_url, is_same_comfyui_origin,
         parse_comfyui_url, parse_comfyui_window_action, parse_editor_load_result,
-        parse_workflow_save_payload, scope_comfyui_script, ComfyUIWindowAction, COMFY_ARGS,
-        FAST_DISK_MARKER,
+        parse_workflow_save_payload, scope_comfyui_script, wait_for_comfyui_window_state,
+        ComfyUIWindowAction, COMFY_ARGS, FAST_DISK_MARKER,
     };
     use std::fs;
     use std::net::TcpListener;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use url::Url;
+
+    #[tokio::test]
+    async fn waits_for_loading_window_before_deciding_whether_to_reuse_it() {
+        let configured = parse_comfyui_url("http://127.0.0.1:8188").unwrap();
+        let mut states = std::collections::VecDeque::from([
+            Url::parse("about:blank").unwrap(),
+            parse_comfyui_url("http://127.0.0.1:8188/?workflow=draft").unwrap(),
+        ]);
+        let current = wait_for_comfyui_window_state(
+            || {
+                let current = states.pop_front().unwrap();
+                Ok((current.as_str() != "about:blank").then_some(current))
+            },
+            std::time::Duration::from_secs(1),
+            "仍在加载",
+        )
+        .await
+        .unwrap();
+        assert!(is_same_comfyui_origin(&current, &configured));
+        assert!(states.is_empty());
+    }
+
+    #[tokio::test]
+    async fn loading_window_state_times_out() {
+        let result = wait_for_comfyui_window_state::<Url>(
+            || Ok(None),
+            std::time::Duration::from_millis(1),
+            "ComfyUI 窗口仍在加载，请稍后重试",
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "ComfyUI 窗口仍在加载，请稍后重试");
+    }
+
+    #[tokio::test]
+    async fn waits_until_the_old_webview_is_unregistered() {
+        // 关闭请求已返回，但管理器在后续事件循环才移除同名 WebView。
+        let mut registered = std::collections::VecDeque::from([true, true, false]);
+        wait_for_comfyui_window_state(
+            || Ok((!registered.pop_front().unwrap()).then_some(())),
+            std::time::Duration::from_secs(1),
+            "尚未关闭",
+        )
+        .await
+        .unwrap();
+        assert!(registered.is_empty());
+    }
+
+    #[tokio::test]
+    async fn waiting_for_unregistration_times_out_when_close_is_cancelled() {
+        let result = wait_for_comfyui_window_state::<()>(
+            || Ok(None),
+            std::time::Duration::from_millis(1),
+            "旧 ComfyUI 窗口尚未关闭，请先关闭该窗口后重试",
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "旧 ComfyUI 窗口尚未关闭，请先关闭该窗口后重试"
+        );
+    }
+
+    #[tokio::test]
+    async fn stops_when_window_state_cannot_be_read() {
+        let result = wait_for_comfyui_window_state::<Url>(
+            || Err("窗口已销毁".to_string()),
+            std::time::Duration::from_secs(1),
+            "等待超时",
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "窗口已销毁");
+    }
 
     #[test]
     fn reuses_window_when_only_the_frontend_route_changed() {
