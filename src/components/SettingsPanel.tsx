@@ -332,12 +332,12 @@ export default function SettingsPanel() {
       isOpen={settingsOpen}
       onClose={() => setSettingsOpen(false)}
       ariaLabel={t('设置')}
-      className="w-[min(900px,90vw)] h-[90vh] max-h-[940px] rounded-3xl settings-modal-shell border ring-1 ring-black/5 shadow-2xl"
+      className="w-[min(900px,90vw)] h-[90vh] max-h-[940px] rounded-2xl settings-modal-shell border ring-1 ring-black/5 shadow-2xl"
       closeOnBackdrop={false}
     >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 h-14 bg-canvas-surface border-b border-canvas-border settings-modal-header select-none shrink-0 z-20">
-          <h2 className="text-[17px] font-semibold text-canvas-text settings-modal-header-title tracking-tight">{t('设置')}</h2>
+        <div className="flex items-center justify-between px-2.5 py-2 bg-canvas-surface border-b border-canvas-border settings-modal-header select-none shrink-0 z-20">
+          <h2 className="text-[17px] font-semibold text-canvas-text settings-modal-header-title tracking-tight leading-none">{t('设置')}</h2>
           <PopupCloseButton
             ariaLabel={t('关闭设置')}
             onClick={() => setSettingsOpen(false)}

@@ -21,7 +21,7 @@ export default function SubAgentPanel({ onClose }: SubAgentPanelProps) {
 
   return (
     <div className="absolute inset-0 z-10 flex flex-col bg-canvas-bg">
-      <div className="flex items-center justify-between border-b border-canvas-border px-4 py-3">
+      <div className="flex items-center justify-between border-b border-canvas-border px-2.5 py-2">
         <div className="flex items-center gap-2">
           <Icon icon="lucide:users-round" width="16" className="text-brand" />
           <span className="text-sm font-medium text-canvas-text">{t('子智能体')}</span>

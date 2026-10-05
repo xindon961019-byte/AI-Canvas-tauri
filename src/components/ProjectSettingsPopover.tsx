@@ -453,12 +453,12 @@ export default function ProjectSettingsPopover({
             ? { duration: 0.12 }
             : { type: 'spring', bounce: 0, duration: 0.32 }}
           className="glass-bevel glass-bevel--panel fixed z-[200] flex max-h-[min(78vh,680px)] w-[min(420px,calc(100vw-24px))]
-                     origin-top-right flex-col overflow-hidden rounded-lg border border-[var(--glass-ring)]
+                     origin-top-right flex-col overflow-hidden rounded-2xl border border-[var(--glass-ring)]
                      bg-[var(--glass-bg)] text-canvas-text shadow-2xl shadow-black/40
                      outline-none backdrop-blur-2xl backdrop-saturate-150"
         >
           <form onSubmit={(event) => { void handleSubmit(event); }} className="flex min-h-0 flex-col">
-            <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border-subtle px-4">
+            <header className="flex shrink-0 items-center gap-3 border-b border-border-subtle px-2.5 py-2">
               <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-indigo-500/15 text-indigo-400">
                 <Icon icon="lucide:sliders-horizontal" className="h-4 w-4" />
               </span>

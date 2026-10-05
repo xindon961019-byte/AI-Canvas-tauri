@@ -537,7 +537,7 @@ export default function HelpCenterDialog({ onClose }: HelpCenterDialogProps) {
           className="help-dialog h-[min(620px,calc(100vh-24px))] w-[min(760px,calc(100vw-24px))]"
         >
           <div className="flex min-h-0 flex-1 flex-col">
-            <header className="help-dialog__header flex shrink-0 items-center justify-between border-b border-canvas-border px-4 py-3">
+            <header className="help-dialog__header flex shrink-0 items-center justify-between border-b border-canvas-border px-2.5 py-2">
               <div className="flex min-w-0 items-center gap-3">
                 <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-400">
                   <Icon icon="mdi:book-open-page-variant-outline" width="20" height="20" aria-hidden="true" />

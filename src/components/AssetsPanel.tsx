@@ -41,6 +41,7 @@ import { ALL_CATEGORIES, CATEGORY_ICONS, shortFolderName } from '../utils/assetF
 import AssetThumb from './shared/AssetThumb';
 import PopupCloseButton from './shared/PopupCloseButton';
 import Select from './shared/Select';
+import Tabs, { type TabItem } from './shared/Tabs';
 import { springSmooth, fadeFast } from '../utils/motion';
 import { countUnreadDramaAssets } from '../store/store.dramaAssets';
 import { distributeToColumns } from './assets/waterfallColumns';
@@ -586,7 +587,7 @@ export default function AssetsPanel() {
               onClick={(e) => e.stopPropagation()}
             >
               {/* Header */}
-              <div className="assets-panel-header">
+              <div className="assets-panel-header px-2.5 py-2">
                 <h2 className="assets-panel-title">
                   {isDrawer ? '资产库' : '资产管理'}
                   {!isDrawer && <span className="assets-panel-subtitle">
@@ -602,21 +603,19 @@ export default function AssetsPanel() {
 
               {/* Tabs */}
               <div className="assets-tabs">
-                <div className="assets-tab-list" tabIndex={-1} data-overlay-scrollbar="off">
-                  {(['project', 'permanent', 'drama', 'ark', 'nodes'] as TabKey[]).map((tab) => (
-                    <motion.button
-                      key={tab} type="button"
-                      className={`assets-tab ${visibleTab === tab ? 'active' : ''}`}
-                      onClick={() => switchTab(tab)}
-                      whileHover={{ scale: visibleTab === tab ? 1 : 1.03 }} whileTap={{ scale: 0.97 }}
-                    >
-                      {tab === 'project' ? '项目文件' : tab === 'permanent' ? '全局资产' : tab === 'drama' ? '创作资产' : tab === 'ark' ? '方舟素材库' : '节点列表'}
-                      <span className="assets-tab-count">
-                        {tab === 'project' ? projectFiles.length : tab === 'permanent' ? permanentFiles.length : tab === 'drama' ? dramaAssetCount : tab === 'ark' ? arkAssetCount : canvasNodeCount}
-                      </span>
-                    </motion.button>
-                  ))}
-                </div>
+                <Tabs<TabKey>
+                  items={[
+                    { value: 'project', label: '项目文件', count: projectFiles.length },
+                    { value: 'permanent', label: '全局资产', count: permanentFiles.length },
+                    { value: 'drama', label: '创作资产', count: dramaAssetCount },
+                    { value: 'ark', label: '方舟素材库', count: arkAssetCount },
+                    { value: 'nodes', label: '节点列表', count: canvasNodeCount },
+                  ] satisfies TabItem<TabKey>[]}
+                  value={visibleTab}
+                  onChange={switchTab}
+                  size={isDrawer ? 'sm' : 'md'}
+                  aria-label="资产类型"
+                />
 
                 {/* Toolbar: 搜索 + 添加 */}
               {visibleTab !== 'drama' && visibleTab !== 'ark' ? <div className="assets-toolbar ml-auto">

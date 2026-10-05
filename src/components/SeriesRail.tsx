@@ -61,10 +61,10 @@ function TextEditorDialog({
     <ModalOverlay isOpen={isOpen} onClose={onClose} ariaLabel={title}>
       <div
         className="glass-bevel glass-bevel--panel flex h-[min(72vh,640px)] w-[min(680px,calc(100vw-32px))]
-                   flex-col overflow-hidden rounded-lg border border-[var(--glass-ring)]
+                   flex-col overflow-hidden rounded-2xl border border-[var(--glass-ring)]
                    bg-[var(--glass-bg)] text-canvas-text shadow-2xl shadow-black/40 backdrop-blur-2xl"
       >
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border-subtle px-4">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border-subtle px-2.5 py-2">
           <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-indigo-500/15 text-indigo-400">
             <Icon icon="lucide:scroll-text" className="h-4 w-4" />
           </span>

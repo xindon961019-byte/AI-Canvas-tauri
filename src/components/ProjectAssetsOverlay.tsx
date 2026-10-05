@@ -167,12 +167,12 @@ export default function ProjectAssetsOverlay({
     <div
       data-resource-video-boundary
       className="pointer-events-auto fixed right-2 top-1/2 z-[160] flex -translate-y-1/2 flex-col overflow-hidden
-                 rounded-[14px] border border-[var(--glass-ring)] bg-[var(--glass-bg)]
+                 rounded-2xl border border-[var(--glass-ring)] bg-[var(--glass-bg)]
                  text-canvas-text shadow-2xl shadow-black/40 backdrop-blur-2xl"
       style={{ width: 'min(260px, calc(100vw - 32px))', height: 'min(80vh, 640px)' }}
     >
       {/* Header */}
-      <header className="flex shrink-0 items-center gap-2 border-b border-border-subtle px-3 py-2.5">
+      <header className="flex shrink-0 items-center gap-2 border-b border-border-subtle px-2.5 py-2">
         <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-indigo-500/15 text-indigo-400">
           <Icon icon="lucide:folder-open" className="h-3.5 w-3.5" />
         </span>

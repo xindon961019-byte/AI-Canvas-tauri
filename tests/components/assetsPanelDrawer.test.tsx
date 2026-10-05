@@ -90,6 +90,7 @@ vi.mock('../../src/components/shared/AssetThumb', () => ({ default: 'asset-thumb
 vi.mock('../../src/components/shared/Select', () => ({ default: 'asset-select' }));
 
 import AssetsPanel from '../../src/components/AssetsPanel';
+import Tabs, { type TabsProps } from '../../src/components/shared/Tabs';
 import { useKeyboardShortcuts } from '../../src/hooks/useKeyboardShortcuts';
 
 class Target {
@@ -118,10 +119,18 @@ function find(predicate: (element: Element) => boolean): Element {
 }
 function button(label: string) { return find((el) => el.props['aria-label'] === label); }
 function click(element: Element) { (element.props.onClick as () => void)(); }
+// 展开真实 Tabs 子组件，沿用同一套 hook 驱动，保留业务级交互回归。
+function renderTabs(root: unknown): unknown {
+  if (Array.isArray(root)) return root.map(renderTabs);
+  if (!root || typeof root !== 'object' || !('props' in root)) return root;
+  const element = root as Element;
+  if (element.type === Tabs) return Tabs(element.props as unknown as TabsProps);
+  return { ...element, props: { ...element.props, children: renderTabs(element.props.children) } };
+}
 function render() {
   for (let pass = 0; pass < 5; pass++) {
     driver.stateIndex = 0; driver.refIndex = 0; driver.effectIndex = 1; driver.memoIndex = 0; driver.dirty = false;
-    tree = AssetsPanel();
+    tree = renderTabs(AssetsPanel());
     if (!driver.dirty) break;
   }
   const pending = driver.pending;
@@ -145,7 +154,7 @@ function canvasNode(id: string, type: NodeType, label = id): AppState['nodes'][n
 }
 function nodeRows() { return all(tree, (element) => typeof element.props['data-node-id'] === 'string'); }
 function openNodeList() {
-  click(all(tree, (el) => String(el.props.className).startsWith('assets-tab '))[4]); render();
+  click(all(tree, (el) => el.props.role === 'tab')[4]); render();
 }
 
 beforeEach(() => {
@@ -196,8 +205,8 @@ describe('资产库 Tab 抽屉', () => {
 
   it('抽屉滚动区、页签和搜索框获得焦点后按 Tab 收起，外部按钮保留焦点导航', () => {
     key(); render();
-    expect(find((el) => el.props.className === 'assets-tab-list').props.tabIndex).toBe(-1);
-    click(all(tree, (el) => String(el.props.className).startsWith('assets-tab '))[2]); render();
+    expect(find((el) => el.props.role === 'tablist').props.tabIndex).toBe(-1);
+    click(all(tree, (el) => el.props.role === 'tab')[2]); render();
     const otherButton = Object.assign(new Target(), { tagName: 'BUTTON', canvas: false, control: true });
     expect(key('Tab', otherButton).defaultPrevented).toBe(false);
     expect(driver.store!.getState().assetsPanelOpen).toBe(true);
@@ -295,7 +304,7 @@ describe('资产库 Tab 抽屉', () => {
     (search.props.onChange as (event: { target: { value: string } }) => void)({ target: { value: '夜景' } });
     render();
     expect(cards().map((el) => (el.props.file as AssetFileEntry).name)).toEqual(['森林']);
-    const tabs = () => all(tree, (el) => String(el.props.className).startsWith('assets-tab '));
+    const tabs = () => all(tree, (el) => el.props.role === 'tab');
     click(tabs()[1]); render(); await settle();
     // 资产库原行为：切换文件页签保留搜索词。
     expect(cards()).toHaveLength(0);
@@ -350,7 +359,7 @@ describe('资产库 Tab 抽屉', () => {
     expect(all(tree, (el) => el.type === 'asset-select')).toHaveLength(0);
     expect(cards()).toHaveLength(0);
     expect(find((el) => el.props.placeholder === '搜索节点名称、类型或编号…').props.value).toBe('');
-    expect(all(tree, (el) => el.props.className === 'assets-tab-count')[4].props.children).toBe(types.length);
+    expect(all(tree, (el) => el.props.className === 'ui-tabs__count')[4].props.children).toBe(types.length);
   });
 
   it('节点增删、改名和项目切换后，节点列表与计数实时跟随画布', () => {
@@ -362,7 +371,7 @@ describe('资产库 Tab 抽屉', () => {
     expect(nodeRows()).toHaveLength(2);
     driver.store!.setState({ currentProjectId: 'project-2', nodes: [canvasNode('text', 'ai-text')] }); render();
     expect(nodeRows().map((el) => el.props['data-node-id'])).toEqual(['text']);
-    expect(all(tree, (el) => el.props.className === 'assets-tab-count')[4].props.children).toBe(1);
+    expect(all(tree, (el) => el.props.className === 'ui-tabs__count')[4].props.children).toBe(1);
     driver.store!.setState({ nodes: [] }); render();
     expect(nodeRows()).toHaveLength(0);
     expect(find((el) => el.props.children === '当前画布暂无节点')).toBeDefined();

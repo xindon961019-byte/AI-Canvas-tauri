@@ -315,9 +315,9 @@ export default function ProjectLibraryModal({ isOpen, onClose }: ProjectLibraryM
         <header
           inert={deleteTarget ? true : undefined}
           aria-hidden={deleteTarget ? true : undefined}
-          className="shrink-0 border-b border-canvas-border px-4 py-3.5"
+          className="shrink-0 border-b border-canvas-border px-2.5 py-2"
         >
-          <div className="flex items-start justify-between gap-3">
+          <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-baseline gap-2">
                 <h2 className="text-sm font-semibold text-canvas-text">{t('项目')}</h2>

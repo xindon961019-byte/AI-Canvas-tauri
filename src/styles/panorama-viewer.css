@@ -492,38 +492,6 @@
   letter-spacing: 0;
 }
 
-.xiaoluo-panorama-capture-header button {
-  display: inline-flex;
-  width: 1.5rem;
-  height: 1.5rem;
-  align-items: center;
-  justify-content: center;
-  color: var(--theme-text-secondary);
-  background: transparent;
-  border-radius: 0.375rem;
-}
-
-.xiaoluo-panorama-capture-header button:hover {
-  color: var(--theme-text);
-  background-color: color-mix(in srgb, var(--theme-text-secondary) 12%, transparent);
-}
-
-.xiaoluo-panorama-viewer[data-theme='dark']
-  .xiaoluo-panorama-capture-header button {
-  color: var(--theme-text-secondary);
-}
-
-.xiaoluo-panorama-viewer[data-theme='dark']
-  .xiaoluo-panorama-capture-header button:hover {
-  color: var(--theme-text);
-  background-color: color-mix(in srgb, var(--theme-text-secondary) 12%, transparent);
-}
-
-.xiaoluo-panorama-capture-header svg {
-  width: 0.875rem;
-  height: 0.875rem;
-}
-
 .xiaoluo-panorama-ratio-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

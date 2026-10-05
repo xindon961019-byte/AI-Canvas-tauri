@@ -292,7 +292,7 @@ export default function NodePluginToolDialog({ pluginTool, nodeId, onClose }: No
         closeOnBackdrop
         motionPreset="quick"
       >
-        <header className="flex shrink-0 items-center gap-3 border-b border-canvas-border px-4 py-3">
+        <header className="flex shrink-0 items-center gap-3 border-b border-canvas-border px-2.5 py-2">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
             <Icon icon={pluginTool.tool.icon || 'lucide:blocks'} width={18} height={18} />
           </span>
@@ -363,7 +363,7 @@ export default function NodePluginToolDialog({ pluginTool, nodeId, onClose }: No
       motionPreset="quick"
     >
       <form onSubmit={(event) => void handleSubmit(event)}>
-        <header className="flex items-center gap-3 border-b border-canvas-border px-4 py-3">
+        <header className="flex items-center gap-3 border-b border-canvas-border px-2.5 py-2">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
             <Icon icon={pluginTool.tool.icon || 'lucide:blocks'} width={18} height={18} />
           </span>

@@ -13,6 +13,7 @@ import {
   type ModelProtocolExamples,
 } from '../../services/ai/modelProtocolImport';
 import AnimatedButton from '../shared/AnimatedButton';
+import PopupCloseButton from '../shared/PopupCloseButton';
 import { useT } from '../../i18n';
 
 interface ProtocolImportPanelProps {
@@ -151,15 +152,11 @@ export default function ProtocolImportPanel({ onApply, onClose }: ProtocolImport
             {t('分别粘贴文档中的请求代码和响应 JSON，支持 Fetch、Axios、cURL、Python、Raw HTTP 与 OpenAPI JSON。')}
           </p>
         </div>
-        <button
-          type="button"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-canvas-text-muted transition-colors hover:bg-white/[0.06] hover:text-canvas-text"
-          aria-label={t('关闭接口文档导入')}
+        <PopupCloseButton
+          ariaLabel={t('关闭接口文档导入')}
           title={t('关闭')}
           onClick={onClose}
-        >
-          <Icon icon="mdi:close" width="16" />
-        </button>
+        />
       </div>
 
       <div className="flex min-w-0 flex-col gap-2.5 border-t border-canvas-border pt-3">

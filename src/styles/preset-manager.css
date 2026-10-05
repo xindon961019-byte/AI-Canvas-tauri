@@ -1,4 +1,4 @@
-﻿/* ═══════════════════════════════════════════════
+/* ═══════════════════════════════════════════════
    Preset Manager — 用户预设管理器弹窗样式
    ============================================ */
 
@@ -26,7 +26,7 @@
     var(--glass-bevel-border) border-box;
   backdrop-filter: blur(var(--glass-blur-lg));
   border: 1px solid transparent;
-  border-radius: 14px;
+  border-radius: 16px;
   width: 760px;
   max-height: 90vh;
   display: flex;
@@ -900,10 +900,10 @@
 
 .preset-runner-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding: 12px 14px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--theme-border);
 }
 

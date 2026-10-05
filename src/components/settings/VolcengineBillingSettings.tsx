@@ -11,6 +11,7 @@ import {
 } from '../../services/billing/volcengineBillingService';
 import { formatCny } from '../../services/billing/volcenginePricing';
 import Select from '../shared/Select';
+import PopupCloseButton from '../shared/PopupCloseButton';
 
 const PAGE_SIZE = 30;
 const emptyPage: BillingPage = { items: [], total: 0, estimatedMicros: 0, calculatedMicros: 0 };
@@ -183,7 +184,7 @@ export default function VolcengineBillingSettings() {
 
     {detail && <div className="absolute inset-0 z-10 flex justify-end bg-black/40" role="presentation" onClick={() => setDetail(null)}>
       <aside className="flex h-full w-[min(94vw,32rem)] flex-col border-l border-canvas-border bg-canvas-surface shadow-xl" role="dialog" aria-label="费用记录详情" onClick={(event) => event.stopPropagation()}>
-        <div className="flex shrink-0 items-center justify-between border-b border-canvas-border px-5 py-3"><h3 className="text-sm font-semibold">调用详情</h3><button type="button" className="ui-icon-btn ui-icon-btn--sm" aria-label="关闭详情" onClick={() => setDetail(null)}><Icon icon="lucide:x" /></button></div>
+        <div className="flex shrink-0 items-center justify-between border-b border-canvas-border px-5 py-3"><h3 className="text-sm font-semibold">调用详情</h3><PopupCloseButton ariaLabel="关闭详情" onClick={() => setDetail(null)} /></div>
         <div className="min-h-0 flex-1 overflow-auto p-5"><dl className="grid grid-cols-[6rem_1fr] gap-x-3 gap-y-3 break-all text-xs"><dt className="text-canvas-text-secondary">本地项目</dt><dd>{detail.appProjectName}</dd><dt className="text-canvas-text-secondary">节点</dt><dd>{detail.nodeLabel}</dd><dt className="text-canvas-text-secondary">模型</dt><dd>{detail.modelId}</dd><dt className="text-canvas-text-secondary">提交时间</dt><dd>{new Date(detail.submittedAt).toLocaleString()}</dd><dt className="text-canvas-text-secondary">状态</dt><dd>{statusLabels[detail.status]}</dd><dt className="text-canvas-text-secondary">预计费用</dt><dd>{formatCny(detail.estimatedMicros)}</dd><dt className="text-canvas-text-secondary">核算费用</dt><dd>{detail.calculatedMicros === null ? '待核对' : formatCny(detail.calculatedMicros)}</dd>{[
           ['参考类型', detailInputs.referenceType], ['参考数量', detailInputs.referenceCount],
           ['时长（秒）', detailInputs.durationSeconds], ['画幅', detailInputs.ratio ?? detailInputs.aspectRatio],

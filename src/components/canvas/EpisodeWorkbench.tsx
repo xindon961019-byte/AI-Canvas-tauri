@@ -1,12 +1,13 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import { useReactFlow } from '@xyflow/react';
-import { CheckCircle2, LayoutGrid, ListVideo, Play, X } from 'lucide-react';
+import { CheckCircle2, LayoutGrid, ListVideo, Play } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
 import { useT } from '../../i18n';
 import { episodeShotGroups, shotVideoNodes } from '../../utils/episodeLayout';
 import { checkVideoServices, inspectVideoNode } from '../../services/videoBatchPlanning';
 import type { VideoBatchItemStatus, VideoBatchScope, VideoPreflightItem } from '../../types/videoBatch';
 import ModalOverlay from '../shared/ModalOverlay';
+import PopupCloseButton from '../shared/PopupCloseButton';
 import Select from '../shared/Select';
 
 const statusLabels: Record<VideoBatchItemStatus, string> = {
@@ -99,7 +100,7 @@ function EpisodeWorkbench() {
     </div>
     <ModalOverlay isOpen={panel !== null} onClose={() => setPanel(null)} ariaLabel={panel === 'check' ? t('视频物料检查') : t('视频生成队列')} className="w-[min(900px,96vw)]">
       <div className="bg-canvas-surface border border-canvas-border rounded-xl p-5 text-canvas-text flex flex-col gap-4 max-h-[85vh]">
-        <div className="flex items-center justify-between gap-4"><h2 className="text-lg font-semibold">{panel === 'check' ? t('视频物料检查与提交') : t('视频生成队列')}</h2><button className="ui-btn ui-btn--ghost" aria-label={t('关闭')} onClick={() => setPanel(null)}><X size={18} /></button></div>
+        <div className="flex items-center justify-between gap-4"><h2 className="text-lg font-semibold">{panel === 'check' ? t('视频物料检查与提交') : t('视频生成队列')}</h2><PopupCloseButton ariaLabel={t('关闭')} onClick={() => setPanel(null)} /></div>
         {panel === 'check' ? <>
           <p className="text-sm text-canvas-text-secondary">{t('仅生成视频，按镜号串行执行；每镜使用自己的参数，原结果保留在输出历史。')}</p>
           <p className="text-xs text-canvas-text-secondary">{t('检查节点引用和参数，并探测 ComfyUI 在线状态。其他接口的鉴权与可用性在提交时验证；画面质量仍需人工确认。')}</p>

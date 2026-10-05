@@ -1104,7 +1104,6 @@ button.wf-ionode-badge.is-default {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 12px;
   flex-shrink: 0;
 }
 .assets-panel-title {
@@ -1148,51 +1147,6 @@ button.wf-ionode-badge.is-default {
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
-.assets-tab-list {
-  display: flex;
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.assets-tab-list::-webkit-scrollbar {
-  display: none;
-}
-.assets-tab {
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
-  gap: 6px;
-  padding: 10px 10px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--theme-text-secondary);
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  white-space: nowrap;
-  cursor: var(--cursor-pointer, pointer);
-  transition: color 0.15s, border-color 0.15s;
-  margin-bottom: -1px;
-}
-.assets-tab:hover {
-  color: var(--theme-text);
-}
-.assets-tab.active {
-  color: var(--theme-text);
-  border-bottom-color: var(--brand-light);
-}
-.assets-tab-count {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 10px;
-  background: var(--border-subtle);
-  color: var(--theme-text-secondary);
-}
-.assets-tab.active .assets-tab-count {
-  background: color-mix(in srgb, var(--brand-light) 15%, transparent);
-  color: var(--brand-light);
-}
-
 /* Category filters */
 .assets-category-row {
   display: flex;
@@ -1699,12 +1653,8 @@ button.wf-ionode-badge.is-default {
 .assets-panel--drawer .assets-tabs {
   flex-wrap: wrap;
 }
-.assets-panel--drawer .assets-tab-list {
+.assets-panel--drawer .assets-tabs > .ui-tabs {
   flex: 1 0 100%;
-}
-.assets-panel--drawer .assets-tab {
-  padding: 8px 10px;
-  font-size: 12px;
 }
 .assets-panel--drawer .assets-toolbar {
   width: 100%;
@@ -2064,20 +2014,11 @@ button.wf-ionode-badge.is-default {
 [data-theme='light'] .assets-tabs {
   border-bottom-color: var(--assets-light-control-border);
 }
-[data-theme='light'] .assets-tab,
 [data-theme='light'] .assets-cat-chip,
 [data-theme='light'] .assets-filter-more,
 [data-theme='light'] .assets-folder-chip {
   color: var(--assets-light-muted);
 }
-[data-theme='light'] .assets-tab-count {
-  background: var(--assets-light-control-bg);
-  color: var(--assets-light-muted);
-}
-[data-theme='light'] .assets-tab.active {
-  border-bottom-color: var(--brand);
-}
-[data-theme='light'] .assets-tab.active .assets-tab-count,
 [data-theme='light'] .assets-cat-chip.active {
   color: color-mix(in srgb, var(--brand) 78%, var(--theme-text));
 }

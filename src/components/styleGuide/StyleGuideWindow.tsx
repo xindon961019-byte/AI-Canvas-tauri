@@ -33,6 +33,7 @@ const SECTIONS: GuideSection[] = [
   { id: 'sg-selects', title: '下拉选择' },
   { id: 'sg-dropzones', title: '上传区' },
   { id: 'sg-selection', title: '选择控件' },
+  { id: 'sg-tabs', title: 'Tabs · 滚动页签' },
   { id: 'sg-cards', title: '卡片' },
   { id: 'sg-badges', title: '徽标与表格' },
   { id: 'sg-feedback', title: '反馈与状态' },

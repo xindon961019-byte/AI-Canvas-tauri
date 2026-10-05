@@ -188,9 +188,9 @@ export default function ImageGenerationHistoryDialog({
         isOpen={isOpen}
         onClose={handleClose}
         ariaLabel={t('图片生成历史')}
-        className="max-h-[82vh] w-[min(94vw,880px)] rounded-lg border-canvas-border bg-canvas-surface"
+        className="max-h-[82vh] w-[min(94vw,880px)] rounded-2xl border-canvas-border bg-canvas-surface"
       >
-        <div className="flex shrink-0 items-center gap-3 border-b border-canvas-border px-4 py-3">
+        <div className="flex shrink-0 items-center gap-3 border-b border-canvas-border px-2.5 py-2">
           <span className="flex h-8 w-8 items-center justify-center rounded-md bg-green-500/10 text-green-400">
             <Icon icon="mdi:history" width={18} height={18} aria-hidden="true" />
           </span>

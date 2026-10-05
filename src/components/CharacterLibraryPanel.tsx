@@ -1082,7 +1082,7 @@ export default function CharacterLibraryPanel() {
           className="h-[min(820px,calc(100vh-32px))] w-[min(1180px,calc(100vw-32px))] border-canvas-border bg-canvas-surface text-canvas-text"
           motionPreset="quick"
         >
-          <header className="flex items-center gap-3 border-b border-canvas-border px-5 py-4">
+          <header className="flex items-center gap-3 border-b border-canvas-border px-2.5 py-2">
             <span className="grid size-10 shrink-0 place-items-center rounded-xl border border-canvas-border bg-canvas-card text-brand-light">
               <Icon icon="lucide:accessibility" width="19" height="19" aria-hidden="true" />
             </span>

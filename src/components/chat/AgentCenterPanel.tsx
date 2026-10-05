@@ -348,7 +348,7 @@ export default function AgentCenterPanel({ onClose, allowInstall = false }: Agen
 
   return (
     <div className="absolute inset-0 z-10 flex flex-col bg-canvas-bg">
-      <div className="flex items-center justify-between border-b border-canvas-border px-4 py-3">
+      <div className="flex items-center justify-between border-b border-canvas-border px-2.5 py-2">
         <div className="flex min-w-0 items-center gap-2">
           <Icon icon="lucide:bot" width="16" className="shrink-0 text-brand" />
           <span className="truncate text-sm font-medium text-canvas-text">{t('智能体中心')}</span>

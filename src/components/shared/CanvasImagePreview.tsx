@@ -67,9 +67,13 @@ export default function CanvasImagePreview({ nodeId, openingProjectId, src, onCl
   return (
     <>
       {failedSrc === displaySrc ? (
-        <div className="flex h-screen flex-col items-center justify-center gap-3 text-canvas-text-muted">
+        <div className="flex h-screen flex-col items-center justify-center gap-3 text-white/70">
           <span className="text-sm">{t('图片加载失败')}</span>
-          <button className="ui-btn ui-btn--secondary" onClick={() => setFailedSrc(undefined)}>
+          <button
+            type="button"
+            className="rounded-lg border border-white/20 bg-white/10 px-4 py-2 text-sm text-white transition-colors hover:bg-white/20"
+            onClick={() => setFailedSrc(undefined)}
+          >
             {t('重新加载')}
           </button>
         </div>
@@ -83,8 +87,8 @@ export default function CanvasImagePreview({ nodeId, openingProjectId, src, onCl
           onError={() => setFailedSrc(displaySrc)}
         />
       )}
-      <div className="pointer-events-none fixed inset-x-16 top-4 z-10 text-center text-sm text-canvas-text" aria-live="polite">
-        <span className="inline-block max-w-full truncate rounded-lg bg-canvas-surface px-3 py-1.5">
+      <div className="pointer-events-none fixed inset-x-16 top-4 z-10 text-center text-sm" aria-live="polite">
+        <span className="inline-block max-w-full truncate font-medium text-white/90 drop-shadow-[0_1px_3px_rgba(0,0,0,0.8)]">
           {activeNode.data.displayId != null ? `#${activeNode.data.displayId} · ` : ''}
           {activeNode.data.label} · {index + 1} / {images.length}
         </span>
@@ -97,23 +101,23 @@ export default function CanvasImagePreview({ nodeId, openingProjectId, src, onCl
       >
         <button
           type="button"
-          className="ui-btn ui-btn--secondary ui-btn--lg pointer-events-auto disabled:opacity-30"
+          className="pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full border-0 bg-transparent text-white/75 drop-shadow-[0_1px_3px_rgba(0,0,0,0.6)] transition-all hover:bg-white/10 hover:text-white active:scale-95 active:bg-white/20 disabled:pointer-events-none disabled:opacity-20"
           aria-label={t('上一张')}
           title={`${t('上一张')} (↑ / ←)`}
           disabled={!previous}
           onClick={() => navigate(-1)}
         >
-          <ChevronLeft size={24} aria-hidden="true" />
+          <ChevronLeft size={28} aria-hidden="true" />
         </button>
         <button
           type="button"
-          className="ui-btn ui-btn--secondary ui-btn--lg pointer-events-auto disabled:opacity-30"
+          className="pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full border-0 bg-transparent text-white/75 drop-shadow-[0_1px_3px_rgba(0,0,0,0.6)] transition-all hover:bg-white/10 hover:text-white active:scale-95 active:bg-white/20 disabled:pointer-events-none disabled:opacity-20"
           aria-label={t('下一张')}
           title={`${t('下一张')} (↓ / →)`}
           disabled={!next}
           onClick={() => navigate(1)}
         >
-          <ChevronRight size={24} aria-hidden="true" />
+          <ChevronRight size={28} aria-hidden="true" />
         </button>
       </div>
     </>

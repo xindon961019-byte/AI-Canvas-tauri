@@ -9,6 +9,8 @@
  */
 import Select from '../shared/Select';
 import NumberStepper from '../shared/NumberStepper';
+import Tabs from '../shared/Tabs';
+import PopupCloseButton from '../shared/PopupCloseButton';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import StyleGuideMascot from './StyleGuideMascot';
 
@@ -276,6 +278,13 @@ function ButtonsSection() {
           </div>
         </div>
       </Demo>
+
+      <Demo label="关闭按钮 (统一规范)" code="ui-close-btn anim-btn 或直接复用 <PopupCloseButton />">
+        <div className="ui-row ui-row--loose" style={{ alignItems: 'center' }}>
+          <PopupCloseButton ariaLabel="关闭样例" />
+          <span className="text-xs text-canvas-text-muted">标准弹窗/浮层关闭按钮（悬浮危险色+微缩放动效，透明底主题自适应）</span>
+        </div>
+      </Demo>
     </Section>
   );
 }
@@ -531,14 +540,14 @@ function NumberStepperDemo() {
         </div>
       </div>
 
-      <div data-theme="light" className="rounded-lg border border-canvas-border bg-canvas-surface p-3">
-        <div className="mb-2 text-xs font-semibold text-canvas-text">浅色按钮配色</div>
-        <p className="ui-hint mb-3">淡底色与细分隔线；悬停和按下使用主题色，禁用时保留弱化状态。</p>
+      <div className="rounded-lg border border-canvas-border bg-canvas-card p-3">
+        <div className="mb-2 text-xs font-semibold text-canvas-text">多尺寸联动与状态响应</div>
+        <p className="ui-hint mb-3">各尺寸档位均支持双向受控绑定；微调按钮随主题自动适配背景、描边与悬浮色。</p>
         <div className="flex flex-wrap items-center gap-3">
-          <NumberStepper value={val} onChange={setVal} min={4} max={180} unit="px" size="sm" aria-label="浅色紧凑数字微调" />
-          <NumberStepper value={val} onChange={setVal} min={4} max={180} unit="px" size="md" aria-label="浅色标准数字微调" />
-          <NumberStepper value={val} onChange={setVal} min={4} max={180} unit="px" size="lg" aria-label="浅色突出数字微调" />
-          <NumberStepper value={val} onChange={setVal} unit="px" disabled aria-label="浅色禁用数字微调" />
+          <NumberStepper value={val} onChange={setVal} min={4} max={180} unit="px" size="sm" aria-label="紧凑数字微调" />
+          <NumberStepper value={val} onChange={setVal} min={4} max={180} unit="px" size="md" aria-label="标准数字微调" />
+          <NumberStepper value={val} onChange={setVal} min={4} max={180} unit="px" size="lg" aria-label="突出数字微调" />
+          <NumberStepper value={val} onChange={setVal} unit="px" disabled aria-label="禁用数字微调" />
         </div>
       </div>
 
@@ -865,6 +874,46 @@ function SelectionSection() {
             </button>
           ))}
         </div>
+      </Demo>
+    </Section>
+  );
+}
+
+function TabsSection() {
+  const [assetTab, setAssetTab] = useState('project');
+  const [compactTab, setCompactTab] = useState('project');
+  const [simpleTab, setSimpleTab] = useState('overview');
+  const assetTabs = [
+    { value: 'project', label: '项目文件', count: 12 },
+    { value: 'global', label: '全局资产', count: 229 },
+    { value: 'creative', label: '创作资产', count: 1 },
+    { value: 'ark', label: '方舟素材库', count: 8 },
+    { value: 'nodes', label: '节点列表', count: 36 },
+  ];
+  return (
+    <Section id="sg-tabs" title="Tabs · 滚动页签"
+      desc="下划线与计数徽标复用真实 Tabs 组件。选中项尽量居中，末项靠右；略微越过目标后回弹，滚动边界也保留弹性。支持方向键、Home/End 和系统减少动态效果。">
+      <Demo label="带计数 · 横向滚动与弹簧回弹"
+        code={'<Tabs items={items} value={value} onChange={setValue} aria-label="资产类型" /> · .ui-tabs / .ui-tabs__item / .ui-tabs__count'}>
+        <div className="w-full max-w-sm">
+          <Tabs items={assetTabs} value={assetTab} onChange={setAssetTab} aria-label="带计数页签演示" />
+        </div>
+        <p className="m-0 mt-2 text-xs text-canvas-text-secondary">点击右侧页签查看居中与回弹，末项会滚到最右侧。</p>
+      </Demo>
+      <Demo label="紧凑尺寸 · 资产库侧栏"
+        code={'<Tabs size="sm" items={items} value={value} onChange={setValue} aria-label="资产类型" /> · .ui-tabs--sm'}>
+        <div className="w-full max-w-xs">
+          <Tabs size="sm" items={assetTabs} value={compactTab} onChange={setCompactTab} aria-label="紧凑页签演示" />
+        </div>
+      </Demo>
+      <Demo label="无计数与禁用状态"
+        code="items: [{ value, label, count?, disabled? }] · .is-active / :disabled / :focus-visible">
+        <Tabs items={[
+          { value: 'overview', label: '概览' },
+          { value: 'details', label: '详细信息' },
+          { value: 'unavailable', label: '暂不可用', disabled: true },
+          { value: 'history', label: '操作记录' },
+        ]} value={simpleTab} onChange={setSimpleTab} aria-label="基础页签演示" />
       </Demo>
     </Section>
   );
@@ -1234,6 +1283,7 @@ export function StyleGuideContent({ theme }: { theme: 'dark' | 'light' }) {
       <SelectsSection />
       <DropzoneSection />
       <SelectionSection />
+      <TabsSection />
       <CardsSection />
       <BadgesSection />
       <FeedbackSection />

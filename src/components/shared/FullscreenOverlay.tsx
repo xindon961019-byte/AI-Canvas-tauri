@@ -7,6 +7,7 @@ import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { ReactNode } from 'react';
 import { EASE_OUT_EXPO } from '../../utils/motion';
+import PopupCloseButton from './PopupCloseButton';
 
 export interface FullscreenOverlayProps {
   isOpen: boolean;
@@ -100,18 +101,11 @@ export default function FullscreenOverlay({
         >
           {hidePanel ? (
             <>
-              <motion.button
-                className="fullscreen-close fullscreen-close--absolute"
+              <PopupCloseButton
+                ariaLabel="关闭"
                 onClick={onClose}
-                aria-label="关闭"
-                whileHover={{ scale: 1.1 }}
-                whileTap={{ scale: 0.9 }}
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="20" height="20">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </motion.button>
+                className="fullscreen-close--absolute"
+              />
               {children}
             </>
           ) : (
@@ -130,33 +124,18 @@ export default function FullscreenOverlay({
                   {headerContent && (
                     <div className="fullscreen-header-extra">{headerContent}</div>
                   )}
-                  <motion.button
-                    className="fullscreen-close"
+                  <PopupCloseButton
+                    ariaLabel="关闭"
                     onClick={onClose}
-                    aria-label="关闭"
-                    whileHover={{ scale: 1.1 }}
-                    whileTap={{ scale: 0.9 }}
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="20" height="20">
-                      <line x1="18" y1="6" x2="6" y2="18" />
-                      <line x1="6" y1="6" x2="18" y2="18" />
-                    </svg>
-                  </motion.button>
+                  />
                 </div>
               )}
               {hideHeader && (
-                <motion.button
-                  className="fullscreen-close fullscreen-close--absolute"
+                <PopupCloseButton
+                  ariaLabel="关闭"
                   onClick={onClose}
-                  aria-label="关闭"
-                  whileHover={{ scale: 1.1 }}
-                  whileTap={{ scale: 0.9 }}
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="20" height="20">
-                    <line x1="18" y1="6" x2="6" y2="18" />
-                    <line x1="6" y1="6" x2="18" y2="18" />
-                  </svg>
-                </motion.button>
+                  className="fullscreen-close--absolute"
+                />
               )}
               <div className={`fullscreen-body${bodyClassName ? ` ${bodyClassName}` : ''}`}>
                 {children}

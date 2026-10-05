@@ -1,11 +1,12 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { LoaderCircle, Sparkles, X } from 'lucide-react';
+import { LoaderCircle, Sparkles } from 'lucide-react';
 import { useAppStore } from '../../../store/useAppStore';
 import { createPromptPolishSession, enablePromptPolishPackage, isPromptPolishPackageSupported } from '../../../services/promptPolishService';
 import { isSkillUserInvocable } from '../../../services/skillPromptService';
 import { mergeSubAgentProfiles } from '../../../services/chat/subAgentProfileService';
 import { useT } from '../../../i18n';
 import Select from '../../shared/Select';
+import PopupCloseButton from '../../shared/PopupCloseButton';
 
 export default function PromptPolishPanel({ nodeId, onClose }: { nodeId: string; onClose: () => void }) {
   const t = useT();
@@ -111,7 +112,7 @@ export default function PromptPolishPanel({ nodeId, onClose }: { nodeId: string;
     <aside className="prompt-polish-panel" aria-label={t('AI 润色')} onKeyDown={(event) => event.stopPropagation()}>
       <header className="flex shrink-0 items-center justify-between gap-2">
         <h2 className="flex items-center gap-2 text-sm font-medium text-canvas-text"><Sparkles size={16} aria-hidden="true" />{t('AI 润色')}</h2>
-        <button type="button" className="ui-btn ui-btn--sm" aria-label={t('关闭润色')} onClick={onClose}><X size={14} /></button>
+        <PopupCloseButton ariaLabel={t('关闭润色')} onClick={onClose} />
       </header>
       <p className="text-xs leading-relaxed text-canvas-text-muted">{t('描述你想怎么改，预览满意后再应用。')}</p>
       <label htmlFor={`${id}-instruction`} className="text-xs text-canvas-text-secondary">{t('润色要求')}</label>

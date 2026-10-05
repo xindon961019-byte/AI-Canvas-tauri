@@ -459,7 +459,7 @@ export default function ScriptWorkbench({
           }
         }}
       >
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border-subtle px-4">
+        <header className="flex shrink-0 items-center gap-3 border-b border-border-subtle px-2.5 py-2">
           <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-indigo-500/15 text-indigo-400">
             <Icon icon="lucide:notebook-pen" className="h-4 w-4" />
           </span>

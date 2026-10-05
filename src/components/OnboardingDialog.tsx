@@ -96,7 +96,7 @@ export default function OnboardingDialog({ onClose, onOpenHelp }: OnboardingDial
       ariaLabel={t('AI Canvas 新手引导')}
       className="h-[min(660px,calc(100vh-24px))] w-[min(620px,calc(100vw-24px))]"
     >
-      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-canvas-border px-4 py-3">
+      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-canvas-border px-2.5 py-2">
         <div className="flex min-w-0 items-center gap-3">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-400">
             <Icon icon="mdi:hand-wave-outline" width="20" height="20" aria-hidden="true" />

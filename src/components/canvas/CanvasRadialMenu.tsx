@@ -14,6 +14,7 @@ import type {
   CanvasQuickActionKind,
 } from '../../types';
 import type { CanvasRadialMenuPosition } from '../../hooks/useCanvasLongPressRadialMenu';
+import PopupCloseButton from '../shared/PopupCloseButton';
 import { useT } from '../../i18n';
 
 const SLOT_COUNT = 6;
@@ -266,9 +267,7 @@ export default function CanvasRadialMenu({ position, onClose }: CanvasRadialMenu
               <h2 id="canvas-radial-editor-title">{t('自定义画布圆环')}</h2>
               <p>{t('为 6 个槽位分配常用入口，空白画布长按即可呼出。')}</p>
             </div>
-            <button type="button" aria-label={t('关闭')} onClick={() => setEditing(false)}>
-              <Icon icon="solar:close-circle-linear" width="22" />
-            </button>
+            <PopupCloseButton ariaLabel={t('关闭')} onClick={() => setEditing(false)} />
           </div>
 
           <div className="canvas-radial-editor-list">

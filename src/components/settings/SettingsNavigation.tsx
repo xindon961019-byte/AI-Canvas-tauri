@@ -82,7 +82,7 @@ export default function SettingsNavigation({
 }) {
   const t = useT();
   return (
-    <aside className="w-60 settings-sidebar p-3 flex flex-col justify-between shrink-0 select-none">
+    <aside className="w-60 settings-sidebar p-2.5 pb-0 flex flex-col justify-between shrink-0 select-none">
       <nav aria-label={t('设置菜单')} className="space-y-1">
         {SETTINGS_TABS.map(({ id, label }) => {
           const isActive = activeTab === id;
@@ -103,7 +103,7 @@ export default function SettingsNavigation({
         })}
       </nav>
 
-      <div className="settings-sidebar-footer px-3 py-2 text-[11px] flex items-center justify-between pt-3">
+      <div className="settings-sidebar-footer px-3 py-2 text-[11px] flex items-center justify-between">
         <span>v0.9.21 Pro</span>
         <span className="inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>

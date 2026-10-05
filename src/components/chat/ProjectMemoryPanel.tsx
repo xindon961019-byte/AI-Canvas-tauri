@@ -144,7 +144,7 @@ export default function ProjectMemoryPanel({
 
   return (
     <div className="absolute inset-0 z-10 flex flex-col bg-canvas-bg">
-      <div className="flex items-center justify-between border-b border-canvas-border px-4 py-3">
+      <div className="flex items-center justify-between border-b border-canvas-border px-2.5 py-2">
         <div className="flex items-center gap-2">
           <Icon icon="mdi:brain" width="16" className="text-indigo-400" />
           <span className="text-sm font-medium text-canvas-text">{t('项目记忆')}</span>

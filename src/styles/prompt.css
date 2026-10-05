@@ -1,4 +1,4 @@
-﻿/* ============================================
+/* ============================================
    Prompt Panel
    ============================================ */
 .prompt-panel {
@@ -836,7 +836,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--theme-border);
   flex-shrink: 0;
 }

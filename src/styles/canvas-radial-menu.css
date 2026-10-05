@@ -157,17 +157,6 @@
   font-size: 11px;
 }
 
-.canvas-radial-editor-header > button {
-  display: grid;
-  flex: 0 0 auto;
-  place-items: center;
-  color: var(--theme-text-muted);
-  transition: color 130ms ease, transform 130ms cubic-bezier(0.23, 1, 0.32, 1);
-}
-
-.canvas-radial-editor-header > button:hover { color: var(--theme-text); }
-.canvas-radial-editor-header > button:active { transform: scale(0.96); }
-
 .canvas-radial-editor-list {
   display: grid;
   gap: 8px;

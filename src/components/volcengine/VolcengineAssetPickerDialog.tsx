@@ -5,6 +5,7 @@ import { listAssetGroups, listAssets } from '../../services/ai/providers/volceng
 import { readAppSecret } from '../../services/providerSecretService';
 import type { VolcengineAsset, VolcengineAssetGroup } from '../../types/volcengineAssetLibrary';
 import ModalOverlay from '../shared/ModalOverlay';
+import PopupCloseButton from '../shared/PopupCloseButton';
 import ViewportImage from '../shared/ViewportImage';
 import Select from '../shared/Select';
 
@@ -133,9 +134,9 @@ export default function VolcengineAssetPickerDialog({
   const close = () => { setSelected(new Map()); onClose(); };
 
   return <ModalOverlay isOpen={isOpen} onClose={close} ariaLabel="选择火山方舟素材" className="h-[min(82vh,44rem)] w-[min(92vw,58rem)]" closeOnBackdrop={false}>
-    <div className="flex items-center justify-between border-b border-canvas-border px-5 py-4">
+    <div className="flex items-center justify-between border-b border-canvas-border px-2.5 py-2">
       <div><h2 className="ui-title">选择火山方舟素材</h2><p className="mt-1 text-xs text-canvas-text-muted">项目：{projectName} · 仅 Active 素材可用于 Seedance 2.0/2.5</p></div>
-      <button type="button" className="ui-icon-btn ui-icon-btn--sm" onClick={close} aria-label="关闭"><Icon icon="mdi:close" /></button>
+      <PopupCloseButton onClick={close} ariaLabel="关闭" />
     </div>
     <div className="flex min-h-0 flex-1 flex-col p-4">
       <div className="flex gap-2">

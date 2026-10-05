@@ -266,6 +266,49 @@
   border-radius: var(--ui-radius-sm);
 }
 
+/* 标准关闭按钮：弹窗、浮层、面板、全屏预览与工具栏统一使用（触感微缩放 + 危险色悬浮） */
+.ui-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ui-control-h);
+  height: var(--ui-control-h);
+  min-height: var(--ui-control-h);
+  flex: none;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius-lg);
+  background: transparent;
+  color: var(--theme-text-secondary);
+  font-size: var(--ui-font);
+  font-weight: 500;
+  cursor: var(--cursor-pointer, pointer);
+  outline: none;
+  transition:
+    color var(--transition-base),
+    background-color var(--transition-base),
+    border-color var(--transition-base),
+    transform var(--dur-fast, 0.15s) var(--ease-out-quart, cubic-bezier(0.25, 1, 0.5, 1));
+}
+.ui-close-btn:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--danger-bg);
+  transform: scale(var(--anim-hover-scale, 1.04));
+}
+.ui-close-btn:active:not(:disabled) {
+  transform: scale(var(--anim-tap-scale, 0.96));
+}
+.ui-close-btn:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--brand-alpha-15);
+}
+.ui-close-btn:disabled {
+  opacity: 0.35;
+  cursor: var(--cursor-not-allowed, not-allowed);
+  transform: none;
+}
+
 /* 按钮组：相邻按钮共享边框，拼成一条 */
 .ui-btn-group {
   display: inline-flex;
@@ -1058,6 +1101,70 @@ select:not(.ui-select__control):not(.ui-select__native):disabled {
   box-shadow: 0 0 0 4px var(--brand-alpha-20);
 }
 
+/* Tabs / 页签：真实组件 shared/Tabs.tsx 负责焦点及弹簧滚动。 */
+.ui-tabs {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid var(--border-subtle);
+  scrollbar-width: none;
+  scroll-behavior: auto;
+}
+.ui-tabs::-webkit-scrollbar { display: none; }
+.ui-tabs__content {
+  position: relative;
+  display: flex;
+  width: max-content;
+  min-width: 100%;
+}
+.ui-tabs__item {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 10px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--theme-text-secondary);
+  font-family: inherit;
+  font-size: var(--ui-font-input);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: var(--cursor-pointer, pointer);
+  transition: color var(--transition-base), border-color var(--transition-base);
+}
+.ui-tabs__item:hover:not(:disabled) { color: var(--theme-text); }
+.ui-tabs__item.is-active {
+  color: var(--theme-text);
+  border-bottom-color: var(--brand-light);
+}
+.ui-tabs__item:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -3px;
+  border-radius: var(--ui-radius-sm);
+}
+.ui-tabs__item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.ui-tabs__count {
+  padding: 1px 6px;
+  border-radius: var(--ui-radius-lg);
+  background: var(--border-subtle);
+  color: var(--theme-text-secondary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.ui-tabs__item.is-active .ui-tabs__count {
+  background: color-mix(in srgb, var(--brand-light) 15%, transparent);
+  color: var(--brand-light);
+}
+.ui-tabs--sm .ui-tabs__item {
+  padding: 8px 10px;
+  font-size: var(--ui-font);
+}
+
 /* 分段控件：一组互斥选项，比下拉更直观 */
 .ui-segmented {
   display: inline-flex;
@@ -1147,7 +1254,7 @@ select:not(.ui-select__control):not(.ui-select__native):disabled {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--separator-color);
 }
 .ui-card__title {
@@ -1720,6 +1827,7 @@ select:not(.ui-select__control):not(.ui-select__native):disabled {
 @media (prefers-reduced-motion: reduce) {
   .ui-btn,
   .ui-icon-btn,
+  .ui-close-btn,
   .ui-input,
   .ui-textarea,
   .ui-select__control,
@@ -1729,12 +1837,15 @@ select:not(.ui-select__control):not(.ui-select__native):disabled {
   .ui-switch::after,
   .ui-card--interactive,
   .ui-segmented__item,
+  .ui-tabs__item,
   .ui-slider::-webkit-slider-thumb,
   .ui-progress__bar {
     transition: none;
   }
   .ui-btn:active:not(:disabled),
-  .ui-icon-btn:active:not(:disabled) { transform: none; }
+  .ui-icon-btn:active:not(:disabled),
+  .ui-close-btn:hover:not(:disabled),
+  .ui-close-btn:active:not(:disabled) { transform: none; }
   .ui-card--interactive:hover { transform: none; }
   .ui-slider::-webkit-slider-thumb:hover { transform: none; }
   .ui-skeleton,

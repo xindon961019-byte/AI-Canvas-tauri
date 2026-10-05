@@ -27,6 +27,7 @@ import { createCharacterDirectionGrid } from '../../services/onnxService';
 import PromptPanel from './shared/PromptPanel';
 import VolcengineCostEstimate from './shared/VolcengineCostEstimate';
 import ModalOverlay from '../shared/ModalOverlay';
+import PopupCloseButton from '../shared/PopupCloseButton';
 import LazyLoadBoundary from '../shared/LazyLoadBoundary';
 const VolcengineBillingSettings = lazy(() => import('../settings/VolcengineBillingSettings'));
 import type { MentionEditorHandle } from './shared/MentionEditor';
@@ -1288,7 +1289,11 @@ function AINodeDialog() {
             <Icon icon="lucide:receipt-text" width="19" className="shrink-0 text-canvas-text-secondary" />
             <h2 className="truncate text-base font-semibold text-canvas-text">火山方舟用量记录</h2>
           </div>
-          <button type="button" className="ui-icon-btn ui-icon-btn--sm" aria-label="关闭用量记录" title="关闭" onClick={() => setBillingOpen(false)}><Icon icon="lucide:x" /></button>
+          <PopupCloseButton
+            ariaLabel="关闭用量记录"
+            title="关闭"
+            onClick={() => setBillingOpen(false)}
+          />
         </div>
         {billingOpen && <Suspense fallback={<div className="p-5 text-sm text-canvas-text-secondary">正在加载用量记录…</div>}><VolcengineBillingSettings /></Suspense>}
       </ModalOverlay>

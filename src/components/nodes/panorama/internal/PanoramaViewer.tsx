@@ -24,6 +24,7 @@ import {
   ZoomOut
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import PopupCloseButton from '../../../shared/PopupCloseButton';
 import { PanoramaCore } from './PanoramaCore';
 import type { PanoramaCoreHandle, PanoramaViewState, PanoramaViewerProps, PanoramaCaptureResult, PanoramaCaptureRatio } from '../../../../types/panorama';
 
@@ -584,14 +585,11 @@ export const PanoramaViewer: React.FC<PanoramaViewerProps> = ({
             >
               <div className="xiaoluo-panorama-capture-header">
                 <span>截图比例</span>
-                <button
-                  type="button"
+                <PopupCloseButton
                   onClick={() => setShowCaptureTools(false)}
                   title="关闭比例截图"
-                  aria-label="关闭比例截图"
-                >
-                  <X />
-                </button>
+                  ariaLabel="关闭比例截图"
+                />
               </div>
 
               <div className="xiaoluo-panorama-ratio-grid">

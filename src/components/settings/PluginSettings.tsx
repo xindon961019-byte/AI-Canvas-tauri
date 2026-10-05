@@ -1048,7 +1048,7 @@ export default function PluginSettings() {
         className="h-[min(780px,calc(100vh-40px))] w-[min(920px,calc(100vw-40px))] border-canvas-border"
         motionPreset="quick"
       >
-        <header className="flex shrink-0 items-center gap-3 border-b border-canvas-border px-4 py-3">
+        <header className="flex shrink-0 items-center gap-3 border-b border-canvas-border px-2.5 py-2">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
             <Icon icon="lucide:book-open-text" width={18} height={18} />
           </span>

@@ -1210,14 +1210,6 @@
   top: 10px;
   right: 10px;
   z-index: 10;
-  background: var(--glass-bg);
-  backdrop-filter: blur(var(--glass-blur-sm));
-  border: 1px solid var(--glass-ring);
-  border-radius: 8px;
-}
-
-.fullscreen-close--absolute:hover {
-  background: rgba(40, 40, 52, 0.9);
 }
 
 /* ============ Fullscreen panorama viewer ============ */

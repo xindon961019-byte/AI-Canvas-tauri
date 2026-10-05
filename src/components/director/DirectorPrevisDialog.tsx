@@ -8,6 +8,7 @@ import { samplePrevisCamera, type DirectorPrevisRenderer } from '../../services/
 import { isTauriEnv } from '../../services/fileService';
 import { parseProjectModelRef } from '../../services/projectSettingsService';
 import ModalOverlay from '../shared/ModalOverlay';
+import PopupCloseButton from '../shared/PopupCloseButton';
 import Select from '../shared/Select';
 import ModelSelector from '../nodes/shared/ModelSelector';
 import MentionEditor, { type MentionEditorHandle } from '../nodes/shared/MentionEditor';
@@ -189,16 +190,17 @@ export default function DirectorPrevisDialog({ nodeId, initialAction = 'editor',
   return (
     <ModalOverlay isOpen onClose={() => { operation.current?.abort(); onClose(); }} ariaLabel="AI 镜头预演"
       className="h-[min(820px,calc(100dvh-32px))] w-[min(1180px,calc(100vw-32px))]" motionPreset="quick">
-      <header className="flex shrink-0 items-center gap-2 border-b border-canvas-border p-3">
+      <header className="flex shrink-0 items-center gap-2 border-b border-canvas-border px-2.5 py-2">
         <Icon icon="lucide:clapperboard" width={18} className="text-canvas-text-secondary" />
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-sm font-semibold text-canvas-text">AI 镜头预演</h2>
           <p className="ui-hint">空间 · 简模 · 人物走位 · 摄影机运动</p>
         </div>
         <span className="ui-hint">{dirty ? reference ? '有未保存调整' : '示例 · 尚未保存' : '已保存'}</span>
-        <button type="button" className="ui-icon-btn" aria-label="关闭镜头预演" onClick={() => { operation.current?.abort(); onClose(); }}>
-          <Icon icon="lucide:x" width={16} />
-        </button>
+        <PopupCloseButton
+          ariaLabel="关闭镜头预演"
+          onClick={() => { operation.current?.abort(); onClose(); }}
+        />
       </header>
       <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto lg:grid-cols-[minmax(0,1fr)_320px] lg:overflow-hidden">
         <section className="flex min-h-[340px] min-w-0 flex-col gap-2 p-3 lg:min-h-0">
