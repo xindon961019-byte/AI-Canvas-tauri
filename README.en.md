@@ -1,4 +1,4 @@
-# AI Canvas Tauri
+# AI Canvas Tauri — AI Canvas, Short Drama & Asset Management
 
 [简体中文](README.md) · **English** · [日本語](README.ja.md) · [한국어](README.ko.md)
 
@@ -6,9 +6,9 @@
   <img src="public/icons.svg" alt="AI Canvas Tauri Icon" width="140" height="140" />
 </p>
 
-> A local-first AI multimodal canvas and conversational Agent desktop application built on **Tauri 2 + React 19 + React Flow 12**.
+> A local-first AI canvas and visual workflow desktop app for **AI short drama creation, AI asset management, image/video generation and storyboarding**, with **ComfyUI, conversational AI agents and MCP**, built on **Tauri 2 + React 19 + React Flow 12**.
 
-AI Canvas Tauri organizes text, images, video, audio, frame-by-frame animation, Markdown, shot lists, 360° panoramas and hand-drawn notes into connectable canvas nodes. In a single project you can orchestrate generation pipelines, manage a character library and local assets, run ComfyUI workflows, and use the conversational assistant to query or modify the canvas, generate media, dispatch read-only sub-agents, read authorized files, and accumulate project memory. Projects can also be split into series and episodes — each episode of a short drama gets its own canvas, while the character library and assets are shared across the whole series.
+AI Canvas Tauri organizes text, images, video, audio, frame-by-frame animation, Markdown, shot lists, 360° panoramas and hand-drawn notes into connectable canvas nodes. In a single project you can orchestrate generation pipelines, manage characters, scenes, props and local media assets, run ComfyUI workflows, and use the conversational assistant to query or modify the canvas, generate media, dispatch read-only sub-agents, read authorized files, and accumulate project memory. Projects can also be split into series and episodes — each episode of an AI short drama gets its own canvas, while the character library and assets are shared across the whole series.
 
 ![Version](https://img.shields.io/badge/version-0.9.23-6366f1)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24c8db)
