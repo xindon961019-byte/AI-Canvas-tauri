@@ -4,7 +4,7 @@
 //! JavaScript 继续使用 QuickJS 强沙箱。Python 插件是用户显式信任的本机代码，
 //! 通过一次性子进程执行；这里只提供协议、超时和输出上限，不宣称操作系统隔离。
 
-use rquickjs::{Context, Runtime};
+use rquickjs::{context::EvalOptions, Context, Ctx, Promise, Runtime};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -37,35 +37,71 @@ const PYTHON_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const PYTHON_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_PYTHON_PROBE_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
+
+pub(crate) fn host_info() -> Value {
+    let mut host: Value = serde_json::from_str(include_str!("../../../plugin-host.json"))
+        .expect("内置插件合同必须是有效 JSON");
+    host["version"] = Value::String(env!("CARGO_PKG_VERSION").into());
+    host
+}
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 type InvocationKey = (String, String);
-type ActiveInvocationMap = HashMap<InvocationKey, Arc<AtomicBool>>;
+struct PendingInvocation {
+    cancelled: Arc<AtomicBool>,
+    active: bool,
+    created: Instant,
+}
+type ActiveInvocationMap = HashMap<InvocationKey, PendingInvocation>;
 
-static ACTIVE_PYTHON_INVOCATIONS: OnceLock<Mutex<ActiveInvocationMap>> = OnceLock::new();
+static ACTIVE_PLUGIN_INVOCATIONS: OnceLock<Mutex<ActiveInvocationMap>> = OnceLock::new();
 
-fn active_python_invocations() -> &'static Mutex<ActiveInvocationMap> {
-    ACTIVE_PYTHON_INVOCATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+fn active_plugin_invocations() -> &'static Mutex<ActiveInvocationMap> {
+    ACTIVE_PLUGIN_INVOCATIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-struct ActivePythonInvocation {
+struct ActivePluginInvocation {
     key: InvocationKey,
     cancelled: Arc<AtomicBool>,
 }
 
-impl ActivePythonInvocation {
+impl ActivePluginInvocation {
     fn register(plugin_id: &str, invocation_id: &str) -> Result<Self, String> {
+        crate::plugin_registry::validate_plugin_id(plugin_id)?;
         validate_invocation_id(invocation_id)?;
         let key = (plugin_id.to_string(), invocation_id.to_string());
         let cancelled = Arc::new(AtomicBool::new(false));
-        let mut invocations = active_python_invocations()
+        let mut invocations = active_plugin_invocations()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if invocations.contains_key(&key) {
-            return Err("插件调用 ID 正在使用".to_string());
+        invocations
+            .retain(|_, entry| entry.active || entry.created.elapsed() < Duration::from_secs(60));
+        if let Some(entry) = invocations.get(&key) {
+            if entry.active {
+                return Err("插件调用 ID 正在使用".to_string());
+            }
+            invocations.remove(&key);
+            return Err("插件调用已取消".to_string());
         }
-        invocations.insert(key.clone(), Arc::clone(&cancelled));
+        if invocations.len() >= 64
+            || invocations.values().filter(|entry| entry.active).count() >= 16
+            || invocations
+                .iter()
+                .filter(|((id, _), entry)| id == plugin_id && entry.active)
+                .count()
+                >= 4
+        {
+            return Err("插件执行并发已达上限".to_string());
+        }
+        invocations.insert(
+            key.clone(),
+            PendingInvocation {
+                cancelled: Arc::clone(&cancelled),
+                active: true,
+                created: Instant::now(),
+            },
+        );
         Ok(Self { key, cancelled })
     }
 }
@@ -83,45 +119,89 @@ fn validate_invocation_id(invocation_id: &str) -> Result<(), String> {
     }
 }
 
-impl Drop for ActivePythonInvocation {
+impl Drop for ActivePluginInvocation {
     fn drop(&mut self) {
-        let mut invocations = active_python_invocations()
+        let mut invocations = active_plugin_invocations()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if invocations
             .get(&self.key)
-            .is_some_and(|current| Arc::ptr_eq(current, &self.cancelled))
+            .is_some_and(|current| Arc::ptr_eq(&current.cancelled, &self.cancelled))
         {
             invocations.remove(&self.key);
         }
     }
 }
 
-/// 取消某个插件当前仍在运行的所有 Python 调用。
+/// 取消某个插件当前仍在运行的所有调用。
 ///
 /// 插件停用、卸载或被禁用名单命中时由原生注册表调用。调用记录由执行守卫在
-/// 子进程结束后移除，因此这里仅设置原子标记，避免与等待线程争用进程句柄。
+/// 执行结束后移除，因此这里仅设置原子标记，不与运行线程争用沙箱或进程句柄。
 pub fn cancel_plugin_invocations(plugin_id: &str) {
-    let invocations = active_python_invocations()
+    let invocations = active_plugin_invocations()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for ((active_plugin_id, _), cancelled) in invocations.iter() {
+    for ((active_plugin_id, _), entry) in invocations.iter() {
         if active_plugin_id == plugin_id {
-            cancelled.store(true, Ordering::Release);
+            entry.cancelled.store(true, Ordering::Release);
         }
     }
 }
 
-/// 取消所有插件当前仍在运行的 Python 调用。
+/// 取消所有插件当前仍在运行的调用。
 ///
 /// 信任注册表损坏时无法可靠枚举已注册插件，因此修复流程必须撤销整个运行集合。
 pub fn cancel_all_plugin_invocations() {
-    let invocations = active_python_invocations()
+    let invocations = active_plugin_invocations()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for cancelled in invocations.values() {
-        cancelled.store(true, Ordering::Release);
+    for entry in invocations.values() {
+        entry.cancelled.store(true, Ordering::Release);
     }
+}
+
+fn cancel_invocation(plugin_id: &str, invocation_id: &str) -> Result<(), String> {
+    crate::plugin_registry::validate_plugin_id(plugin_id)?;
+    validate_invocation_id(invocation_id)?;
+    let mut invocations = active_plugin_invocations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    invocations
+        .retain(|_, entry| entry.active || entry.created.elapsed() < Duration::from_secs(60));
+    let key = (plugin_id.to_string(), invocation_id.to_string());
+    if !invocations.contains_key(&key) {
+        if invocations.len() >= 64 {
+            return Err("插件取消记录已达上限".into());
+        }
+        // 取消命令可能先到；短期标记会拦住尚未登记的那次调用。
+        invocations.insert(
+            key.clone(),
+            PendingInvocation {
+                cancelled: Arc::new(AtomicBool::new(true)),
+                active: false,
+                created: Instant::now(),
+            },
+        );
+    }
+    invocations
+        .get(&key)
+        .expect("invocation inserted")
+        .cancelled
+        .store(true, Ordering::Release);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_node_plugin_tool<R: tauri::Runtime>(
+    webview: Webview<R>,
+    plugin_id: String,
+    invocation_id: String,
+) -> Result<(), String> {
+    crate::path_policy::ensure_trusted_caller(&webview)?;
+    if webview.label() != "main" {
+        return Err("插件调用只能由主窗口取消".into());
+    }
+    cancel_invocation(&plugin_id, &invocation_id)
 }
 
 #[cfg(windows)]
@@ -844,11 +924,86 @@ fn execute_python(
     )
 }
 
+fn javascript_error(ctx: &Ctx<'_>, error: rquickjs::Error, tool_id: &str, stage: &str) -> String {
+    let mut detail = error.to_string();
+    let mut locations = Vec::new();
+    if matches!(error, rquickjs::Error::Exception) {
+        let value = ctx.catch();
+        if let Some(exception) = value.as_exception() {
+            // 只接受字符串属性，不调用插件对象的 toString。
+            if let Ok(message) = exception.as_object().get::<_, rquickjs::Value>("message") {
+                if let Some(message) = message.as_string().and_then(|text| text.to_string().ok()) {
+                    detail = message;
+                }
+            }
+            if let Ok(stack) = exception.as_object().get::<_, rquickjs::Value>("stack") {
+                if let Some(stack) = stack.as_string().and_then(|text| text.to_string().ok()) {
+                    for line in stack.lines().take(16) {
+                        if let Some((_, location)) = line.split_once("main.js:") {
+                            let location: String = location
+                                .chars()
+                                .take(32)
+                                .take_while(|c| c.is_ascii_digit() || *c == ':')
+                                .collect();
+                            if !location.is_empty() {
+                                locations.push(format!("main.js:{location}"));
+                            }
+                        }
+                    }
+                }
+            }
+        } else if let Some(message) = value.as_string().and_then(|text| text.to_string().ok()) {
+            detail = message;
+        }
+    }
+    // 错误只回给当前界面，不写日志；常见凭据、URL 和绝对路径也不原样带回。
+    let bounded: String = detail.chars().take(512).collect();
+    let mut redact_next = false;
+    let message = bounded
+        .split_whitespace()
+        .map(|word| {
+            let lower = word.to_ascii_lowercase();
+            let sensitive = redact_next
+                || lower.contains("api_key")
+                || lower.contains("apikey")
+                || lower.contains("token")
+                || lower.contains("password")
+                || lower.contains("secret")
+                || lower.contains("authorization")
+                || lower.contains("bearer")
+                || lower.contains("sk-");
+            redact_next = lower.contains("bearer")
+                || lower.ends_with('=')
+                || lower.ends_with(':') && sensitive;
+            if sensitive || word.contains("://") || word.contains('/') || word.contains('\\') {
+                "[已隐藏]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let location = locations
+        .into_iter()
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ← ");
+    format!(
+        "插件执行失败 [{tool_id} · {stage}]: {message}{}",
+        if location.is_empty() {
+            String::new()
+        } else {
+            format!("\n{location}")
+        }
+    )
+}
+
 fn execute_with_timeout(
     source: String,
     tool_id: String,
     input: Value,
     timeout: Duration,
+    cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<Value, String> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err("插件源码超过 512 KiB 上限".to_string());
@@ -867,19 +1022,25 @@ fn execute_with_timeout(
     runtime.set_memory_limit(MEMORY_LIMIT_BYTES);
     runtime.set_max_stack_size(MAX_STACK_BYTES);
     let deadline = Instant::now() + timeout;
-    runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
+    let interrupt_cancelled = cancelled.clone();
+    runtime.set_interrupt_handler(Some(Box::new(move || {
+        Instant::now() >= deadline
+            || interrupt_cancelled
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+    })));
     let context =
         Context::full(&runtime).map_err(|error| format!("创建插件上下文失败: {error}"))?;
 
+    let bootstrap = r#""use strict";
+const __serialize = JSON.stringify;
+let __pluginDefinition = null;
+function definePlugin(definition) {
+    if (__pluginDefinition !== null) throw new Error("definePlugin 只能调用一次");
+    __pluginDefinition = definition;
+}"#;
     let script = format!(
         r#"
-"use strict";
-let __pluginDefinition = null;
-function definePlugin(definition) {{
-  if (__pluginDefinition !== null) throw new Error("definePlugin 只能调用一次");
-  __pluginDefinition = definition;
-}}
-{source}
 if (!__pluginDefinition || typeof __pluginDefinition !== "object") {{
   throw new Error("插件必须调用 definePlugin");
 }}
@@ -887,25 +1048,71 @@ const __toolId = {tool_id_json};
 const __tool = __pluginDefinition.tools && __pluginDefinition.tools[__toolId];
 if (typeof __tool !== "function") throw new Error("插件未注册该节点工具");
 const __input = Object.freeze({input_json});
-const __result = __tool(__input);
-if (__result && typeof __result.then === "function") {{
-  throw new Error("首版插件工具不支持异步返回值");
-}}
-const __json = JSON.stringify(__result);
-if (typeof __json !== "string") throw new Error("插件必须返回可 JSON 序列化的对象");
-__json;
+(async () => {{
+  const __result = await __tool(__input);
+  const __json = __serialize(__result);
+  if (typeof __json !== "string") throw new Error("插件必须返回可 JSON 序列化的对象");
+  return __json;
+}})();
 "#,
     );
 
-    let output_json = context
-        .with(|ctx| ctx.eval::<String, _>(script))
-        .map_err(|error| {
-            if Instant::now() >= deadline {
+    let output_json = context.with(|ctx| {
+        let execution_error = |error, stage| {
+            if cancelled
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+            {
+                "插件调用已取消".to_string()
+            } else if Instant::now() >= deadline {
                 "插件执行超过 2 秒，已终止".to_string()
             } else {
-                format!("插件执行失败: {error}")
+                let diagnostic = javascript_error(&ctx, error, &tool_id, stage);
+                // message/stack 可能被作者改成 getter，读取错误也必须服从同一个期限。
+                if cancelled
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Acquire))
+                {
+                    "插件调用已取消".to_string()
+                } else if Instant::now() >= deadline {
+                    "插件执行超过 2 秒，已终止".to_string()
+                } else {
+                    diagnostic
+                }
             }
-        })?;
+        };
+        ctx.eval::<(), _>(bootstrap)
+            .map_err(|error| execution_error(error, "初始化"))?;
+        let mut options = EvalOptions::default();
+        options.filename = Some("main.js".into());
+        ctx.eval_with_options::<(), _>(source, options)
+            .map_err(|error| execution_error(error, "加载/注册"))?;
+        let mut options = EvalOptions::default();
+        options.filename = Some("plugin-host.js".into());
+        let result = ctx
+            .eval_with_options::<Promise, _>(script, options)
+            .map_err(|error| execution_error(error, "执行"))?;
+        let mut job_executed = true;
+        loop {
+            if cancelled
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+            {
+                return Err("插件调用已取消".to_string());
+            }
+            if Instant::now() >= deadline {
+                return Err("插件执行超过 2 秒，已终止".to_string());
+            }
+            if let Some(value) = result.result::<String>() {
+                return value.map_err(|error| execution_error(error, "执行/序列化"));
+            }
+            if !job_executed {
+                return Err("插件 Promise 未完成，且没有可执行的异步任务".to_string());
+            }
+            // 很短的微任务也可能无限排队，不能只依赖 JS 指令中断来判断超时。
+            job_executed = ctx.execute_pending_job();
+        }
+    })?;
     if output_json.len() > MAX_OUTPUT_BYTES {
         return Err("插件输出超过 1 MiB 上限".to_string());
     }
@@ -917,11 +1124,23 @@ fn execute_plugin_tool_inner(
     source: String,
     tool_id: String,
     input: Value,
-    cancelled: Option<&AtomicBool>,
+    cancelled: Option<Arc<AtomicBool>>,
 ) -> Result<Value, String> {
     match runtime.as_str() {
-        "javascript" => execute_with_timeout(source, tool_id, input, JAVASCRIPT_EXECUTION_TIMEOUT),
-        "python" => execute_python(source, tool_id, input, PYTHON_EXECUTION_TIMEOUT, cancelled),
+        "javascript" => execute_with_timeout(
+            source,
+            tool_id,
+            input,
+            JAVASCRIPT_EXECUTION_TIMEOUT,
+            cancelled,
+        ),
+        "python" => execute_python(
+            source,
+            tool_id,
+            input,
+            PYTHON_EXECUTION_TIMEOUT,
+            cancelled.as_deref(),
+        ),
         _ => Err("不支持的插件运行时".to_string()),
     }
 }
@@ -935,39 +1154,25 @@ pub async fn execute_node_plugin_tool(
     revision_digest: String,
     tool_id: String,
     invocation_id: String,
-    input: Value,
+    mut input: Value,
 ) -> Result<Value, String> {
     crate::path_policy::ensure_trusted_caller(&webview)?;
     validate_invocation_id(&invocation_id)?;
-    let mut executable = crate::plugin_registry::load_plugin_for_execution(
+    let active_invocation = ActivePluginInvocation::register(&plugin_id, &invocation_id)?;
+    // 先登记取消守卫再读取活动版本，停用或更新就不会漏掉刚开始的调用。
+    let executable = crate::plugin_registry::load_plugin_for_execution(
         &app,
         &plugin_id,
         &source_digest,
         &revision_digest,
         &tool_id,
     )?;
-    let active_invocation = if executable.runtime == "python" {
-        let active = ActivePythonInvocation::register(&plugin_id, &invocation_id)?;
-        // The registry may be changed between the first lookup and cancellation registration.
-        // Looking it up again closes the remove/disable race: after registration, a later
-        // removal can signal this invocation through `cancel_plugin_invocations`.
-        executable = crate::plugin_registry::load_plugin_for_execution(
-            &app,
-            &plugin_id,
-            &source_digest,
-            &revision_digest,
-            &tool_id,
-        )?;
-        Some(active)
-    } else {
-        None
-    };
+    let object = input.as_object_mut().ok_or("插件输入必须是对象")?;
+    object.insert("host".into(), host_info());
 
     tauri::async_runtime::spawn_blocking(move || {
         let _active_invocation = active_invocation;
-        let cancelled = _active_invocation
-            .as_ref()
-            .map(|invocation| invocation.cancelled.as_ref());
+        let cancelled = Some(Arc::clone(&_active_invocation.cancelled));
         execute_plugin_tool_inner(
             executable.runtime,
             executable.source,
@@ -1048,6 +1253,7 @@ mod tests {
             "upper".to_string(),
             json!({ "node": { "data": { "output": "hello" } } }),
             Duration::from_millis(200),
+            None,
         )
         .unwrap();
         assert_eq!(result["data"]["output"], "HELLO");
@@ -1060,6 +1266,7 @@ mod tests {
             "missing".to_string(),
             json!({}),
             Duration::from_millis(200),
+            None,
         )
         .unwrap_err();
         assert!(error.contains("插件执行失败"));
@@ -1072,9 +1279,171 @@ mod tests {
             "loop".to_string(),
             json!({}),
             Duration::from_millis(20),
+            None,
         )
         .unwrap_err();
         assert!(error.contains("已终止"));
+    }
+
+    #[test]
+    fn awaits_async_tools_promise_chains_and_thenables() {
+        for tool in [
+            r#"async (input) => {
+                const parts = await Promise.all([Promise.resolve("异步"), Promise.resolve(input.suffix)]);
+                await Promise.resolve();
+                return { data: { output: parts.join("") } };
+            }"#,
+            r#"(input) => Promise.resolve(input.suffix).then(suffix => ({ data: { output: "异步" + suffix } }))"#,
+            r#"(input) => ({ then(resolve) { resolve({ data: { output: "异步" + input.suffix } }); } })"#,
+        ] {
+            let result = execute_with_timeout(
+                format!("definePlugin({{ tools: {{ run: {tool} }} }});"),
+                "run".into(),
+                json!({"suffix": "完成"}),
+                Duration::from_millis(200),
+                None,
+            )
+            .unwrap();
+            assert_eq!(result["data"]["output"], "异步完成");
+        }
+    }
+
+    #[test]
+    fn async_tools_preserve_effect_reentry_contract() {
+        let source = r#"definePlugin({ tools: { run: async (input) => {
+            await Promise.resolve();
+            if (!input.effectResult) return { effect: { type: "settings.get", key: "preferences" } };
+            return { data: { output: input.effectResult.value.value.language } };
+        } } });"#;
+        let request = execute_with_timeout(
+            source.into(),
+            "run".into(),
+            json!({}),
+            Duration::from_millis(200),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            json!({"effect": {"type": "settings.get", "key": "preferences"}})
+        );
+        let result = execute_with_timeout(source.into(), "run".into(), json!({
+            "effectResult": { "ok": true, "value": { "found": true, "value": { "language": "zh-CN" } } }
+        }), Duration::from_millis(200), None).unwrap();
+        assert_eq!(result["data"]["output"], "zh-CN");
+    }
+
+    #[test]
+    fn rejects_unresolved_and_rejected_promises_without_serializing_them_as_empty_objects() {
+        for (tool, message) in [
+            ("() => new Promise(() => {})", "Promise 未完成"),
+            (
+                "async () => { await new Promise(() => {}); }",
+                "Promise 未完成",
+            ),
+            ("async () => { throw new Error('failed'); }", "插件执行失败"),
+            ("() => Promise.reject('failed')", "插件执行失败"),
+            ("async () => undefined", "插件执行失败"),
+            (
+                "async () => { const value = {}; value.child = value; return value; }",
+                "插件执行失败",
+            ),
+        ] {
+            let error = execute_with_timeout(
+                format!("definePlugin({{ tools: {{ run: {tool} }} }});"),
+                "run".into(),
+                json!({}),
+                Duration::from_millis(200),
+                None,
+            )
+            .unwrap_err();
+            assert!(error.contains(message), "{error}");
+        }
+    }
+
+    #[test]
+    fn bounds_async_output_and_microtask_loops_with_the_same_deadline() {
+        let error = execute_with_timeout(
+            "definePlugin({ tools: { run: async () => ({ data: { output: 'a'.repeat(1024 * 1024) } }) } });".into(),
+            "run".into(), json!({}), Duration::from_millis(500), None,
+        ).unwrap_err();
+        assert!(error.contains("输出超过"));
+        for tool in [
+            "async () => { while (true) await Promise.resolve(); }",
+            "async () => { await Promise.resolve(); while (true) {} }",
+            "() => ({ then(resolve) { resolve(this); } })",
+        ] {
+            let error = execute_with_timeout(
+                format!("definePlugin({{ tools: {{ run: {tool} }} }});"),
+                "run".into(),
+                json!({}),
+                Duration::from_millis(20),
+                None,
+            )
+            .unwrap_err();
+            assert!(error.contains("已终止"), "{error}");
+        }
+    }
+
+    #[test]
+    fn cancels_running_javascript_and_releases_its_invocation_guard() {
+        let active = ActivePluginInvocation::register("plugin-js-cancel", "js-loop").unwrap();
+        let cancellation_request = Arc::clone(&active.cancelled);
+        let request_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            cancellation_request.store(true, Ordering::Release);
+        });
+        let error = execute_with_timeout(
+            "definePlugin({ tools: { run: async () => { while (true) await Promise.resolve(); } } });".into(),
+            "run".into(), json!({}), Duration::from_secs(2), Some(Arc::clone(&active.cancelled)),
+        ).unwrap_err();
+        request_thread.join().unwrap();
+        assert!(error.contains("已取消"), "{error}");
+        drop(active);
+        let fresh = ActivePluginInvocation::register("plugin-js-cancel", "js-loop").unwrap();
+        assert!(!fresh.cancelled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn single_invocation_cancellation_handles_both_arrival_orders_and_plugin_scope() {
+        cancel_invocation("early-js-cancel", "pending-1").unwrap();
+        let error = ActivePluginInvocation::register("early-js-cancel", "pending-1")
+            .err()
+            .unwrap();
+        assert!(error.contains("已取消"));
+        let active = ActivePluginInvocation::register("scoped-cancel-a", "pending-2").unwrap();
+        let other = ActivePluginInvocation::register("scoped-cancel-b", "pending-2").unwrap();
+        cancel_invocation("scoped-cancel-a", "pending-2").unwrap();
+        assert!(active.cancelled.load(Ordering::Acquire));
+        assert!(!other.cancelled.load(Ordering::Acquire));
+        assert!(cancel_invocation("../invalid", "pending-2").is_err());
+        drop(active);
+        let fresh = ActivePluginInvocation::register("scoped-cancel-a", "pending-2").unwrap();
+        assert!(!fresh.cancelled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn javascript_diagnostics_preserve_source_lines_and_hide_common_sensitive_details() {
+        for (source, expected) in [
+            ("definePlugin({ tools: { run: async () => {\nthrow new Error('转换失败');\n} } });", "main.js:2"),
+            ("definePlugin({ tools: { run: () => Promise.reject('拒绝执行') } });", "拒绝执行"),
+            ("definePlugin({ tools: { run: () => { throw new Error('api_key=private-value /Users/private/file.txt https://private.example/path'); } } });", "已隐藏"),
+        ] {
+            let error = execute_with_timeout(source.into(), "run".into(), json!({}), Duration::from_millis(200), None).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert!(error.contains("run ·"));
+            for forbidden in ["private-value", "/Users/private", "https://private.example"] { assert!(!error.contains(forbidden)); }
+        }
+        let error = execute_with_timeout(
+            "definePlugin({ tools: {".into(),
+            "run".into(),
+            json!({}),
+            Duration::from_millis(200),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("加载/注册"));
+        assert!(error.contains("main.js:1"), "{error}");
     }
 
     #[test]
@@ -1292,9 +1661,9 @@ define_plugin({"tools": {"loop": loop}})
 
     #[test]
     fn cancels_all_registered_invocations_for_one_plugin() {
-        let first = ActivePythonInvocation::register("plugin-a", "invocation-1").unwrap();
-        let second = ActivePythonInvocation::register("plugin-a", "invocation-2").unwrap();
-        let other = ActivePythonInvocation::register("plugin-b", "invocation-1").unwrap();
+        let first = ActivePluginInvocation::register("plugin-a", "invocation-1").unwrap();
+        let second = ActivePluginInvocation::register("plugin-a", "invocation-2").unwrap();
+        let other = ActivePluginInvocation::register("plugin-b", "invocation-1").unwrap();
 
         cancel_plugin_invocations("plugin-a");
 
@@ -1305,8 +1674,8 @@ define_plugin({"tools": {"loop": loop}})
 
     #[test]
     fn cancels_every_registered_invocation_during_registry_repair() {
-        let first = ActivePythonInvocation::register("repair-a", "invocation-1").unwrap();
-        let second = ActivePythonInvocation::register("repair-b", "invocation-1").unwrap();
+        let first = ActivePluginInvocation::register("repair-a", "invocation-1").unwrap();
+        let second = ActivePluginInvocation::register("repair-b", "invocation-1").unwrap();
 
         cancel_all_plugin_invocations();
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { LOCALES, setLocale } from '../../src/i18n';
 import type { InstalledPlugin, PluginInvocationResources } from '../../src/types/plugin';
+import { PLUGIN_HOST } from '../../src/services/plugins/pluginHost';
 
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -25,11 +26,15 @@ const mocks = vi.hoisted(() => ({
   generateImage: vi.fn(),
   buildModelCatalog: vi.fn(() => [] as Array<Record<string, unknown>>),
   state: {} as Record<string, unknown>,
+  subscribers: new Set<() => void>(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
 vi.mock('../../src/store/useAppStore', () => ({
-  useAppStore: { getState: () => mocks.state },
+  useAppStore: { getState: () => mocks.state, subscribe: (listener: () => void) => {
+    mocks.subscribers.add(listener);
+    return () => mocks.subscribers.delete(listener);
+  } },
 }));
 vi.mock('../../src/services/plugins/pluginModelCatalog', () => ({
   buildPluginModelCatalog: mocks.buildModelCatalog,
@@ -72,6 +77,7 @@ import {
 } from '../../src/services/plugins/pluginRuntime';
 import {
   completeCanvasDerivation,
+  cancelProjectCanvasDerivations,
   isCanvasDerivationFresh,
   registerCanvasDerivation,
 } from '../../src/services/canvasDerivationGuard';
@@ -218,7 +224,7 @@ const pythonMediaToolPlugin: InstalledPlugin = {
 };
 
 const modelCatalog = [
-  { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', category: 'text' as const, inputModalities: ['text', 'image'] },
+  { id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', category: 'text' as const, inputModalities: ['text' as const, 'image' as const] },
 ];
 
 const modelToolPlugin: InstalledPlugin = {
@@ -343,6 +349,7 @@ beforeEach(() => {
   setLocale('zh-CN');
   vi.clearAllMocks();
   mocks.revision = 3;
+  mocks.subscribers.clear();
   mocks.state = {
     currentProjectId: 'project-1',
     nodes: [{
@@ -405,7 +412,87 @@ beforeEach(() => {
   mocks.generateImage.mockResolvedValue({ url: 'https://example.com/result.png', width: 1024, height: 1024 });
 });
 
+describe('plugin execution cancellation and categorized budgets', () => {
+  const notify = () => { for (const listener of mocks.subscribers) listener(); };
+
+  it.each(['project', 'node', 'revision', 'plugin', 'guard'])('cancels an active native tool after %s changes and releases listeners', async (change) => {
+    let finish!: (value: unknown) => void;
+    mocks.invoke.mockImplementation((command) => command === 'execute_node_plugin_tool'
+      ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve());
+    const run = executeNodePluginTool(getAvailableNodePluginTools([plugin], 'ai-text')[0], 'node-1');
+    const assertion = expect(run).rejects.toThrow(/已取消|已变化|禁用/);
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    if (change === 'project') mocks.state.currentProjectId = 'other';
+    if (change === 'node') mocks.state.nodes = [];
+    if (change === 'revision') mocks.revision += 1;
+    if (change === 'plugin') mocks.state.installedPlugins = [{ ...plugin, enabled: false }];
+    if (change === 'guard') cancelProjectCanvasDerivations('project-1');
+    notify();
+    expect(mocks.invoke).toHaveBeenCalledWith('cancel_node_plugin_tool', expect.objectContaining({ pluginId: plugin.id }));
+    finish({ data: { output: 'late' } });
+    await assertion;
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+    expect(mocks.subscribers.size).toBe(0);
+  });
+
+  it('aborts a custom node model request when its project is switched', async () => {
+    mocks.state.installedPlugins = [customNodePlugin];
+    mocks.invoke.mockResolvedValue({ effect: { type: 'model.generate', modelId: 'text-model', prompt: '测试' } });
+    let receivedSignal: AbortSignal | undefined;
+    mocks.generateText.mockImplementation(({ signal }) => {
+      receivedSignal = signal;
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('取消生成')), { once: true }));
+    });
+    const run = executePluginNode(getAvailablePluginNodes([customNodePlugin])[0], 'node-1', [
+      { id: 'text-model', name: '文本', provider: 'general', category: 'text' },
+    ]);
+    const assertion = expect(run).rejects.toThrow(/已变化|已取消/);
+    await vi.waitFor(() => expect(receivedSignal).toBeDefined());
+    mocks.state.currentProjectId = 'other';
+    notify();
+    await assertion;
+    expect(receivedSignal!.aborted).toBe(true);
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+    expect(mocks.subscribers.size).toBe(0);
+  });
+
+  it.each([false, true])('uses separate settings and network budgets, exceed=%s', async (exceed) => {
+    const installed: InstalledPlugin = { ...plugin, manifest: { ...plugin.manifest,
+      permissions: ['node.read', 'node.write', 'settings.read', 'network.request'],
+      network: { allowedOrigins: ['https://api.example.com'] },
+    } };
+    mocks.state.installedPlugins = [installed];
+    mocks.invoke.mockImplementation(async (command, args) => {
+      if (command === 'execute_plugin_host_effect') return { found: false };
+      const iteration = args.input.iteration;
+      if (iteration < 8) return { effect: { type: 'settings.get', key: 'preferences' } };
+      if (iteration < (exceed ? 17 : 10)) return { effect: { type: 'network.request', url: 'https://api.example.com' } };
+      return { data: { output: '完成' } };
+    });
+    const run = executeNodePluginTool(getAvailableNodePluginTools([installed], 'ai-text')[0], 'node-1');
+    if (exceed) {
+      await expect(run).rejects.toThrow('network 操作不能超过 8 次');
+      expect(mocks.updateNodeData).not.toHaveBeenCalled();
+      expect(mocks.invoke.mock.calls.filter(([command]) => command === 'execute_plugin_host_effect')).toHaveLength(16);
+    } else {
+      await run;
+      expect(mocks.updateNodeData).toHaveBeenCalledWith('node-1', { output: '完成' });
+      expect(mocks.invoke.mock.calls.filter(([command]) => command === 'execute_plugin_host_effect')).toHaveLength(10);
+    }
+    expect(mocks.subscribers.size).toBe(0);
+  });
+});
+
 describe('node plugin runtime', () => {
+  it('preserves native string diagnostics as an Error without writing the node', async () => {
+    const diagnostic = '插件工具执行失败（error · 调用）：Error: E2E_ERROR [已隐藏]\n    at main.js:3:17';
+    mocks.invoke.mockRejectedValueOnce(diagnostic);
+    const tool = getAvailableNodePluginTools([plugin], 'ai-text')[0];
+    await expect(executeNodePluginTool(tool, 'node-1')).rejects.toThrow(diagnostic);
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+    expect(mocks.subscribers.size).toBe(0);
+  });
+
   it('shows enabled tools only on their declared node types and placements', () => {
     expect(getAvailableNodePluginTools([plugin], 'ai-text')).toHaveLength(1);
     expect(getAvailableNodePluginTools([plugin], 'ai-text', 'node-toolbar')).toHaveLength(1);
@@ -518,6 +605,7 @@ describe('node plugin runtime', () => {
       toolId: 'rewrite',
       invocationId: expect.any(String),
       input: {
+        host: PLUGIN_HOST,
         projectId: 'project-1',
         locale: 'zh-CN',
         iteration: 0,
@@ -534,6 +622,46 @@ describe('node plugin runtime', () => {
     }));
     expect(mocks.updateNodeData).toHaveBeenCalledWith('node-1', { output: 'after' });
     expect(mocks.showToast).toHaveBeenCalledWith('完成');
+  });
+
+  it.each([
+    { name: 'long text', value: '文'.repeat(256_001), error: '字符串不能超过' },
+    { name: 'large array', value: Array.from({ length: 257 }, (_, index) => index), error: '数组不能超过' },
+    { name: 'large object', value: Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`field${index}`, index])), error: '对象不能超过' },
+    { name: 'deep JSON', value: Array.from({ length: 9 }).reduce<unknown>((value) => ({ child: value }), '完整内容'), error: '嵌套深度不能超过' },
+  ])('rejects $name instead of writing a silently truncated plugin result', async ({ value, error }) => {
+    mocks.invoke.mockResolvedValueOnce({ data: { output: value } });
+    const tool = getAvailableNodePluginTools([plugin], 'ai-text')[0];
+
+    await expect(executeNodePluginTool(tool, 'node-1')).rejects.toThrow(error);
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+    expect(mocks.addNode).not.toHaveBeenCalled();
+    expect(mocks.showToast).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: 'text', value: '文'.repeat(256_000) },
+    { name: 'array', value: Array.from({ length: 256 }, (_, index) => index) },
+    { name: 'object', value: Object.fromEntries(Array.from({ length: 128 }, (_, index) => [`field${index}`, index])) },
+    { name: 'nested JSON', value: Array.from({ length: 8 }).reduce<unknown>((value) => ({ child: value }), '完整内容') },
+  ])('preserves all $name data at the supported boundary', async ({ value }) => {
+    mocks.invoke.mockResolvedValueOnce({ data: { output: value } });
+
+    await executeNodePluginTool(getAvailableNodePluginTools([plugin], 'ai-text')[0], 'node-1');
+
+    expect(mocks.updateNodeData).toHaveBeenCalledWith('node-1', { output: value });
+  });
+
+  it.each([
+    { prompt: '文'.repeat(256_001) },
+    Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`parameter${index}`, index])),
+  ])('rejects oversized parameters before invoking plugin code', async (parameters) => {
+    const tool = getAvailableNodePluginTools([plugin], 'ai-text')[0];
+
+    await expect(executeNodePluginTool(tool, 'node-1', parameters))
+      .rejects.toThrow('不能超过');
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -1547,7 +1675,7 @@ describe('node plugin runtime', () => {
       category: 'image',
     }]);
 
-    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ image_urls: [] }), undefined);
+    expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({ image_urls: [] }), expect.any(AbortSignal));
   });
 });
 
@@ -1674,6 +1802,61 @@ describe('node plugin tool model effects', () => {
     context.resources.derived.push({ resourceId: 'frame', origin: 'derived', access: 'read', displayName: 'frame.jpg', mediaType: 'image/jpeg', size: 3 });
     return { ...context, effect: { type: 'image.lineArt', resourceId: 'frame' } };
   }
+
+  it.each([
+    { effect: { type: 'network.request', url: 'https://api.example.com/items' }, permission: 'network.request' },
+    { effect: { type: 'settings.get', key: 'preferences' }, permission: 'settings.read' },
+    { effect: { type: 'settings.set', key: 'preferences', value: { language: 'zh-CN' } }, permission: 'settings.write' },
+    { effect: { type: 'settings.delete', key: 'preferences' }, permission: 'settings.write' },
+  ])('denies $effect.type before native execution without $permission', async ({ effect, permission }) => {
+    const result = await executePluginUiHostEffect({ ...uiContext(), toolId: 'rewrite', effect });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining(permission) });
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it('passes only registered plugin identity to a guarded network effect', async () => {
+    const context = uiContext();
+    const effect = { type: 'network.request', url: 'https://api.example.com/items', method: 'POST', body: '{"name":"example"}' };
+    mocks.invoke.mockResolvedValueOnce({ status: 200, contentType: 'application/json', body: '{"ok":true}' });
+    const result = await executePluginUiHostEffect({ ...context, toolId: 'rewrite', permissions: ['network.request'], effect });
+    expect(result).toMatchObject({ ok: true, value: { status: 200, body: '{"ok":true}' } });
+    expect(mocks.invoke).toHaveBeenCalledWith('execute_plugin_host_effect', {
+      identity: { pluginId: plugin.id, sourceDigest: plugin.sourceDigest, revisionDigest: plugin.revisionDigest, toolId: 'rewrite', invocationId: 'ui-shots' },
+      requestId: expect.any(String),
+      effect: { ...effect, headers: {} },
+    });
+    expect(context.trustedMediaReferences.size).toBe(0);
+  });
+
+  it.each(['cancel', 'revision'] as const)('rejects late network results after %s without retrying the request', async (change) => {
+    const controller = new AbortController();
+    mocks.invoke.mockImplementationOnce(async () => {
+      if (change === 'cancel') controller.abort();
+      else mocks.state = { ...mocks.state, installedPlugins: [{ ...plugin, revisionDigest: 'f'.repeat(64) }] };
+      return { status: 200, body: 'late' };
+    });
+    const result = await executePluginUiHostEffect({ ...uiContext(), toolId: 'rewrite', permissions: ['network.request'],
+      effect: { type: 'network.request', url: 'https://api.example.com' }, signal: controller.signal });
+    expect(result.ok).toBe(false);
+    expect(mocks.invoke.mock.calls.filter(([command]) => command === 'execute_plugin_host_effect')).toHaveLength(1);
+    if (change === 'cancel') {
+      const requestId = mocks.invoke.mock.calls[0][1].requestId;
+      expect(mocks.invoke).toHaveBeenCalledWith('cancel_plugin_host_effect', { pluginId: plugin.id, requestId });
+    }
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { type: 'network.request', url: 'https://api.example.com', headers: { Host: 'other.example.com' } },
+    { type: 'network.request', url: 'https://api.example.com', method: 'GET', body: 'unexpected' },
+    { type: 'network.request', url: 'https://api.example.com', method: 'POST', body: '文'.repeat(32_000) },
+    { type: 'settings.set', key: '../other-plugin', value: true },
+    { type: 'resource.createText', content: '文'.repeat(256_001) },
+    { type: 'model.generate', modelId: 'gpt-4o', prompt: '文'.repeat(256_001) },
+  ])('rejects malformed or oversized effects before native IPC %j', async (effect) => {
+    await expect(executePluginUiHostEffect({ ...uiContext(), toolId: 'rewrite', effect })).rejects.toThrow();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
 
   it('converts an authorized original once and returns only a bounded preview and representation', async () => {
     const context = lineArtContext();
@@ -1931,7 +2114,8 @@ describe('node plugin tool model effects', () => {
       })).rejects.toThrow(reason === 'abort' ? '已取消' : '画布已变化');
       expect(mocks.generateText).not.toHaveBeenCalled();
       expect(mocks.updateNodeData).not.toHaveBeenCalled();
-      expect(mocks.invoke).toHaveBeenCalledOnce();
+      expect(mocks.invoke.mock.calls.filter(([command]) => command === 'execute_node_plugin_tool')).toHaveLength(1);
+      if (reason === 'abort') expect(mocks.invoke).toHaveBeenCalledWith('cancel_node_plugin_tool', { pluginId: plugin.id, invocationId: 'cancelled-ui' });
     } finally { completeCanvasDerivation(guard); }
   });
 
@@ -1972,6 +2156,30 @@ describe('node plugin tool model effects', () => {
       value: { text: '模型结果' },
     });
     expect(mocks.addNode).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts a text model request when its plugin UI session is cancelled', async () => {
+    const context = uiContext();
+    const controller = new AbortController();
+    mocks.generateText.mockImplementationOnce(async ({ signal }: { signal?: AbortSignal }) => {
+      controller.abort(new Error('用户取消了文本生成'));
+      signal?.throwIfAborted();
+      return '迟到的回复';
+    });
+
+    const result = await executePluginUiHostEffect({
+      ...context,
+      permissions: ['models.read', 'models.invoke'],
+      models: modelCatalog,
+      effect: { type: 'model.generate', modelId: 'gpt-4o', prompt: '分析素材' },
+      signal: controller.signal,
+    });
+
+    expect(mocks.generateText).toHaveBeenCalledWith(expect.objectContaining({ signal: controller.signal }));
+    expect(result).toMatchObject({ type: 'model.generate', ok: false, error: '用户取消了文本生成' });
+    expect(mocks.generateText).toHaveBeenCalledTimes(1);
+    expect(mocks.updateNodeData).not.toHaveBeenCalled();
+    expect(mocks.addNode).not.toHaveBeenCalled();
   });
 
   it('creates text only inside the current project and returns no local path', async () => {
@@ -2067,7 +2275,7 @@ describe('node plugin tool model effects', () => {
 
     await expect(
       executeNodePluginTool(getAvailableNodePluginTools([modelToolPlugin], 'ai-text')[0], 'node-1'),
-    ).rejects.toThrow('宿主操作不能超过 4 次');
+    ).rejects.toThrow('model 操作不能超过 4 次');
     expect(mocks.addNode).not.toHaveBeenCalled();
     expect(mocks.updateNodeData).not.toHaveBeenCalled();
   });

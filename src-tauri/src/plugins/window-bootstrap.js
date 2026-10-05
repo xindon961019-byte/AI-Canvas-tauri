@@ -69,6 +69,7 @@
   function createProps() {
     return Object.freeze({
       surface: context.surface,
+      host: context.host,
       get theme() { return context.theme; },
       get locale() { return context.locale; },
       node: context.node,

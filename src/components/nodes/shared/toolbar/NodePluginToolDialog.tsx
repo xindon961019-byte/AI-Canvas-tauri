@@ -54,11 +54,14 @@ function createPluginUiFrameDocument(sessionSrc: string): PluginUiFrameDocument 
   const bootstrapUrl = escapeHtmlAttribute(
     new URL('/plugin-ui-bootstrap.js', window.location.href).href,
   );
+  // 沙箱页面是 opaque origin，不能靠 'self' 加载宿主的引导脚本。
+  const nonce = crypto.randomUUID().replaceAll('-', '');
   const documentHtml = pluginUiHostDocument.replace(
     PLUGIN_UI_BOOTSTRAP_MARKUP,
-    `src="${bootstrapUrl}"`,
-  );
-  if (documentHtml === pluginUiHostDocument) {
+    `nonce="${nonce}" src="${bootstrapUrl}"`,
+  ).replace("script-src 'self' ", `script-src 'nonce-${nonce}' `);
+  if (!documentHtml.includes(`nonce="${nonce}"`)
+    || !documentHtml.includes(`script-src 'nonce-${nonce}' `)) {
     throw new Error('插件界面宿主页无效');
   }
 

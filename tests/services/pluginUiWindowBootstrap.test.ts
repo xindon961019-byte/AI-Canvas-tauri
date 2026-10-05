@@ -9,7 +9,7 @@ const binding = {
   projectId: 'project-1', nodeId: 'node-1', canvasRevision: 7,
 };
 const pageUrl = `http://plugin-window.localhost/${binding.sessionId}/index.html`;
-const initialContext = { surface: 'tool-dialog', theme: 'dark', locale: 'zh-CN', node: { id: 'node-1' }, models: [], resources: {}, parameters: {} };
+const initialContext = { surface: 'tool-dialog', host: { capabilities: ['javascript.async'] }, theme: 'dark', locale: 'zh-CN', node: { id: 'node-1' }, models: [], resources: {}, parameters: {} };
 type BridgeRequest = { binding: typeof binding; requestId: string; kind: string; payload: unknown };
 type Invoke = (command: string, args: { request: BridgeRequest }) => Promise<unknown>;
 interface Props {
@@ -89,6 +89,7 @@ describe('dedicated native plugin window bootstrap', () => {
     expect(host.attributes.get('data-theme')).toBe('dark');
     expect(host.attributes.get('lang')).toBe('zh-CN');
     expect(Object.isFrozen(host.mount.mock.calls[0][1])).toBe(true);
+    expect(host.mount.mock.calls[0][1]).toMatchObject({ host: initialContext.host });
   });
 
   it.each([{ embedded: true }, { location: 'http://tauri.localhost/' }])('rejects the wrong top-level boundary before invoking', async (options) => {

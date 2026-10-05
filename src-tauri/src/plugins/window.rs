@@ -1098,7 +1098,8 @@ mod tests {
                 open_plugin_ui_window,
                 close_plugin_ui_window,
                 respond_plugin_ui_window_request,
-                plugin_ui_window_request
+                plugin_ui_window_request,
+                crate::plugin_runtime::cancel_node_plugin_tool
             ])
             .build(context)
             .unwrap();
@@ -1144,6 +1145,23 @@ mod tests {
                 }
                 _ => assert!(close.unwrap_err().as_str().unwrap().contains("not allowed")),
             }
+            let cancel = invoke(
+                "cancel_node_plugin_tool",
+                json!({
+                    "pluginId": "acl-cancel-test", "invocationId": "acl-cancel-invocation"
+                }),
+            );
+            match label {
+                "main" => assert!(cancel.is_ok()),
+                "chat-assistant" => {
+                    assert!(cancel.unwrap_err().as_str().unwrap().contains("主窗口"))
+                }
+                _ => assert!(cancel
+                    .unwrap_err()
+                    .as_str()
+                    .unwrap()
+                    .contains("not allowed")),
+            }
             let bridge = invoke(
                 "plugin_ui_window_request",
                 json!({ "request": {
@@ -1157,6 +1175,9 @@ mod tests {
                 for command in [
                     "open_plugin_ui_window",
                     "respond_plugin_ui_window_request",
+                    "execute_plugin_host_effect",
+                    "cancel_plugin_host_effect",
+                    "cancel_node_plugin_tool",
                     "plugin:fs|stat",
                     "plugin:shell|execute",
                     "plugin:event|emit",

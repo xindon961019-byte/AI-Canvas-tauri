@@ -66,7 +66,7 @@ async function setup(options: { tauri?: boolean; delayedRegistration?: boolean; 
     }] },
   });
   const readPackage = vi.fn().mockResolvedValue({
-    manifestText, manifest: JSON.parse(manifestText), source: 'define_plugin({"tools": {}})', resourcePayloads: [],
+    manifestText, manifest: JSON.parse(manifestText), source: 'define_plugin({"tools": {}})', resourcePayloads: [], directory: 'G:/plugins/example/',
   });
   vi.doMock('../../src/services/fs/pluginPackageFiles', () => ({ readLocalPluginPackage: readPackage, selectNativePluginDirectory: vi.fn() }));
   const confirm = vi.fn().mockResolvedValue(true);
@@ -86,7 +86,8 @@ async function setup(options: { tauri?: boolean; delayedRegistration?: boolean; 
   vi.stubGlobal('window', { devicePixelRatio: 2, setTimeout: vi.fn(), clearTimeout: vi.fn() });
   const { default: PluginSettings } = await import('../../src/components/settings/PluginSettings');
   const { isExternalDropCaptured } = await import('../../src/utils/dropCapture');
-  const render = () => { cursor = 0; effects = []; return findZone(PluginSettings())!; };
+  const renderFull = () => { cursor = 0; effects = []; return PluginSettings(); };
+  const render = () => findZone(renderFull())!;
   const zone = render();
   if (zone.props.ref) {
     (zone.props.ref as { current: unknown }).current = {
@@ -100,6 +101,7 @@ async function setup(options: { tauri?: boolean; delayedRegistration?: boolean; 
   if (options.tauri !== false) await vi.waitFor(() => expect(subscribe).toHaveBeenCalledOnce());
   return {
     zone, render, readPackage, install, confirm, toast, release, subscribe, globalListen, canvas, paste, manifestText,
+    store, renderFull,
     isExternalDropCaptured, dispose,
     finishRegistration: () => finishRegistration?.(release),
     send: async (payload: DragDropEvent) => { await callback?.({ payload }); },
@@ -107,6 +109,32 @@ async function setup(options: { tauri?: boolean; delayedRegistration?: boolean; 
 }
 
 const drop = (x = 300): DragDropEvent => ({ type: 'drop', paths: ['G:/plugins/example'], position: new PhysicalPosition(x, 300) });
+
+it('labels each entry with its declared node type without mixing placements from different tools', async () => {
+  const h = await setup();
+  const manifest = JSON.parse(h.manifestText);
+  const tool = manifest.contributes.nodeTools[0];
+  manifest.contributes.nodeTools = [
+    { ...tool, nodeTypes: ['source-text'], placements: ['node-context-menu', 'node-toolbar'] },
+    { ...tool, id: 'image', nodeTypes: ['source-image'], placements: ['node-context-menu'] },
+    { ...tool, id: 'duplicate', nodeTypes: ['source-text'], placements: ['node-context-menu'] },
+  ];
+  manifest.contributes.nodes = [{ id: 'custom', title: '自定义节点' }];
+  h.store.installedPlugins = [{ id: manifest.id, enabled: true, manifest, source: '', installedAt: 1, updatedAt: 1 }];
+  const text = (root: unknown): string => {
+    if (Array.isArray(root)) return root.map(text).join('');
+    if (typeof root === 'string' || typeof root === 'number') return String(root);
+    if (root && typeof root === 'object' && 'props' in root) return text((root as ElementLike).props.children);
+    return '';
+  };
+  try {
+    const content = text(h.renderFull());
+    expect(content).toContain('入口：文本节点右键菜单、文本节点工具栏、图像节点右键菜单、节点选择器');
+    expect(content).not.toContain('图像节点工具栏');
+    expect(content).not.toContain('source-text');
+    expect(content).not.toContain('source-image');
+  } finally { h.dispose(); }
+});
 
 it('receives a native folder drop at scaled coordinates and uses the existing reviewed installation chain', async () => {
   const h = await setup();
@@ -126,6 +154,38 @@ it('receives a native folder drop at scaled coordinates and uses the existing re
     });
     expect(readDuplicate).not.toHaveBeenCalled();
     expect(h.install).toHaveBeenCalledOnce();
+  } finally { h.dispose(); }
+});
+
+it('reloads only a successfully installed local directory through the reviewed installation path and rejects changed IDs', async () => {
+  const h = await setup();
+  const findReload = (root: unknown): ElementLike | undefined => {
+    if (Array.isArray(root)) return root.map(findReload).find(Boolean);
+    if (!root || typeof root !== 'object' || !('props' in root)) return undefined;
+    const element = root as ElementLike;
+    return String(element.props['aria-label']).startsWith('重新载入 ') ? element : findReload(element.props.children);
+  };
+  h.install.mockImplementation(async () => {
+    h.store.installedPlugins = [{ id: 'com.example.drag', enabled: true, manifest: JSON.parse(h.manifestText),
+      source: '', sourceDigest: 'a'.repeat(64), revisionDigest: 'b'.repeat(64), installedAt: 1, updatedAt: 1 }];
+  });
+  try {
+    await h.send(drop());
+    const button = findReload(h.renderFull())!;
+    expect(button).toBeDefined();
+    await (button.props.onClick as () => Promise<void>)();
+    await vi.waitFor(() => expect(h.install).toHaveBeenCalledTimes(2));
+    expect(h.readPackage).toHaveBeenLastCalledWith(['G:/plugins/example/'], true);
+    expect(h.install).toHaveBeenCalledTimes(2);
+    expect(h.confirm).toHaveBeenCalledTimes(2);
+    h.readPackage.mockResolvedValueOnce({
+      manifestText: h.manifestText, manifest: { ...JSON.parse(h.manifestText), id: 'com.example.other' },
+      source: '', resourcePayloads: [], directory: 'G:/plugins/example/',
+    });
+    await (findReload(h.renderFull())!.props.onClick as () => Promise<void>)();
+    await vi.waitFor(() => expect(h.toast).toHaveBeenCalledWith(expect.stringContaining('插件 ID 已变化'), 'error'));
+    expect(h.install).toHaveBeenCalledTimes(2);
+    expect(h.toast).toHaveBeenCalledWith(expect.stringContaining('插件 ID 已变化'), 'error');
   } finally { h.dispose(); }
 });
 

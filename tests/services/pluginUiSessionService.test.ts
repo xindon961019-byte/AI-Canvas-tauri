@@ -160,6 +160,10 @@ describe('pluginUiSessionService', () => {
     }
     expect(mocks.executeEffect).not.toHaveBeenCalled();
     expect(await session.request('context', null)).toMatchObject({ ok: true, value: { surface: 'tool-dialog', theme: 'light', resources } });
+    expect(await session.request('context', null)).toMatchObject({ ok: true, value: {
+      host: { apiVersions: [1, 2], capabilities: expect.arrayContaining(['javascript.async', 'invocation.cancel']),
+        limits: { tool: { total: 32, model: 4 } } },
+    } });
     session.dispose();
     expect(await session.request('effect', {})).toMatchObject({ ok: false });
     expect(mocks.executeEffect).not.toHaveBeenCalled();
@@ -256,6 +260,50 @@ describe('pluginUiSessionService', () => {
     expect(await session.request('submit', {})).toMatchObject({ ok: false });
     session.finishRequest();
     expect(session.isActive()).toBe(false);
+  });
+  it.each([
+    { value: '文'.repeat(256_001), error: '字符串不能超过' },
+    { value: Array.from({ length: 257 }, (_, index) => index), error: '数组不能超过' },
+    { value: Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`key${index}`, index])), error: '对象不能超过' },
+    { value: Array.from({ length: 9 }).reduce<unknown>((value) => ({ child: value }), '完整内容'), error: '嵌套深度不能超过' },
+  ])('keeps existing parameters intact when an oversized UI edit or submit is rejected ($error)', async ({ value, error }) => {
+    const session = await createPluginUiNativeSession({ plugin, tool, nodeId: 'target', exportName: 'dialog', parameters: { prompt: 'initial' }, onClose: vi.fn() });
+    expect(await session.request('set-parameters', { prompt: value })).toMatchObject({ ok: false, error: expect.stringContaining(error) });
+    expect(await session.request('submit', { data: { prompt: value } })).toMatchObject({ ok: false, error: expect.stringContaining(error) });
+    expect(await session.request('context', null)).toMatchObject({ ok: true, value: { parameters: { prompt: 'initial' } } });
+    expect(mocks.executeTool).not.toHaveBeenCalled();
+    session.dispose();
+  });
+  it('rejects initial UI overflow and releases the canvas guard', async () => {
+    await expect(createPluginUiNativeSession({ plugin, tool, nodeId: 'target', exportName: 'dialog', parameters: { prompt: '文'.repeat(256_001) }, onClose: vi.fn() })).rejects.toThrow('字符串不能超过');
+    expect(mocks.mintResources).not.toHaveBeenCalled();
+    expect(mocks.completeCanvasDerivation).toHaveBeenCalled();
+  });
+  it('rejects merged parameter overflow even when each patch is within its own limit', async () => {
+    const parameters = Object.fromEntries(Array.from({ length: 128 }, (_, index) => [`field${index}`, index]));
+    const session = await createPluginUiNativeSession({ plugin, tool, nodeId: 'target', exportName: 'dialog', parameters, onClose: vi.fn() });
+    expect(await session.request('set-parameters', { extra: true })).toMatchObject({ ok: false, error: expect.stringContaining('对象不能超过') });
+    expect(await session.request('submit', { data: { extra: true } })).toMatchObject({ ok: false, error: expect.stringContaining('对象不能超过') });
+    expect(await session.request('context', null)).toMatchObject({ ok: true, value: { parameters } });
+    expect(mocks.executeTool).not.toHaveBeenCalled();
+    session.dispose();
+  });
+  it('accepts submitted data at the depth boundary without counting the transport envelope', async () => {
+    const value = Array.from({ length: 7 }).reduce<unknown>((value) => ({ child: value }), '完整内容');
+    const session = await native();
+    expect(await session.request('submit', { data: { prompt: value } })).toMatchObject({ ok: true });
+    expect(mocks.executeTool).toHaveBeenCalledWith(expect.anything(), 'target', expect.objectContaining({ prompt: value }), expect.anything());
+    session.dispose();
+  });
+  it('limits settings and network effects independently of paid model calls', async () => {
+    const session = await native();
+    for (let i = 0; i < 64; i++) expect(await session.request('effect', { type: 'settings.get', key: 'preferences' })).toMatchObject({ ok: true });
+    expect(await session.request('effect', { type: 'settings.get', key: 'preferences' })).toMatchObject({ ok: false, error: expect.stringContaining('64') });
+    for (let i = 0; i < 16; i++) expect(await session.request('effect', { type: 'network.request', url: 'https://api.example.com' })).toMatchObject({ ok: true });
+    expect(await session.request('effect', { type: 'network.request' })).toMatchObject({ ok: false, error: expect.stringContaining('16') });
+    for (let i = 0; i < 4; i++) expect(await session.request('effect', { type: 'model.generate' })).toMatchObject({ ok: true });
+    expect(mocks.executeEffect).toHaveBeenCalledWith(expect.objectContaining({ toolId: tool.id }));
+    session.dispose();
   });
   it('keeps local media, exports and paid effects in separate bounded budgets', async () => {
     const session = await createPluginUiFrameSession({ plugin, tool, nodeId: 'target', exportName: 'dialog', parameters: {}, onClose: vi.fn() });

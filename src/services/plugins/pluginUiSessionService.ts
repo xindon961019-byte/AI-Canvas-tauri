@@ -24,6 +24,7 @@ import {
   type CanvasDerivationGuard,
 } from '../canvasDerivationGuard';
 import { buildPluginModelCatalog, collectDeclaredModelCategories } from './pluginModelCatalog';
+import { assertPluginCompatibility, PLUGIN_HOST } from './pluginHost';
 import {
   collectTrustedNodeMediaReferences,
   executeNodePluginTool,
@@ -36,13 +37,15 @@ import {
 } from './pluginResourceService';
 
 const MESSAGE_CHANNEL = 'ai-canvas-plugin-ui-v1';
-const MAX_UI_EFFECTS = 4;
-const MAX_UI_RANGE_READS = 96;
-const MAX_UI_RANGE_BYTES = 16 * 1024 * 1024;
-const MAX_UI_MEDIA_EFFECTS = 96;
-const MAX_UI_EXPORT_EFFECTS = 12;
+const MAX_UI_EFFECTS = PLUGIN_HOST.limits.ui.ordinary;
+const MAX_UI_RANGE_READS = PLUGIN_HOST.limits.ui.resourceRangeRead;
+const MAX_UI_RANGE_BYTES = PLUGIN_HOST.limits.ui.resourceRangeBytes;
+const MAX_UI_MEDIA_EFFECTS = PLUGIN_HOST.limits.ui.media;
+const MAX_UI_EXPORT_EFFECTS = PLUGIN_HOST.limits.ui.resourceWrite;
 const MAX_UI_SESSIONS = 4;
-const MAX_UI_REQUESTS = 192;
+const MAX_UI_REQUESTS = PLUGIN_HOST.limits.ui.total;
+const MAX_UI_NETWORK_EFFECTS = PLUGIN_HOST.limits.ui.network;
+const MAX_UI_SETTINGS_EFFECTS = PLUGIN_HOST.limits.ui.settings;
 const MAX_REQUEST_ID_LENGTH = 64;
 const MAX_KIND_LENGTH = 32;
 const MAX_JSON_DEPTH = 8;
@@ -91,6 +94,8 @@ interface PluginUiSession {
   rangeReadBytes?: number;
   mediaEffectBudget?: number;
   exportEffectBudget?: number;
+  networkEffectBudget?: number;
+  settingsEffectBudget?: number;
   requestCount: number;
   requestInFlight: boolean;
   effectAbortController?: AbortController;
@@ -117,21 +122,28 @@ function normalizeDigest(value: string | undefined, label: string): string {
 }
 
 function normalizeJson(value: unknown, depth = 0): PluginJsonValue | undefined {
-  if (depth > MAX_JSON_DEPTH || value === undefined || typeof value === 'function' || typeof value === 'symbol') {
+  if (value === undefined || typeof value === 'function' || typeof value === 'symbol') {
     return undefined;
   }
+  if (depth > MAX_JSON_DEPTH) throw new Error(`插件界面数据嵌套深度不能超过 ${MAX_JSON_DEPTH} 层`);
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
-  if (typeof value === 'string') return isLocalReference(value) ? undefined : value.slice(0, MAX_JSON_STRING);
+  if (typeof value === 'string') {
+    if (isLocalReference(value)) return undefined;
+    if (value.length > MAX_JSON_STRING) throw new Error(`插件界面数据字符串不能超过 ${MAX_JSON_STRING} 个字符`);
+    return value;
+  }
   if (Array.isArray(value)) {
+    if (value.length > MAX_JSON_ARRAY) throw new Error(`插件界面数据数组不能超过 ${MAX_JSON_ARRAY} 项`);
     return value
-      .slice(0, MAX_JSON_ARRAY)
       .map((item) => normalizeJson(item, depth + 1))
       .filter((item): item is PluginJsonValue => item !== undefined);
   }
   if (typeof value === 'object') {
     const output: Record<string, PluginJsonValue> = {};
-    for (const [key, item] of Object.entries(value).slice(0, MAX_JSON_KEYS)) {
+    const entries = Object.entries(value);
+    if (entries.length > MAX_JSON_KEYS) throw new Error(`插件界面数据对象不能超过 ${MAX_JSON_KEYS} 个键`);
+    for (const [key, item] of entries) {
       if (FORBIDDEN_NODE_INPUT_FIELDS.has(key)) continue;
       const normalized = normalizeJson(item, depth + 1);
       if (normalized !== undefined) output[key] = normalized;
@@ -159,6 +171,7 @@ function resolveLivePlugin(session: PluginUiSession, checkCanvas = true): Instal
   const state = useAppStore.getState();
   const plugin = state.installedPlugins.find((item) => item.id === session.pluginId);
   if (!plugin?.enabled) throw new Error('插件已停用或卸载');
+  assertPluginCompatibility(plugin.manifest);
   if (plugin.sourceDigest !== session.sourceDigest || plugin.revisionDigest !== session.revisionDigest) {
     throw new Error('插件 revision 已变化');
   }
@@ -286,6 +299,7 @@ async function dispatchRequest(
         return {
           ok: true,
           value: {
+            host: PLUGIN_HOST,
             surface: session.surface,
             theme: state.config.theme,
             locale: getLocale(),
@@ -299,7 +313,13 @@ async function dispatchRequest(
       case 'effect': {
         const effectType = request.payload && typeof request.payload === 'object' && 'type' in request.payload
           ? request.payload.type : undefined;
-        if (effectType === 'resource.readRange') {
+        if (effectType === 'network.request') {
+          if ((session.networkEffectBudget ?? 0) >= MAX_UI_NETWORK_EFFECTS) throw new Error('本次会话网络请求达到 16 次上限');
+          session.networkEffectBudget = (session.networkEffectBudget ?? 0) + 1;
+        } else if (effectType === 'settings.get' || effectType === 'settings.set' || effectType === 'settings.delete') {
+          if ((session.settingsEffectBudget ?? 0) >= MAX_UI_SETTINGS_EFFECTS) throw new Error('本次会话设置操作达到 64 次上限');
+          session.settingsEffectBudget = (session.settingsEffectBudget ?? 0) + 1;
+        } else if (effectType === 'resource.readRange') {
           const length = (request.payload as Record<string, unknown>).length;
           if (typeof length !== 'number' || !Number.isSafeInteger(length) || length <= 0 || length > 256 * 1024) {
             throw new Error('资源单次读取必须为 1–256 KiB 范围内的整数字节数');
@@ -326,6 +346,7 @@ async function dispatchRequest(
         session.effectAbortController = controller;
         const result = await executePluginUiHostEffect({
           pluginId: plugin.id,
+          toolId: session.tool.id,
           projectId: session.projectId,
           title: session.tool.title,
           permissions: plugin.manifest.permissions,
@@ -345,18 +366,19 @@ async function dispatchRequest(
       case 'set-parameters': {
         const patch = normalizeJson(request.payload);
         if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('参数更新必须是对象');
-        session.parameters = { ...session.parameters, ...patch };
+        session.parameters = normalizeJson({ ...session.parameters, ...patch }) as Record<string, PluginJsonValue>;
         return { ok: true, value: true };
       }
       case 'submit': {
-        const payload = normalizeJson(request.payload);
-        const record = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+        const record = request.payload && typeof request.payload === 'object' && !Array.isArray(request.payload)
+          ? request.payload as Record<string, unknown> : {};
         const submitted = record.data;
         if (submitted !== undefined) {
           if (!submitted || typeof submitted !== 'object' || Array.isArray(submitted)) {
             throw new Error('提交参数必须是对象');
           }
-          session.parameters = { ...session.parameters, ...submitted };
+          const data = normalizeJson(submitted) as Record<string, PluginJsonValue>;
+          session.parameters = normalizeJson({ ...session.parameters, ...data }) as Record<string, PluginJsonValue>;
         }
         const controller = new AbortController();
         session.effectAbortController = controller;

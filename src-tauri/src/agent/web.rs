@@ -361,7 +361,7 @@ fn is_disallowed_ipv6(ip: std::net::Ipv6Addr) -> bool {
         || (segments[0] & 0xe000) != 0x2000
 }
 
-fn is_disallowed_ip(ip: IpAddr) -> bool {
+pub(crate) fn is_disallowed_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(value) => is_disallowed_ipv4(value),
         IpAddr::V6(value) => is_disallowed_ipv6(value),

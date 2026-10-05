@@ -118,6 +118,7 @@
   function createProps() {
     const props = {
       surface: context.surface,
+      host: context.host,
       get theme() {
         return context.theme;
       },

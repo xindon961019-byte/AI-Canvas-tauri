@@ -54,13 +54,25 @@ import {
 import { buildPluginModelCatalog, collectDeclaredModelCategories } from './pluginModelCatalog';
 import { createPluginLineArtImage } from './pluginImageService';
 import { detectPluginVideoShots, extractPluginVideoFrames, inspectPluginVideoFrame } from './pluginVideoFrameService';
+import { assertPluginCompatibility, PLUGIN_HOST } from './pluginHost';
 
 const MAX_STRING_LENGTH = 256_000;
 const MAX_ARRAY_ITEMS = 256;
 const MAX_OBJECT_KEYS = 128;
 const MAX_DEPTH = 8;
 const DANGEROUS_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const MAX_HOST_EFFECTS = 4;
+const MAX_HOST_EFFECTS = PLUGIN_HOST.limits.tool.total;
+
+function reserveToolEffect(counts: Record<string, number>, effect: PluginNodeHostEffect): void {
+  const category = effect.type === 'model.generate' ? 'model'
+    : effect.type === 'network.request' ? 'network'
+      : effect.type.startsWith('settings.') ? 'settings'
+        : effect.type === 'resource.readText' || effect.type === 'resource.readRange' ? 'resourceRead'
+          : effect.type === 'resource.export' || effect.type === 'resource.createText' ? 'resourceWrite' : 'media';
+  const limit = PLUGIN_HOST.limits.tool[category];
+  if ((counts[category] ?? 0) >= limit) throw new Error(`插件 ${category} 操作不能超过 ${limit} 次`);
+  counts[category] = (counts[category] ?? 0) + 1;
+}
 const NODE_SET_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const MAX_NODE_SET_EDGES = 64;
 const FORBIDDEN_INPUT_FIELDS = new Set([
@@ -177,6 +189,7 @@ function requireCurrentPluginRevision(pluginId: string, sourceDigest: string, re
   const current = useAppStore.getState();
   requirePluginSourceDigest(current.installedPlugins, pluginId, sourceDigest);
   requirePluginRevisionDigest(current.installedPlugins, pluginId, revisionDigest);
+  assertPluginCompatibility(current.installedPlugins.find((plugin) => plugin.id === pluginId)!.manifest);
   return current;
 }
 
@@ -185,26 +198,77 @@ function createPluginInvocationId(): string {
     ?? `${Date.now().toString(36)}-${generateId()}-${generateId()}`;
 }
 
+function watchPluginExecution(
+  pluginId: string, sourceDigest: string, revisionDigest: string,
+  guard: CanvasDerivationGuard, upstream?: AbortSignal,
+) {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  upstream?.addEventListener('abort', cancel, { once: true });
+  const check = () => {
+    if (controller.signal.aborted) return;
+    try {
+      const state = requireCurrentPluginRevision(pluginId, sourceDigest, revisionDigest);
+      if (!isCanvasDerivationFresh(guard, state)) cancel();
+    } catch { cancel(); }
+  };
+  const unsubscribe = useAppStore.subscribe(check);
+  if (upstream?.aborted) cancel();
+  check();
+  return {
+    signal: controller.signal,
+    dispose: () => { unsubscribe(); upstream?.removeEventListener('abort', cancel); },
+  };
+}
+
+async function invokePluginTool(
+  identity: { pluginId: string; sourceDigest: string; revisionDigest: string; toolId: string; invocationId: string },
+  input: PluginNodeInvocationInput | NodePluginInvocationInput,
+  signal: AbortSignal,
+): Promise<unknown> {
+  if (signal.aborted) throw new Error('插件操作已取消');
+  const cancel = () => {
+    void invoke('cancel_node_plugin_tool', { pluginId: identity.pluginId, invocationId: identity.invocationId })
+      .catch(() => undefined);
+  };
+  signal.addEventListener('abort', cancel, { once: true });
+  try {
+    const result = await invoke<unknown>('execute_node_plugin_tool', { ...identity, input });
+    if (signal.aborted) throw new Error('插件操作已取消');
+    return result;
+  } catch (error) {
+    // Rust command 的错误会以字符串返回，转成 Error 才能让界面显示原生诊断。
+    throw typeof error === 'string' ? new Error(error) : error;
+  } finally {
+    signal.removeEventListener('abort', cancel);
+  }
+}
+
 function toPluginJson(
   value: unknown,
   depth = 0,
   redactLocalReferences = false,
 ): PluginJsonValue | undefined {
-  if (depth > MAX_DEPTH || value === undefined || typeof value === 'function' || typeof value === 'symbol') return undefined;
+  if (value === undefined || typeof value === 'function' || typeof value === 'symbol') return undefined;
+  if (depth > MAX_DEPTH) throw new Error(`插件数据嵌套深度不能超过 ${MAX_DEPTH} 层`);
   if (value === null || typeof value === 'boolean') return value;
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
   if (typeof value === 'string') {
     if (redactLocalReferences && isLocalMediaReference(value)) return undefined;
-    return value.slice(0, MAX_STRING_LENGTH);
+    if (value.length > MAX_STRING_LENGTH) throw new Error(`插件数据字符串不能超过 ${MAX_STRING_LENGTH} 个字符`);
+    return value;
   }
   if (Array.isArray(value)) {
-    return value.slice(0, MAX_ARRAY_ITEMS)
+    if (value.length > MAX_ARRAY_ITEMS) throw new Error(`插件数据数组不能超过 ${MAX_ARRAY_ITEMS} 项`);
+    return value
       .map((item) => toPluginJson(item, depth + 1, redactLocalReferences))
       .filter((item): item is PluginJsonValue => item !== undefined);
   }
   if (typeof value === 'object') {
     const output: Record<string, PluginJsonValue> = {};
-    for (const [key, item] of Object.entries(value).slice(0, MAX_OBJECT_KEYS)) {
+    const entries = Object.entries(value);
+    if (entries.length > MAX_OBJECT_KEYS) throw new Error(`插件数据对象不能超过 ${MAX_OBJECT_KEYS} 个键`);
+    for (const [key, item] of entries) {
       if (DANGEROUS_OBJECT_KEYS.has(key) || (redactLocalReferences && FORBIDDEN_INPUT_FIELDS.has(key))) continue;
       const normalized = toPluginJson(item, depth + 1, redactLocalReferences);
       if (normalized !== undefined) output[key] = normalized;
@@ -630,6 +694,36 @@ function parseHostEffect(
 ): PluginNodeHostEffect {
   const raw = recordValue(rawEffect);
   const type = raw.type;
+  if (type === 'network.request') {
+    if (typeof raw.url !== 'string' || raw.url.length > 4096) throw new Error('网络请求 URL 无效');
+    const method = raw.method ?? 'GET';
+    if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(String(method))) throw new Error('网络请求 method 无效');
+    if (raw.body !== undefined && (typeof raw.body !== 'string' || new TextEncoder().encode(raw.body).length > 64 * 1024)) {
+      throw new Error('网络请求正文必须是最多 64 KiB 的字符串');
+    }
+    if (method === 'GET' && raw.body !== undefined) throw new Error('GET 请求不能携带正文');
+    const headers: Record<string, string> = {};
+    if (raw.headers !== undefined) {
+      if (!raw.headers || typeof raw.headers !== 'object' || Array.isArray(raw.headers)) throw new Error('网络请求 headers 必须是对象');
+      const entries = Object.entries(raw.headers);
+      if (entries.length > 16) throw new Error('网络请求最多声明 16 个 header');
+      for (const [key, value] of entries) {
+        if (!['accept', 'content-type', 'authorization', 'x-api-key'].includes(key.toLowerCase())
+          || typeof value !== 'string' || value.length > 4096 || /[\r\n]/u.test(value)) throw new Error('网络请求 header 无效或未获支持');
+        headers[key.toLowerCase()] = value;
+      }
+    }
+    return { type, url: raw.url, method: method as Extract<PluginNodeHostEffect, { type: 'network.request' }>['method'], headers, ...(raw.body === undefined ? {} : { body: raw.body as string }) };
+  }
+  if (type === 'settings.get' || type === 'settings.set' || type === 'settings.delete') {
+    if (typeof raw.key !== 'string' || !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u.test(raw.key)) throw new Error('插件设置 key 无效');
+    if (type === 'settings.set') {
+      const value = toPluginJson(raw.value);
+      if (value === undefined) throw new Error('插件设置 value 必须是 JSON 数据');
+      return { type, key: raw.key, value };
+    }
+    return { type, key: raw.key };
+  }
   if (type === 'image.lineArt') {
     if (typeof raw.resourceId !== 'string' || !raw.resourceId.trim() || raw.resourceId.length > 160
       || Object.keys(raw).some((key) => key !== 'type' && key !== 'resourceId')) {
@@ -659,7 +753,7 @@ function parseHostEffect(
     const effect: Extract<PluginNodeHostEffect, { type: 'model.generate' }> = {
       type,
       modelId: String(raw.modelId ?? '').slice(0, 256),
-      prompt: String(raw.prompt ?? '').slice(0, MAX_STRING_LENGTH),
+      prompt: typeof raw.prompt === 'string' ? toPluginJson(raw.prompt) as string : '',
       parameters: raw.parameters === undefined
         ? undefined
         : toPluginJson(recordValue(raw.parameters)) as Record<string, PluginJsonValue>,
@@ -694,7 +788,7 @@ function parseHostEffect(
   if (type === 'resource.createText') {
     return {
       type,
-      content: String(raw.content ?? '').slice(0, MAX_STRING_LENGTH),
+      content: typeof raw.content === 'string' ? toPluginJson(raw.content) as string : '',
       suggestedName: typeof raw.suggestedName === 'string'
         ? raw.suggestedName.slice(0, 120)
         : undefined,
@@ -885,7 +979,7 @@ async function executeModelEffect(
   const parameters = effect.parameters ?? {};
   const common = { prompt: effect.prompt, model: model.id, provider: model.provider, nodeId };
   if (model.category === 'text') {
-    return { text: await generateText({ ...common, imageUrls }) };
+    return { text: await generateText({ ...common, imageUrls, signal }) };
   }
   if (model.category === 'image') {
     const result = await generateImage({
@@ -928,6 +1022,7 @@ async function executeModelEffect(
  */
 interface PluginHostEffectContext {
   pluginId: string;
+  toolId?: string;
   projectId: string;
   title: string;
   permissions: PluginPermission[];
@@ -977,6 +1072,25 @@ async function executeHostEffect(
   };
   try {
     if (context.signal?.aborted) throw new Error('插件操作已取消');
+    if (effect.type === 'network.request' || effect.type === 'settings.get' || effect.type === 'settings.set' || effect.type === 'settings.delete') {
+      const permission = effect.type === 'network.request' ? 'network.request' : effect.type === 'settings.get' ? 'settings.read' : 'settings.write';
+      if (!context.permissions.includes(permission)) throw new Error(`插件未声明 ${permission} 权限`);
+      assertFresh();
+      const lease = context.resourceReadContext!;
+      if (!context.toolId) throw new Error('插件工具身份缺失');
+      const identity = { pluginId: context.pluginId, sourceDigest: lease.sourceDigest, revisionDigest: lease.revisionDigest, toolId: context.toolId, invocationId: lease.invocationId };
+      const requestId = createPluginInvocationId();
+      const cancel = () => { void invoke('cancel_plugin_host_effect', { pluginId: context.pluginId, requestId }).catch(() => undefined); };
+      context.signal?.addEventListener('abort', cancel, { once: true });
+      try {
+        assertFresh();
+        const value = await invoke<unknown>('execute_plugin_host_effect', { identity, requestId, effect });
+        assertFresh();
+        return { type: effect.type, ok: true, value: toPluginJson(value) };
+      } finally {
+        context.signal?.removeEventListener('abort', cancel);
+      }
+    }
     if (effect.type === 'model.generate') {
       if (!context.permissions.includes('models.invoke')) throw new Error('插件未声明 models.invoke 权限');
       const resourceImageUrls = await Promise.all((effect.resourceIds ?? []).map(async (resourceId) => {
@@ -1199,12 +1313,21 @@ export async function executePluginNode(
     if (field.required && missing) throw new Error(`请填写「${field.label}」`);
   }
   const inputs = buildPluginNodeInputs(pluginNode, nodeId);
-  const guard = registerCanvasDerivation(before, nodeId);
+  const cancellation = new AbortController();
+  const guard = registerCanvasDerivation(before, nodeId, { onCancel: () => cancellation.abort() });
   if (!guard) throw new Error('无法创建插件执行保护');
+  const execution = watchPluginExecution(pluginNode.pluginId, sourceDigest, revisionDigest, guard, cancellation.signal);
+  const assertFresh = () => {
+    const current = requireCurrentPluginRevision(pluginNode.pluginId, sourceDigest, revisionDigest);
+    if (!isCanvasDerivationFresh(guard, current)) throw new Error('画布已变化，插件结果未写入');
+    if (execution.signal.aborted) throw new Error('插件操作已取消');
+    return current;
+  };
   const trustedMediaReferences = pluginNode.runtime === 'javascript'
     ? collectPluginNodeMediaReferences(pluginNode, inputs)
     : undefined;
   let effectResult: PluginNodeHostEffectResult | undefined;
+  const effectCounts: Record<string, number> = {};
 
   try {
     const resources = await mintPluginInvocationResources({
@@ -1245,8 +1368,9 @@ export async function executePluginNode(
       state: useAppStore.getState(),
     });
     for (let iteration = 0; iteration <= MAX_HOST_EFFECTS; iteration += 1) {
-      requireCurrentPluginRevision(pluginNode.pluginId, sourceDigest, revisionDigest);
+      assertFresh();
       const input: PluginNodeInvocationInput = {
+        host: PLUGIN_HOST,
         projectId,
         locale: getLocale(),
         iteration,
@@ -1256,21 +1380,22 @@ export async function executePluginNode(
         resources,
         effectResult,
       };
-      const rawResult = await invoke<unknown>('execute_node_plugin_tool', {
+      const rawResult = await invokePluginTool({
         pluginId: pluginNode.pluginId,
         sourceDigest,
         revisionDigest,
         toolId: pluginNode.node.id,
         invocationId,
-        input,
-      });
-      requireCurrentPluginRevision(pluginNode.pluginId, sourceDigest, revisionDigest);
+      }, input, execution.signal);
+      assertFresh();
       const result = validatePluginNodeResult(rawResult, pluginNode, trustedMediaReferences);
       if (result.effect) {
         if (iteration === MAX_HOST_EFFECTS) throw new Error(`插件宿主操作不能超过 ${MAX_HOST_EFFECTS} 次`);
+        reserveToolEffect(effectCounts, result.effect);
         effectResult = await executeHostEffect(
           {
             pluginId: pluginNode.pluginId,
+            toolId: pluginNode.node.id,
             projectId,
             title: pluginNode.node.title,
             permissions: pluginNode.permissions,
@@ -1278,20 +1403,20 @@ export async function executePluginNode(
             resourceReadContext: resourceReadContext(),
             pluginNode,
             inputs,
+            signal: execution.signal,
           },
           nodeId,
           result.effect,
           models,
         );
-        requireCurrentPluginRevision(pluginNode.pluginId, sourceDigest, revisionDigest);
+        assertFresh();
         if (trustedMediaReferences && result.effect.type === 'model.generate') {
           addTrustedModelEffectReference(result.effect, effectResult, models, trustedMediaReferences);
         }
         continue;
       }
 
-      const current = requireCurrentPluginRevision(pluginNode.pluginId, sourceDigest, revisionDigest);
-      if (!isCanvasDerivationFresh(guard, current)) throw new Error('画布已变化，插件结果未写入');
+      const current = assertFresh();
       const nextValues = { ...(values ?? {}), ...(result.data?.values ?? {}) };
       const nextOutputs = result.data?.outputs ?? {};
       current.updateNodeData(nodeId, {
@@ -1303,6 +1428,7 @@ export async function executePluginNode(
       return;
     }
   } finally {
+    execution.dispose();
     clearPluginInvocationResources(invocationId);
     completeCanvasDerivation(guard);
   }
@@ -1491,7 +1617,8 @@ export async function executeNodePluginTool(
   if (!installedPlugin) throw new Error('插件已被卸载');
   const ownsExecutionLease = !executionLease;
   const invocationId = executionLease?.invocationId ?? createPluginInvocationId();
-  const guard = executionLease?.guard ?? registerCanvasDerivation(before, nodeId);
+  const cancellation = new AbortController();
+  const guard = executionLease?.guard ?? registerCanvasDerivation(before, nodeId, { onCancel: () => cancellation.abort() });
   if (!guard) throw new Error('无法创建插件执行保护');
   if (
     guard.projectId !== projectId
@@ -1501,11 +1628,6 @@ export async function executeNodePluginTool(
     throw new Error('插件界面会话已失效');
   }
   const normalizedParameters: Record<string, PluginJsonValue> = {};
-  for (const [key, value] of Object.entries(parameters)) {
-    if (DANGEROUS_OBJECT_KEYS.has(key)) continue;
-    const normalized = toPluginJson(value);
-    if (normalized !== undefined) normalizedParameters[key] = normalized;
-  }
   const models = buildNodeToolModelCatalog(pluginTool);
   // JavaScript 沙箱没有任意网络能力，媒体引用只能来自本次输入与本轮宿主模型结果。
   // 该集合跨 effect 轮次累积，让后续轮次可以引用前面模型生成的媒体。
@@ -1513,15 +1635,24 @@ export async function executeNodePluginTool(
     ? executionLease?.trustedMediaReferences ?? new Set<string>()
     : undefined;
   let effectResult: PluginNodeHostEffectResult | undefined;
+  const effectCounts: Record<string, number> = {};
+  const execution = watchPluginExecution(pluginTool.pluginId, sourceDigest, revisionDigest, guard, executionLease?.signal ?? cancellation.signal);
   const assertExecutionFresh = () => {
-    if (executionLease?.signal?.aborted) throw new Error('插件操作已取消');
     const current = requireCurrentPluginRevision(pluginTool.pluginId, sourceDigest, revisionDigest);
     if (!isCanvasDerivationFresh(guard, current)) throw new Error('画布已变化，插件结果未写入');
+    if (execution.signal.aborted) throw new Error('插件操作已取消');
     return current;
   };
 
   try {
     assertExecutionFresh();
+    const parameterEntries = Object.entries(parameters);
+    if (parameterEntries.length > MAX_OBJECT_KEYS) throw new Error(`插件数据对象不能超过 ${MAX_OBJECT_KEYS} 个键`);
+    for (const [key, value] of parameterEntries) {
+      if (DANGEROUS_OBJECT_KEYS.has(key)) continue;
+      const normalized = toPluginJson(value);
+      if (normalized !== undefined) normalizedParameters[key] = normalized;
+    }
     const resources = executionLease?.resources ?? await mintPluginInvocationResources({
       pluginId: pluginTool.pluginId,
       sourceDigest,
@@ -1554,19 +1685,19 @@ export async function executeNodePluginTool(
         normalizedParameters,
         { iteration, models, resources, effectResult },
       );
+      input.host = PLUGIN_HOST;
       if (trustedMediaReferences) {
         for (const reference of collectNodeToolMediaReferences(input)) {
           trustedMediaReferences.add(reference);
         }
       }
-      const rawResult = await invoke<unknown>('execute_node_plugin_tool', {
+      const rawResult = await invokePluginTool({
         pluginId: pluginTool.pluginId,
         sourceDigest,
         revisionDigest,
         toolId: pluginTool.tool.id,
         invocationId,
-        input,
-      });
+      }, input, execution.signal);
       assertExecutionFresh();
       const outputNodeType = pluginTool.tool.output.mode === 'create-node'
         ? pluginTool.tool.output.nodeType ?? sourceNode.data.type
@@ -1579,15 +1710,17 @@ export async function executeNodePluginTool(
       );
       if (result.effect) {
         if (iteration === MAX_HOST_EFFECTS) throw new Error(`插件宿主操作不能超过 ${MAX_HOST_EFFECTS} 次`);
+        reserveToolEffect(effectCounts, result.effect);
         effectResult = await executeHostEffect(
           {
             pluginId: pluginTool.pluginId,
+            toolId: pluginTool.tool.id,
             projectId,
             title: pluginTool.tool.title,
             permissions: pluginTool.permissions,
             resources,
             resourceReadContext: resourceReadContext(),
-            signal: executionLease?.signal,
+            signal: execution.signal,
           },
           nodeId,
           result.effect,
@@ -1648,6 +1781,7 @@ export async function executeNodePluginTool(
     }
     throw new Error(`插件宿主操作不能超过 ${MAX_HOST_EFFECTS} 次`);
   } finally {
+    execution.dispose();
     if (ownsExecutionLease) {
       clearPluginInvocationResources(invocationId);
       completeCanvasDerivation(guard);
@@ -1669,6 +1803,7 @@ export async function getPythonPluginRuntimeStatus(): Promise<PythonPluginRuntim
  */
 export async function executePluginUiHostEffect(options: {
   pluginId: string;
+  toolId?: string;
   projectId: string;
   title: string;
   permissions: PluginPermission[];
@@ -1684,6 +1819,7 @@ export async function executePluginUiHostEffect(options: {
   const result = await executeHostEffect(
     {
       pluginId: options.pluginId,
+      toolId: options.toolId,
       projectId: options.projectId,
       title: options.title,
       permissions: options.permissions,

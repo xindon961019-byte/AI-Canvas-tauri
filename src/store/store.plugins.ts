@@ -417,8 +417,8 @@ export const createPluginSlice: StateCreator<AppState, [], [], PluginSlice> = (s
           },
         };
         try {
-          if (plugin.manifest.apiVersion !== 1) {
-            throw new Error('已安装插件不符合当前 API v1，请重新安装');
+          if (plugin.manifest.apiVersion !== 1 && plugin.manifest.apiVersion !== 2) {
+            throw new Error('已安装插件不符合当前 API v1/v2，请重新安装');
           }
           if (plugin.sourceDigest && plugin.revisionDigest) {
             plugin = {

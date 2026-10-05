@@ -96,5 +96,8 @@ commands.allow = [
   "close_plugin_ui_window",
   "respond_plugin_ui_window_request",
   "execute_node_plugin_tool",
+  "cancel_node_plugin_tool",
+  "execute_plugin_host_effect",
+  "cancel_plugin_host_effect",
   "get_python_plugin_runtime_status",
 ]

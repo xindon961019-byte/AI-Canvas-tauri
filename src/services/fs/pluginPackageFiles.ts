@@ -100,5 +100,5 @@ export async function readLocalPluginPackage(paths: string[], requireManifest = 
     resourcePayloads.push({ id: resource.id, bytes: Array.from(bytes) });
   }
 
-  return { manifestText, manifest, source, uiSource, resourcePayloads };
+  return { manifestText, manifest, source, uiSource, resourcePayloads, directory: prefix };
 }

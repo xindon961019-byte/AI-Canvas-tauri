@@ -34,6 +34,11 @@ const CATEGORY_LABELS: Record<PluginCategory, string> = {
   utility: '通用工具',
 };
 
+function pluginNodeTypeLabel(nodeType: string): string {
+  const label = getNodeTypeConfig(nodeType.replace(/^source-/u, 'ai-')).label;
+  return nodeType.startsWith('source-') ? label.replace(/^生成/u, '') : label;
+}
+
 function isUpdateAvailable(latest: string, current: string): boolean {
   try {
     return comparePluginVersions(latest, current) > 0;
@@ -198,6 +203,9 @@ const PLUGIN_PERMISSION_LABELS: Record<string, string> = {
   'node.write': '修改节点或创建插件节点',
   'models.read': '读取脱敏模型目录',
   'models.invoke': '调用可能产生费用的模型',
+  'network.request': '通过宿主请求声明的公共 HTTPS 来源',
+  'settings.read': '读取插件自己的非敏感设置',
+  'settings.write': '保存或删除插件自己的非敏感设置',
   'files.connected.read': '读取当前节点及直接输入连线的项目资源',
   'files.output.create': '在当前项目目录创建新的文本输出',
   'plugin.resources.read': '读取当前插件 revision 声明的包资源',
@@ -206,7 +214,9 @@ const PLUGIN_PERMISSION_LABELS: Record<string, string> = {
 
 function permissionSummary(manifest: PluginManifest): string {
   return manifest.permissions
-    .map((permission) => PLUGIN_PERMISSION_LABELS[permission] ?? permission)
+    .map((permission) => permission === 'network.request'
+      ? `${PLUGIN_PERMISSION_LABELS[permission]}：${manifest.network?.allowedOrigins.join('、') ?? '未声明'}`
+      : PLUGIN_PERMISSION_LABELS[permission] ?? permission)
     .join('；');
 }
 
@@ -340,6 +350,8 @@ export default function PluginSettings() {
   const inputRef = useRef<HTMLInputElement>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const busyRef = useRef(false);
+  // 目录授权只用于当前面板的开发重载，不写入插件记录或普通配置。
+  const [localDirectories, setLocalDirectories] = useState<Record<string, string>>({});
   const plugins = useAppStore((state) => state.installedPlugins);
   const installPluginBundle = useAppStore((state) => state.installPluginBundle);
   const setPluginEnabled = useAppStore((state) => state.setPluginEnabled);
@@ -505,7 +517,7 @@ export default function PluginSettings() {
   };
 
   // Tauri 原生目录选择/拖拽共用按 Manifest 读取的安装链。
-  const installFromPaths = async (paths: string[], requireManifest = false) => {
+  const installFromPaths = async (paths: string[], requireManifest = false, expectedPluginId?: string) => {
     if (busyRef.current || paths.length === 0) return;
     busyRef.current = true;
     setBusy(true);
@@ -513,6 +525,7 @@ export default function PluginSettings() {
       const bundle = await readLocalPluginPackage(paths, requireManifest);
       if (!bundle) return;
       const { manifestText, manifest, source, uiSource, resourcePayloads } = bundle;
+      if (expectedPluginId && manifest.id !== expectedPluginId) throw new Error('本地目录的插件 ID 已变化，请重新安装');
       const action = plugins.some((installed) => installed.id === manifest.id) ? '更新' : '安装';
       const sourceDigest = await reviewPluginInstall(manifest, source, action, '本地文件夹');
       if (!sourceDigest) return;
@@ -522,6 +535,7 @@ export default function PluginSettings() {
         uiSource,
         resourcePayloads,
       });
+      if (bundle.directory) setLocalDirectories((previous) => ({ ...previous, [manifest.id]: bundle.directory }));
     } catch (error) {
       showToast(pluginOperationErrorMessage(error, '插件安装失败'), 'error');
     } finally {
@@ -952,11 +966,12 @@ export default function PluginSettings() {
           const customNodes = plugin.manifest.contributes.nodes ?? [];
           const inputFields = [...new Set(plugin.manifest.contributes.nodeTools.flatMap((tool) => tool.inputFields))];
           const outputFields = [...new Set(plugin.manifest.contributes.nodeTools.flatMap((tool) => tool.output.fields))];
-          const placements = new Set(plugin.manifest.contributes.nodeTools.flatMap((tool) => tool.placements));
-          const placementLabels = [
-            placements.has('node-context-menu') ? '节点右键菜单' : null,
-            placements.has('node-toolbar') ? '节点工具栏' : null,
-          ].filter(Boolean).join('、');
+          const placementLabels = [...new Set([
+            ...plugin.manifest.contributes.nodeTools.flatMap((tool) => tool.nodeTypes.flatMap((nodeType) => (
+              tool.placements.map((placement) => `${pluginNodeTypeLabel(nodeType)}节点${placement === 'node-context-menu' ? '右键菜单' : '工具栏'}`)
+            ))),
+            ...(customNodes.length ? ['节点选择器'] : []),
+          ])].join('、');
           return (
             <article key={plugin.id} className="rounded-xl border border-canvas-border bg-canvas-card p-3">
               <div className="flex items-start gap-3">
@@ -980,7 +995,7 @@ export default function PluginSettings() {
                   <div className="mt-2 flex flex-wrap gap-1">
                     {nodeTypes.map((nodeType) => (
                       <span key={nodeType} className="rounded bg-canvas-surface px-1.5 py-0.5 text-[10px] text-canvas-text-muted">
-                        {getNodeTypeConfig(nodeType).label}
+                        {pluginNodeTypeLabel(nodeType)}
                       </span>
                     ))}
                     {customNodes.map((node) => (
@@ -994,7 +1009,7 @@ export default function PluginSettings() {
                       详细信息
                     </summary>
                     <div className="mt-1 break-words text-[10px] leading-4 text-canvas-text-muted">
-                      API v{plugin.manifest.apiVersion} · {plugin.manifest.entry} · 入口：{placementLabels || (customNodes.length ? '节点选择器' : '未声明')}<br />
+                      API v{plugin.manifest.apiVersion} · {plugin.manifest.entry} · 入口：{placementLabels || '未声明'}<br />
                       工具 {plugin.manifest.contributes.nodeTools.length} 个 · 自定义节点 {customNodes.length} 个<br />
                       读取：{inputFields.join('、') || '无'} · 写入：{outputFields.join('、') || '无'}<br />
                       权限：{plugin.manifest.permissions.join('、')}<br />
@@ -1003,6 +1018,18 @@ export default function PluginSettings() {
                   </details>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
+                  {localDirectories[plugin.id] && (
+                    <AnimatedButton
+                      type="button"
+                      disabled={busy}
+                      aria-label={`重新载入 ${plugin.manifest.name}`}
+                      className="ui-btn ui-btn--sm"
+                      onClick={() => void installFromPaths([localDirectories[plugin.id]], true, plugin.id)}
+                    >
+                      <Icon icon="lucide:refresh-cw" width={14} height={14} />
+                      重新载入
+                    </AnimatedButton>
+                  )}
                   <AnimatedButton
                     type="button"
                     role="switch"
@@ -1054,7 +1081,7 @@ export default function PluginSettings() {
           </span>
           <div className="min-w-0 flex-1">
             <h2 className="text-sm font-semibold text-canvas-text">AI Canvas 插件开发规范</h2>
-            <p className="mt-0.5 text-[11px] text-canvas-text-muted">Plugin API v1 · 与当前插件运行时同步</p>
+            <p className="mt-0.5 text-[11px] text-canvas-text-muted">Plugin API 1 / 2 · 与当前插件运行时同步</p>
           </div>
           <AnimatedButton
             type="button"

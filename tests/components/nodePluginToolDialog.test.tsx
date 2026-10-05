@@ -129,6 +129,32 @@ describe('plugin dialog window button', () => {
     expect(mocks.frame).toHaveBeenCalledOnce();
   });
 
+  it('authorizes only the bootstrap nonce in an opaque frame and retains the private bundle and network restrictions', async () => {
+    const documents: Blob[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => {
+      documents.push(blob as Blob);
+      return `blob:http://localhost/${documents.length}`;
+    });
+    try {
+      await mount();
+      const first = await documents[0].text();
+      const nonce = first.match(/nonce="([a-f\d]{32})"/u)?.[1];
+      expect(nonce).toBeDefined();
+      expect(first).toContain(`script-src 'nonce-${nonce}' http://plugin-ui.localhost plugin-ui:;`);
+      expect(first).toContain(`nonce="${nonce}" src="http://localhost/plugin-ui-bootstrap.js"`);
+      expect(first).not.toContain("script-src 'self'");
+      expect(first).not.toContain("script-src 'unsafe-inline'");
+      expect(first).toContain("connect-src 'none'");
+      expect(elements(render()).find((item) => item.type === 'iframe')!.props.sandbox).toBe('allow-scripts');
+      cleanup.forEach((dispose) => dispose());
+      hooks.values = [];
+      await mount();
+      expect(await documents[1].text()).not.toContain(`nonce="${nonce}"`);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it('keeps the editor after open failure and allows another attempt', async () => {
     await mount();
     mocks.open.mockRejectedValueOnce(new Error('原生创建失败'));

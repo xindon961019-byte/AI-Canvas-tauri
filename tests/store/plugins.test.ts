@@ -134,6 +134,32 @@ describe('插件由用户安装', () => {
     expect(dbMocks.savePluginToDb).not.toHaveBeenCalled();
     expect(dbMocks.deletePluginFromDb).not.toHaveBeenCalled();
   });
+
+  it('restores enabled API v2 plugins through native registration without staging source again', async () => {
+    const installed = createInstalledPluginFixture('com.example.api-v2');
+    installed.manifest.apiVersion = 2;
+    installed.manifest.requiredCapabilities = ['javascript.async'];
+    dbMocks.getAllPlugins.mockResolvedValue([installed]);
+    const { slice, getState } = createSlice();
+    await slice.loadPlugins();
+    expect(getState().installedPlugins).toEqual([installed]);
+    expect(nativeMocks.invoke).toHaveBeenCalledExactlyOnceWith('ensure_plugin_registration', {
+      pluginId: installed.id, sourceDigest: SOURCE_DIGEST_A,
+      revisionDigest: REVISION_DIGEST_A, enabled: true,
+    });
+    expect(dbMocks.savePluginToDb).not.toHaveBeenCalled();
+  });
+
+  it('keeps unsupported persisted API versions disabled', async () => {
+    const installed = createInstalledPluginFixture('com.example.future-api');
+    installed.manifest.apiVersion = 3 as InstalledPlugin['manifest']['apiVersion'];
+    dbMocks.getAllPlugins.mockResolvedValue([installed]);
+    const { slice, getState } = createSlice();
+    await slice.loadPlugins();
+    expect(getState().installedPlugins[0].enabled).toBe(false);
+    expect(nativeMocks.invoke).not.toHaveBeenCalledWith('ensure_plugin_registration', expect.anything());
+    expect(dbMocks.savePluginToDb).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
+  });
 });
 
 describe('可信 Python 插件状态边界', () => {

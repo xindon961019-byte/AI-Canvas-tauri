@@ -6,6 +6,10 @@ export type PluginPermission =
   | 'node.write'
   | 'models.read'
   | 'models.invoke'
+  /** 由宿主请求 Manifest 中列出的公共 HTTPS 来源。 */
+  | 'network.request'
+  | 'settings.read'
+  | 'settings.write'
   /** 读取当前节点自身与声明输入连线所引用的项目文件；只通过短期 resourceId 暴露。 */
   | 'files.connected.read'
   /** 在项目目录中创建新的派生输出；不允许覆盖上游源文件。 */
@@ -234,6 +238,7 @@ export type PluginUiWindowEvent =
  * DOM、store 或凭据；写回画布仍要过 output.fields 白名单与媒体来源校验。
  */
 export interface PluginUISurfaceProps {
+  readonly host: PluginHostInfo;
   /** 当前挂载点；v1 固定为节点工具弹窗。 */
   surface: PluginUISurface;
   /** 宿主主题；内嵌时实时同步，原生窗口重新聚焦时刷新，并派发 ai-canvas-theme-change。 */
@@ -266,8 +271,19 @@ export type PluginUIMount = (
   props: PluginUISurfaceProps,
 ) => void | (() => void) | Promise<void | (() => void)>;
 
+export interface PluginHostInfo {
+  version: string;
+  apiVersions: readonly number[];
+  /** 宿主支持的功能，不代表插件已经获得对应权限。 */
+  capabilities: readonly string[];
+  limits: Record<'tool' | 'ui', Record<string, number>>;
+}
+
 export interface PluginManifest {
-  apiVersion: 1;
+  apiVersion: 1 | 2;
+  /** 兼容声明仅用于 API 2，旧宿主会在安装时拒绝该版本。 */
+  minHostVersion?: string;
+  requiredCapabilities?: string[];
   /** v1 显式选择 QuickJS 或可信 Python。 */
   runtime: PluginRuntime;
   id: string;
@@ -282,6 +298,8 @@ export interface PluginManifest {
   keywords?: string[];
   entry: 'main.js' | 'main.py';
   permissions: PluginPermission[];
+  /** 精确来源白名单，不匹配子域名；只有 network.request 获准后才能使用。 */
+  network?: { allowedOrigins: string[] };
   /** API v1：当前插件 revision 随包安装的不可变资源。 */
   resources?: PluginPackageResourceManifest[];
   /** 自定义界面产物；需配合 nodeTools[].dialog.ui 使用。 */
@@ -308,6 +326,7 @@ export interface InstalledPlugin {
 }
 
 export interface NodePluginInvocationInput {
+  host?: PluginHostInfo;
   projectId: string;
   /** 本轮执行时实际生效的宿主语言。 */
   locale: Locale;
@@ -394,6 +413,10 @@ export interface PluginInvocationResources {
 }
 
 export type PluginNodeHostEffect =
+  | { type: 'network.request'; url: string; method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; headers?: Record<string, string>; body?: string }
+  | { type: 'settings.get'; key: string }
+  | { type: 'settings.set'; key: string; value: PluginJsonValue }
+  | { type: 'settings.delete'; key: string }
   | {
       type: 'model.generate';
       modelId: string;
@@ -437,6 +460,7 @@ export interface PluginNodeHostEffectResult {
 }
 
 export interface PluginNodeInvocationInput {
+  host?: PluginHostInfo;
   projectId: string;
   /** 本轮执行时实际生效的宿主语言。 */
   locale: Locale;

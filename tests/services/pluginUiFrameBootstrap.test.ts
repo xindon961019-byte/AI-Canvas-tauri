@@ -9,7 +9,7 @@ const channel = 'ai-canvas-plugin-ui-v1';
 function harness() {
   const listeners = new Map<string, (event: unknown) => void>();
   const attributes = new Map<string, string>();
-  const mount = vi.fn<(root: unknown, props: { locale: string }) => void>();
+  const mount = vi.fn<(root: unknown, props: { locale: string; host: unknown }) => void>();
   const parent = { postMessage: vi.fn() };
   Object.defineProperty(parent, 'document', { get: () => { throw new Error('cross origin'); } });
   const windowStub: Record<string, unknown> = {
@@ -45,7 +45,7 @@ function harness() {
   });
   const context = (locale: string | undefined = 'zh-CN') => deliver({
     direction: 'response', requestId: 'context-request', ok: true,
-    value: { locale, theme: 'dark', parameters: { prompt: 'draft' } },
+    value: { locale, host: { capabilities: ['javascript.async'] }, theme: 'dark', parameters: { prompt: 'draft' } },
   });
   return { context, deliver, mount, attributes, windowStub };
 }
@@ -57,6 +57,7 @@ describe('embedded plugin locale bridge', () => {
     await flush();
     expect(host.attributes.get('lang')).toBe(locale);
     expect(host.mount.mock.calls[0][1].locale).toBe(locale);
+    expect(host.mount.mock.calls[0][1].host).toEqual({ capabilities: ['javascript.async'] });
   });
 
   it('authenticates locale events, deduplicates updates and keeps the same mounted props', async () => {
