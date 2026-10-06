@@ -364,11 +364,11 @@ function createTransferTaskId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `transfer-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-async function runNativeFileTransfer(
-  command: 'copy_file_streamed' | 'download_file_streamed' | 'copy_asset_folder',
+async function runNativeFileTransfer<T = NativeFileTransferResult>(
+  command: 'copy_file_streamed' | 'download_file_streamed' | 'copy_asset_folder' | 'copy_asset_file_to_folder',
   args: Record<string, string>,
   options?: FileTransferOptions,
-): Promise<NativeFileTransferResult> {
+): Promise<T> {
   const taskId = createTransferTaskId();
   let unlisten: UnlistenFn | undefined;
   let cancelRequested = false;
@@ -393,7 +393,7 @@ async function runNativeFileTransfer(
     }
     options?.signal?.addEventListener('abort', cancel, { once: true });
     if (options?.signal?.aborted) throw new DOMException('File transfer aborted', 'AbortError');
-    return await invoke<NativeFileTransferResult>(command, { taskId, ...args });
+    return await invoke<T>(command, { taskId, ...args });
   } finally {
     options?.signal?.removeEventListener('abort', cancel);
     unlisten?.();
@@ -405,6 +405,23 @@ export async function copyAssetFolder(sourcePath: string, destinationDirectory: 
   if (!isTauriEnv()) throw new Error('文件夹粘贴仅支持桌面应用');
   const result = await runNativeFileTransfer('copy_asset_folder', { sourcePath, destinationDirectory }, options);
   return result.path;
+}
+
+export interface AssetFileCopyResult {
+  path: string;
+  totalBytes: number;
+  digest: string;
+}
+
+/** 验证内容后落盘，同名自动加序号；原文件始终保留。 */
+export async function copyAssetFileToFolder(sourcePath: string, destinationDirectory: string, options?: FileTransferOptions): Promise<AssetFileCopyResult> {
+  if (!isTauriEnv()) throw new Error('文件拖放仅支持桌面应用');
+  return runNativeFileTransfer<AssetFileCopyResult>('copy_asset_file_to_folder', { sourcePath, destinationDirectory }, options);
+}
+
+/** 引用迁移成功后再次验证两份内容，才允许将源文件放入回收站。 */
+export async function finishAssetFileMove(sourcePath: string, copy: AssetFileCopyResult): Promise<void> {
+  await invoke('finish_asset_file_move', { sourcePath, destinationPath: copy.path, expectedDigest: copy.digest, expectedBytes: copy.totalBytes });
 }
 
 /** 图片信息的引用副本只写应用自有目录，复用原生受控、可取消的流式复制。 */
@@ -449,6 +466,7 @@ export * from './fs/core';
 export * from './fs/assetIndex';
 export * from './fs/trash';
 export * from './fs/assetLibrary';
+export * from './fs/assetFileMove';
 export * from './fs/skillFiles';
 export * from './fs/externalEditors';
 

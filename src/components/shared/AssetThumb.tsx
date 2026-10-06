@@ -24,6 +24,8 @@ interface AssetThumbProps {
   /** 悬停操作按钮区 */
   children?: ReactNode;
   onImagePreview?: () => void;
+  /** 宿主提供完整悬浮提示时，避免同时出现浏览器原生标题。 */
+  showNativeTooltip?: boolean;
   /** 外部直接注入文本预览（用于测试或已具备文本的场景） */
   textPreview?: string;
 }
@@ -35,6 +37,7 @@ interface AssetTextPreviewProps {
   badge?: string;
   children?: ReactNode;
   textPreview?: string;
+  showNativeTooltip?: boolean;
 }
 
 export function AssetTextPreview({
@@ -44,6 +47,7 @@ export function AssetTextPreview({
   badge,
   children,
   textPreview: propTextPreview,
+  showNativeTooltip = true,
 }: AssetTextPreviewProps) {
   const [content, setContent] = useState<string | null>(() => {
     if (propTextPreview !== undefined) return propTextPreview;
@@ -68,7 +72,7 @@ export function AssetTextPreview({
 
   if (effectiveText && effectiveText.trim().length > 0) {
     return (
-      <div className="assets-card-text-wrap" title={name}>
+      <div className="assets-card-text-wrap" title={showNativeTooltip ? name : undefined}>
         <div className="assets-card-text-content">{effectiveText}</div>
         <div className="assets-card-text-fade" />
         <span className="assets-card-size">{formatSize(size)}</span>
@@ -79,7 +83,7 @@ export function AssetTextPreview({
   }
 
   return (
-    <div className="assets-card-icon-wrap" title={name}>
+    <div className="assets-card-icon-wrap" title={showNativeTooltip ? name : undefined}>
       <span className="assets-card-icon">{CATEGORY_ICONS.text}</span>
       <span className="assets-card-size">{formatSize(size)}</span>
       {badge && <span className="assets-card-badge">{badge}</span>}
@@ -101,6 +105,7 @@ export default function AssetThumb({
   badge,
   children,
   onImagePreview,
+  showNativeTooltip = true,
   textPreview,
 }: AssetThumbProps) {
   if (category === 'video') {
@@ -124,6 +129,7 @@ export default function AssetThumb({
         size={size}
         badge={badge}
         textPreview={textPreview}
+        showNativeTooltip={showNativeTooltip}
       >
         {children}
       </AssetTextPreview>
@@ -139,7 +145,7 @@ export default function AssetThumb({
             type="button"
             className="asset-image-preview-trigger"
             aria-label={`查看图片 ${name}`}
-            title="查看大图和生成信息"
+            title={showNativeTooltip ? '查看大图和生成信息' : undefined}
             onClick={(event) => {
               event.stopPropagation();
               onImagePreview();

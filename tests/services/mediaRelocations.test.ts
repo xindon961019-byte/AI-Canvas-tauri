@@ -9,6 +9,34 @@ beforeEach(() => {
 const move = { projectId: 'p', oldPath: 'D:/p/a.png', newPath: 'D:/p/group/a-new.png',
   oldAssetUrl: 'asset://old', assetUrl: 'asset://new', relativePath: 'group/a-new.png' };
 
+it('global asset moves preserve identity, tags and prompt records while repairing project-relative references', async () => {
+  const { openDB } = await import('../../src/services/indexedDb/schema');
+  const relocation = await import('../../src/services/indexedDb/mediaRelocations');
+  const db = await openDB();
+  const globalMove = { ...move, projectId: 'global-assets', newPath: 'D:/library/角色/a.png', relativePath: '角色/a.png',
+    assetMove: { assetId: 'stable', rootPath: 'D:/library', source: 'folder' as const, digest: 'a'.repeat(64), totalBytes: 4, mtimeMs: 20 } };
+  await put(db, 'projects', { id: 'p', nodes: [{ data: { assetId: 'stable', filePath: move.oldPath, relativePath: 'a.png', imageUrl: move.oldAssetUrl } }] });
+  await put(db, 'assetIndex', { assetId: 'stable', path: move.oldPath, rootPath: 'D:/p', relativePath: 'a.png', projectId: 'p', fingerprint: '4:1', source: 'global' });
+  await put(db, 'assetMetaV2', { assetId: 'stable', path: move.oldPath, tags: ['人物'] });
+  await put(db, 'metadata', { id: 'prompt-fixture', assetId: 'stable', digest: 'a'.repeat(64), prompt: '用户编辑', references: ['asset-image-references/ref.png'] });
+  await put(db, 'metadata', { id: 'recent-fixture', assetIds: ['stable'] });
+  await relocation.persistMediaRelocation(globalMove);
+  expect((await read(db, 'projects', 'p'))?.nodes).toEqual([{ data: { assetId: 'stable', filePath: globalMove.newPath, imageUrl: globalMove.assetUrl } }]);
+  expect(await read(db, 'assetIndex', 'stable')).toMatchObject({ assetId: 'stable', path: globalMove.newPath, rootPath: 'D:/library', source: 'folder', relativePath: '角色/a.png', fingerprint: '4:20', size: 4 });
+  expect(await read(db, 'assetIndex', 'stable')).not.toHaveProperty('projectId');
+  expect(await read(db, 'assetMetaV2', 'stable')).toMatchObject({ path: globalMove.newPath, tags: ['人物'] });
+  expect(await read(db, 'metadata', 'prompt-fixture')).toMatchObject({ prompt: '用户编辑', references: ['asset-image-references/ref.png'] });
+  expect(await read(db, 'metadata', 'recent-fixture')).toMatchObject({ assetIds: ['stable'] });
+  const service = await import('../../src/services/indexedDbService');
+  await service.putHistoryEntry({ id: 'late', projectId: 'p', nodeId: 'n', nodeLabel: 'n', timestamp: 1,
+    prompt: 'keep', output: '', nodeType: 'ai-image', model: 'm', provider: 'p', status: 'success', filePath: move.oldPath, ...{ relativePath: 'a.png' } });
+  expect((await service.getNodeHistoryEntries('p', 'n'))[0]).not.toHaveProperty('relativePath');
+  await service.putAssetIndex({ assetId: 'new-file', path: move.oldPath, rootPath: 'D:/p', source: 'global', fingerprint: '9:50', size: 9, mtimeMs: 50, status: 'online', updatedAt: 50 });
+  await service.putAssetMeta({ assetId: 'new-file', path: move.oldPath, tags: ['新图'], updatedAt: 50 });
+  expect(await read(db, 'assetIndex', 'new-file')).toMatchObject({ path: move.oldPath });
+  expect(await read(db, 'assetMetaV2', 'new-file')).toMatchObject({ path: move.oldPath, tags: ['新图'] });
+});
+
 async function put(db: IDBDatabase, store: string, value: unknown) {
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(store, 'readwrite');

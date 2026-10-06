@@ -118,6 +118,19 @@ describe('project startup page', () => {
     expect(driver.state.currentProjectId).toBeNull();
   });
 
+  it('macOS 端启动页隐藏应用名称与图标，非 macOS 端保留显示', () => {
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' });
+    let tree = render();
+    expect(findAll(tree, (element) => element.props?.children === 'AI Canvas')).toHaveLength(0);
+    expect(button(tree, '设置')).toBeDefined();
+
+    vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' });
+    tree = render();
+    expect(findAll(tree, (element) => element.props?.children === 'AI Canvas')).toHaveLength(1);
+    expect(button(tree, '设置')).toBeDefined();
+    vi.unstubAllGlobals();
+  });
+
   it('进入资源库整页时隐藏启动页，返回后保留项目搜索条件', () => {
     let tree = render();
     const search = find(tree, (element) => element.type === 'input' && element.props.placeholder === '搜索项目');

@@ -34,6 +34,7 @@ import {
   setLastActiveProjectId,
 } from '../services/indexedDbService';
 import { describeStorageError, type StorageFailureKind } from '../services/storageQuota';
+import { relocateMediaReferences } from '../services/indexedDb/mediaRelocations';
 
 type ProjectLoadStatus = 'loading' | 'ready' | 'error';
 let activeProjectMetadataWrite: Promise<void> = Promise.resolve();
@@ -394,6 +395,8 @@ export interface ProjectSlice {
   saveCurrentProjectSilent: () => Promise<string | undefined>;
   loadProject: () => Promise<void>;
   initFromDb: () => Promise<void>;
+  moveGlobalAssetToFolder: (file: fileService.AssetFileEntry, selection: fileService.AssetFolderSelection,
+    options?: fileService.FileTransferOptions) => Promise<{ path: string; moved: boolean }>;
 }
 
 type ProjectSliceSet = Parameters<StateCreator<AppState, [], [], ProjectSlice>>[0];
@@ -574,6 +577,14 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
   isReturningToStartPage: false,
   switchingProjectName: null,
   autoSaveFailure: null,
+
+  moveGlobalAssetToFolder: async (file, selection, options) => fileService.moveAssetFile(
+    file, selection, get().config.assetFolders ?? [], (move) => {
+      // 按最新状态迁移精确路径，不把异步操作开始时的旧画布覆盖回来。
+      const state = get();
+      if (relocateMediaReferences(state.nodes, [move]) !== state.nodes) state.commitToHistory();
+      set((current) => ({ ...relocateMediaReferences(current, [move]), recentAssetsRevision: current.recentAssetsRevision + 1 }));
+    }, options),
 
   setProjectName: (name) => {
     const state = get();

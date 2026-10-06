@@ -223,7 +223,7 @@ export default function SettingsPanel() {
   const nodeLabelVisible = config.nodeLabelVisible !== false; // 默认开启
   const canvasNoteToolbarVisible = config.canvasNoteToolbarVisible !== false; // 默认开启
   const autoMentionOnConnect = config.autoMentionOnConnect !== false;
-  const startupView = config.startupView ?? 'last-project';
+  const startupView = config.startupView ?? 'project-library';
   const activeInteractionMode = INTERACTION_MODE_OPTIONS.find((option) => option.id === interactionMode)
     ?? INTERACTION_MODE_OPTIONS[0];
   const [selectedTab, setSelectedTab] = useState<SettingsTab>('general');

@@ -16,15 +16,19 @@ export interface AssetFolderNavigationProps {
   onCreate: (selection: AssetFolderSelection, name: string) => Promise<void>;
   onCopy: (selection: AssetFolderSelection) => void;
   onPaste: (selection: AssetFolderSelection) => void;
+  dropTarget?: AssetFolderSelection | null;
 }
 
 function folderKey(folder: AssetFolderEntry): string {
   return JSON.stringify([folder.rootPath, folder.relativePath]);
 }
 
+const folderMotionClass = ' [transition:transform_var(--transition-base)] motion-reduce:transition-none';
+const folderDropClass = ' outline outline-1 outline-dashed outline-brand -outline-offset-1 motion-safe:scale-[1.02]';
+
 export default function AssetFolderNavigation({
   folders, selection, totalCount, globalCount, compact, loading, onSelect, onRemove,
-  globalRootPath, onCreate, onCopy, onPaste,
+  globalRootPath, onCreate, onCopy, onPaste, dropTarget,
 }: AssetFolderNavigationProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [menu, setMenu] = useState<{ selection: AssetFolderSelection; label: string; x: number; y: number } | null>(null);
@@ -86,9 +90,11 @@ export default function AssetFolderNavigation({
       && selection.relativePath.startsWith(`${folder.relativePath}/`));
     const selected = selection.kind === 'folder' && selection.rootPath === folder.rootPath
       && selection.relativePath === folder.relativePath;
+    const receiving = dropTarget?.kind === 'folder' && dropTarget.rootPath === folder.rootPath && dropTarget.relativePath === folder.relativePath;
     return (
       <li key={key}>
-        <div className={`assets-folder-item${selected ? ' is-active' : ''}`}>
+        <div className={`assets-folder-item${folderMotionClass}${selected || receiving ? ' is-active' : ''}${receiving ? folderDropClass : ''}`}
+          data-asset-folder-target={!loading && folder.availability === 'online' ? JSON.stringify({ kind: 'folder', rootPath: folder.rootPath, relativePath: folder.relativePath }) : undefined}>
           {childFolders.length > 0 ? (
             <button type="button" className="ui-icon-btn ui-icon-btn--sm assets-folder-toggle"
               aria-label={`${isExpanded ? '收起' : '展开'}文件夹 ${folder.name}`} aria-expanded={isExpanded}
@@ -111,7 +117,7 @@ export default function AssetFolderNavigation({
             <Icon icon={folder.availability === 'offline' ? 'lucide:folder-x' : selected ? 'lucide:folder-open' : 'lucide:folder'}
               className="shrink-0 text-canvas-text-secondary" aria-hidden="true" />
             <span className="min-w-0 flex-1 truncate text-left">{folder.name}</span>
-            <span className="ui-list__trailing">{folder.availability === 'online' ? folder.fileCount : '—'}</span>
+            <span className="ui-list__trailing">{receiving ? '放入' : folder.availability === 'online' ? folder.fileCount : '—'}</span>
           </button>
           {folder.parentRelativePath === null && folder.rootPath !== globalRootPath && (
             <button type="button" className="ui-icon-btn ui-icon-btn--sm ui-icon-btn--danger assets-folder-remove"
@@ -132,7 +138,8 @@ export default function AssetFolderNavigation({
       {!compact && <h3 className="px-2 pb-2 text-xs font-medium text-canvas-text-secondary">文件夹</h3>}
       {[{ kind: 'all' as const, label: '全部资产', count: totalCount, icon: 'lucide:folders' },
         { kind: 'global' as const, label: '导入文件', count: globalCount, icon: 'lucide:folder-down' }].map((item) => (
-        <div className={`assets-folder-item${selection.kind === item.kind ? ' is-active' : ''}`} key={item.kind}>
+        <div className={`assets-folder-item${folderMotionClass}${selection.kind === item.kind || dropTarget?.kind === item.kind ? ' is-active' : ''}${dropTarget?.kind === item.kind ? folderDropClass : ''}`} key={item.kind}
+          data-asset-folder-target={!loading && item.kind === 'global' && globalRootPath ? JSON.stringify({ kind: 'global' }) : undefined}>
           <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm assets-folder-select"
             aria-label={item.label} aria-pressed={selection.kind === item.kind} disabled={loading}
             aria-haspopup={item.kind === 'global' ? 'menu' : undefined}

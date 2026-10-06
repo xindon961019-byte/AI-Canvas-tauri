@@ -722,7 +722,7 @@ export interface AppConfig {
   canvasHistoryPinned?: boolean; // 操作记录浮层是否锁定常显（默认悬浮才显示）
   outputHistoryPinned?: boolean; // 输出历史面板是否固定常驻（固定后跳转节点不关闭面板）
   canvasQuickActions?: CanvasQuickAction[]; // 画布空白处长按圆环，最多 6 个槽位
-  startupView?: StartupView; // 软件启动后打开上次画布或项目列表，默认 'last-project'
+  startupView?: StartupView; // 软件启动后打开上次画布或项目列表，默认 'project-library'
   windowAspectRatio?: WindowAspectRatio; // 窗口尺寸预设所用比例，默认 '16:9'
   windowAspectLocked?: boolean; // 拖拽缩放窗口时是否固定为上面的比例，默认 false
   windowSize?: { width: number; height: number }; // 上次退出时的窗口逻辑尺寸，启动时恢复

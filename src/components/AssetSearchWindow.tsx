@@ -409,7 +409,7 @@ export default function AssetSearchWindow() {
                       key={file.path}
                       file={file}
                       onReveal={() => handleReveal(file.path)}
-                      onDragStart={(e) => { e.preventDefault(); startAssetDrag(file); }}
+                      onDragStart={(e) => { e.preventDefault(); startAssetDrag(file, undefined, e.currentTarget as Element); }}
                       videoExpanded={videoPreview.expandedId === file.path}
                       onVideoExpandedChange={(expanded) => videoPreview.setExpanded(expanded ? file.path : null)}
                     />
@@ -442,7 +442,7 @@ function SearchCard({ file, onReveal, onDragStart, videoExpanded, onVideoExpande
       ? shortFolderName(file.folderRoot || '')
       : '全局';
   return (
-    <div className={`assets-waterfall-card anim-card-in${videoExpanded ? ' has-expanded-video' : ''}`} draggable={!videoExpanded} onDragStart={onDragStart} data-tooltip={videoExpanded ? undefined : '拖拽到主窗口画布以添加节点'} data-tooltip-pos="bottom">
+    <div className={`assets-waterfall-card anim-card-in${videoExpanded ? ' has-expanded-video' : ''}`} draggable={!videoExpanded} onDragStart={onDragStart} onMouseEnter={() => { void prepareDragIcon(file); }} data-tooltip={videoExpanded ? undefined : '拖拽到主窗口画布以添加节点'} data-tooltip-pos="bottom">
       <AssetThumb assetUrl={file.assetUrl} filePath={file.path} videoExpanded={videoExpanded} onVideoExpandedChange={onVideoExpandedChange}
         videoPresentation="inline"
         name={file.name} category={file.category} size={file.size} badge={sourceLabel}>

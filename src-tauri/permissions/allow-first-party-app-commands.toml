@@ -37,6 +37,8 @@ commands.allow = [
   "write_project_thumbnail",
   "copy_file_streamed",
   "copy_asset_folder",
+  "copy_asset_file_to_folder",
+  "finish_asset_file_move",
   "download_file_streamed",
   "cancel_file_transfer",
   "director_desk_runtime_status",

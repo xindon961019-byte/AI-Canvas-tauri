@@ -22,6 +22,11 @@ const driver = vi.hoisted(() => ({
   globalFolders: [] as AssetFolderEntry[],
   markUsed: vi.fn(),
   monitorNativeDrag: false, cursor: vi.fn(), origin: vi.fn(), scale: vi.fn(),
+  importFiles: vi.fn(), moveFile: vi.fn(),
+  nativeDrop: null as null | ((event: { payload: { type: string; paths?: string[]; position?: { x: number; y: number } } }) => void),
+  globalDrop: null as null | ((event: { payload: { paths: string[]; position: { x: number; y: number } } }) => void),
+  globalDragEvents: {} as Record<string, (event: { payload: { paths?: string[]; position?: { x: number; y: number } } }) => void>,
+  hitFolder: null as string | null,
 }));
 
 // 与仓库其他组件交互测试一样，驱动真实组件的状态、effect 和事件，不依赖 DOM 库。
@@ -80,6 +85,7 @@ vi.mock('../../src/services/fileService', async () => ({
   listProjectFiles: driver.listProject, listGlobalFiles: driver.listGlobal,
   listGlobalFolderContents: async () => ({ files: await driver.listGlobal(), folders: driver.globalFolders, truncated: false, rootPath: '/global/file' }),
   createAssetSubfolder: driver.createFolder, resolveAssetFolderDirectory: driver.resolveFolder, copyAssetFolder: driver.copyFolder,
+  importAssetFilesToFolder: driver.importFiles,
   listExternalFolderContents: driver.listExternal,
   selectAssetFolderFiles: (await vi.importActual<typeof import('../../src/services/fs/assetLibrary')>('../../src/services/fs/assetLibrary')).selectAssetFolderFiles,
   extractFilesFromNodeData: () => driver.nodeFile,
@@ -107,6 +113,17 @@ vi.mock('@tauri-apps/api/window', () => ({
   },
 }));
 vi.mock('@tauri-apps/plugin-global-shortcut', () => ({}));
+vi.mock('@tauri-apps/api/webview', () => ({ getCurrentWebview: () => ({ onDragDropEvent: async (callback: typeof driver.nativeDrop) => {
+  driver.nativeDrop = callback; return () => { if (driver.nativeDrop === callback) driver.nativeDrop = null; };
+} }) }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: async (name: string, callback: (typeof driver.globalDragEvents)[string]) => {
+  driver.globalDragEvents[name] = callback;
+  if (name === 'tauri://drag-drop') driver.globalDrop = callback;
+  return () => {
+    if (driver.globalDragEvents[name] === callback) delete driver.globalDragEvents[name];
+    if (driver.globalDrop === callback) driver.globalDrop = null;
+  };
+} }));
 vi.mock('../../src/components/shared/AssetThumb', () => ({ default: 'asset-thumb' }));
 vi.mock('../../src/components/shared/Select', () => ({ default: 'asset-select' }));
 vi.mock('../../src/components/assets/AssetImagePreview', () => ({ default: 'asset-image-preview' }));
@@ -208,10 +225,14 @@ beforeEach(() => {
   driver.copyFolder.mockReset().mockResolvedValue('/global/file/素材');
   driver.copyClipboard.mockReset().mockResolvedValue(true);
   driver.readClipboard.mockReset().mockResolvedValue(['/library/素材']);
+  driver.importFiles.mockReset().mockResolvedValue(2);
+  driver.moveFile.mockReset().mockResolvedValue({ path: '/library/人物/图.png', moved: true });
+  driver.nativeDrop = null; driver.globalDrop = null; driver.globalDragEvents = {}; driver.hitFolder = null;
   blockingModal = false;
   doc = Object.assign(new EventTarget(), {
     body: new Target(), documentElement: new Target(),
     querySelector: (selector: string) => selector === '.react-flow' || blockingModal ? doc.body : null,
+    elementFromPoint: () => driver.hitFolder ? { closest: () => ({ getAttribute: () => driver.hitFolder }) } : null,
   });
   win = new EventTarget();
   vi.stubGlobal('document', doc); vi.stubGlobal('window', win);
@@ -234,6 +255,7 @@ beforeEach(() => {
     setDramaAssetsPanelOpen: (open: boolean) => set({ dramaAssetsPanelOpen: open }),
     updateConfig: vi.fn(), saveConfig: vi.fn(), markDramaAssetsViewed: vi.fn(),
     markAssetUsed: driver.markUsed,
+    moveGlobalAssetToFolder: driver.moveFile,
   } as unknown as AppState));
   driver.effectIndex = 0;
   useKeyboardShortcuts();
@@ -246,13 +268,189 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('资产文件夹原生拖放', () => {
+  const target = { kind: 'folder' as const, rootPath: '/library', relativePath: '人物' };
+  async function open(mode: 'page' | 'modal' | 'drawer' = 'page') {
+    driver.globalFolders = [{ rootPath: '/library', relativePath: '人物', parentRelativePath: null, name: '人物', fileCount: 1, availability: 'online' }];
+    driver.store!.setState((state) => ({ config: { ...state.config, assetFolders: ['/library'] } }));
+    driver.listGlobal.mockResolvedValue([{ ...file('图'), path: '/library/图.png', source: 'folder', assetId: 'stable' }]);
+    driver.store!.getState().setAssetsPanelOpen(true, mode, { tab: 'permanent', folder: { kind: 'all' } });
+    render(); await settle(); await settle();
+    driver.hitFolder = JSON.stringify(target);
+  }
+  function emit(type: string, paths?: string[]) {
+    driver.nativeDrop?.({ payload: { type, paths, position: { x: 20, y: 80 } } }); render();
+  }
+  function pointer(type: string, x = 120, y = 180, pointerId = 1) {
+    const event = new Event(type, { cancelable: true });
+    Object.assign(event, { pointerId, clientX: x, clientY: y, buttons: type === 'pointerup' ? 0 : 1 });
+    win.dispatchEvent(event); render(); return event;
+  }
+  function press() {
+    const card = Object.assign(new EventTarget(), {
+      closest: (selector: string) => selector === '[data-resource-video-boundary]' ? {
+        getBoundingClientRect: () => ({ left: 0, top: 0, right: 900, bottom: 600, width: 900, height: 600 }),
+      } : null,
+      setPointerCapture: vi.fn(), hasPointerCapture: () => true, releasePointerCapture: vi.fn(),
+    });
+    (cards()[0].props.onPointerDown as (event: unknown) => void)({ target: card, currentTarget: card,
+      button: 0, pointerType: 'mouse', pointerId: 1, clientX: 400, clientY: 180, preventDefault: vi.fn() });
+    return card;
+  }
+  it('库内指针拖动直接显示目录虚线和放大，放下只移动一次，不启动原生循环', async () => {
+    await open(); const card = press();
+    expect(card.setPointerCapture).not.toHaveBeenCalled();
+    pointer('pointermove', 398); expect(driver.drag).not.toHaveBeenCalled();
+    pointer('pointermove');
+    expect(card.setPointerCapture).toHaveBeenCalledWith(1);
+    const row = () => find((element) => element.props['data-asset-folder-target'] === JSON.stringify(target));
+    expect(row().props.className).toContain('outline-dashed');
+    expect(row().props.className).toContain('motion-safe:scale-[1.02]');
+    expect(driver.cursor).not.toHaveBeenCalled(); expect(driver.drag).not.toHaveBeenCalled();
+    pointer('pointerup'); pointer('pointerup'); await settle();
+    expect(row().props.className).not.toContain('outline-dashed');
+    expect(driver.moveFile).toHaveBeenCalledTimes(1); expect(driver.importFiles).not.toHaveBeenCalled();
+    const clickEvent = { preventDefault: vi.fn(), stopPropagation: vi.fn() };
+    (cards()[0].props.onClickCapture as (event: unknown) => void)(clickEvent);
+    expect(clickEvent.preventDefault).toHaveBeenCalledOnce();
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+  });
+  it('移开目录清除反馈，取消指针拖拽不移动文件，之后无残留监听', async () => {
+    await open(); press(); pointer('pointermove');
+    driver.hitFolder = null; pointer('pointermove', 500);
+    expect(find((element) => element.props['data-asset-folder-target'] === JSON.stringify(target)).props.className).not.toContain('outline-dashed');
+    driver.hitFolder = JSON.stringify(target); pointer('pointermove'); pointer('pointercancel');
+    pointer('pointerup'); expect(driver.moveFile).not.toHaveBeenCalled(); expect(driver.drag).not.toHaveBeenCalled();
+  });
+  it('Esc、失去焦点或关闭面板都取消库内拖拽且清理捕获', async () => {
+    await open();
+    for (const end of ['escape', 'blur', 'close']) {
+      driver.store!.getState().setAssetsPanelOpen(true, 'page', { tab: 'permanent', folder: { kind: 'all' } });
+      render(); await settle();
+      const card = press(); pointer('pointermove');
+      if (end === 'escape') {
+        const event = new Event('keydown', { cancelable: true }); Object.assign(event, { key: 'Escape' }); win.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(true); expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+      } else if (end === 'blur') win.dispatchEvent(new Event('blur'));
+      else { driver.store!.getState().setAssetsPanelOpen(false); render(); }
+      pointer('pointerup'); expect(card.releasePointerCapture).toHaveBeenCalledWith(1);
+    }
+    expect(driver.moveFile).not.toHaveBeenCalled(); expect(driver.drag).not.toHaveBeenCalled();
+  });
+  it.each(['page', 'modal'] as const)('从 %s 拖出边界同步交给系统，库内不提前交接', async (mode) => {
+    await open(mode); press(); pointer('pointermove');
+    expect(driver.drag).not.toHaveBeenCalled();
+    pointer('pointermove', 950);
+    expect(driver.drag).toHaveBeenCalledTimes(1);
+    expect(driver.store!.getState().assetsPanelOpen).toBe(mode === 'page');
+    pointer('pointerup', 950); expect(driver.moveFile).not.toHaveBeenCalled();
+  });
+  it('库内拖拽保持页面，高亮目录，放下调用移动 Action 且双通道只执行一次', async () => {
+    await open();
+    const card = cards()[0];
+    (card.props.onDragStart as (event: unknown) => void)({ preventDefault: vi.fn() });
+    emit('over');
+    const highlighted = find((element) => element.props['data-asset-folder-target'] === JSON.stringify(target));
+    expect(highlighted.props.className).toContain('outline-dashed');
+    expect(highlighted.props.className).toContain('outline-brand');
+    expect(highlighted.props.className).toContain('motion-safe:scale-[1.02]');
+    expect(highlighted.props.className).toContain('motion-reduce:transition-none');
+    emit('drop', ['/library/图.png']);
+    driver.globalDrop?.({ payload: { paths: ['/library/图.png'], position: { x: 20, y: 80 } } });
+    await settle();
+    expect(driver.moveFile).toHaveBeenCalledTimes(1);
+    expect(driver.moveFile).toHaveBeenCalledWith(expect.objectContaining({ assetId: 'stable' }), target, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(driver.importFiles).not.toHaveBeenCalled(); expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+  });
+  it('外部多文件复制到目标目录，刷新列表，原生结束不关闭页面', async () => {
+    await open(); emit('enter', ['E:/a.png', 'E:/b.mp4']); emit('drop', ['E:/a.png', 'E:/b.mp4']); await settle();
+    expect(driver.importFiles).toHaveBeenCalledWith(['E:/a.png', 'E:/b.mp4'], target, ['/library'], expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(driver.moveFile).not.toHaveBeenCalled(); expect(driver.listGlobal.mock.calls.length).toBeGreaterThan(1);
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+  });
+  it('整页没有弹窗类且未收到悬停事件时，仍通过系统光标定位并高亮目录', async () => {
+    await open();
+    vi.useFakeTimers(); driver.monitorNativeDrag = true;
+    const closest = vi.fn((selector: string) => selector === '[data-resource-video-boundary]' ? {
+      getBoundingClientRect: () => ({ left: 0, right: 900, top: 0, bottom: 600, width: 900, height: 600 }),
+    } : null);
+    (cards()[0].props.onDragStart as (event: unknown) => void)({ preventDefault: vi.fn(), currentTarget: { closest } });
+    await vi.advanceTimersByTimeAsync(0); render();
+    expect(closest).toHaveBeenCalledWith('[data-resource-video-boundary]');
+    expect(driver.cursor).toHaveBeenCalledOnce();
+    const row = () => find((element) => element.props['data-asset-folder-target'] === JSON.stringify(target));
+    expect(row().props.className).toContain('outline-dashed');
+    expect(row().props.className).toContain('motion-safe:scale-[1.02]');
+    driver.hitFolder = null;
+    await vi.advanceTimersByTimeAsync(50); render();
+    expect(row().props.className).not.toContain('outline-dashed');
+    (driver.drag.mock.calls[0][1] as () => void)();
+    const calls = driver.cursor.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(driver.cursor).toHaveBeenCalledTimes(calls);
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+  });
+  it('仅窗口通道发送悬停和离开时也更新高亮，关闭后解绑所有阶段', async () => {
+    await open();
+    driver.globalDragEvents['tauri://drag-over']({ payload: { position: { x: 20, y: 80 } } }); render();
+    const row = () => find((element) => element.props['data-asset-folder-target'] === JSON.stringify(target));
+    expect(row().props.className).toContain('outline-dashed');
+    driver.globalDragEvents['tauri://drag-leave']({ payload: {} }); render();
+    expect(row().props.className).not.toContain('outline-dashed');
+    driver.store!.getState().setAssetsPanelOpen(false); render();
+    expect(Object.keys(driver.globalDragEvents)).toHaveLength(0);
+  });
+  it('全部资产、未登记及离线目录不接收；导入文件根目录可接收', async () => {
+    await open();
+    for (const invalid of [{ kind: 'all' }, { ...target, rootPath: '/removed' }]) {
+      driver.hitFolder = JSON.stringify(invalid); emit('drop', ['E:/a.png']);
+    }
+    expect(driver.importFiles).not.toHaveBeenCalled();
+    driver.globalFolders[0].availability = 'offline';
+    // 用重新加载后的真实离线目录列表验证落点，而非依赖 DOM 属性。
+    driver.store!.getState().setAssetsPanelOpen(false); render();
+    driver.store!.getState().setAssetsPanelOpen(true, 'page', { tab: 'permanent', folder: { kind: 'all' } }); render(); await settle(); await settle();
+    driver.hitFolder = JSON.stringify(target); emit('drop', ['E:/a.png']);
+    expect(driver.importFiles).not.toHaveBeenCalled();
+    driver.hitFolder = JSON.stringify({ kind: 'global' }); emit('drop', ['E:/a.png']); await settle();
+    expect(driver.importFiles).toHaveBeenCalledWith(['E:/a.png'], { kind: 'global' }, ['/library'], expect.any(Object));
+  });
+  it('离开文件夹清除高亮，关闭后不再处理迟到的原生事件', async () => {
+    await open(); emit('over'); emit('leave');
+    expect(find((element) => element.props['data-asset-folder-target'] === JSON.stringify(target)).props.className).not.toContain('outline-dashed');
+    const callback = driver.nativeDrop;
+    driver.store!.getState().setAssetsPanelOpen(false); render();
+    callback?.({ payload: { type: 'drop', paths: ['E:/a.png'], position: { x: 20, y: 80 } } });
+    expect(driver.importFiles).not.toHaveBeenCalled();
+  });
+  it('同一操作进行中拒绝第二次拖放，取消后保留面板并刷新', async () => {
+    await open();
+    driver.importFiles.mockImplementationOnce((_paths, _target, _roots, options: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new Error('cancelled')));
+    }));
+    emit('drop', ['E:/a.png']); emit('drop', ['E:/b.png']);
+    expect(driver.importFiles).toHaveBeenCalledTimes(1);
+    click(find((element) => element.props.children === '取消操作')); await settle();
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+    expect(find((element) => element.props.children === '操作已取消，原文件和已完成的副本均保留')).toBeDefined();
+  });
+  it('全局资产 Tab 抽屉内拖拽不立即关闭，目录落点由面板独占', async () => {
+    await open('drawer');
+    (cards()[0].props.onDragStart as (event: unknown) => void)({ preventDefault: vi.fn() });
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+    emit('over'); expect(isExternalDropCaptured()).toBe(true);
+    emit('drop', ['/library/图.png']); await settle();
+    expect(driver.moveFile).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('启动页资产入口与最近使用', () => {
   it('整页资源库发起原生拖拽时保持页面，不返回启动页', async () => {
     driver.store!.setState({ currentProjectId: null });
     driver.store!.getState().setAssetsPanelOpen(true, 'page', { tab: 'permanent', folder: { kind: 'all' } });
     render(); await settle();
     (cards()[0].props.onDragStart as (event: unknown) => void)({ preventDefault: vi.fn() });
-    expect(driver.drag).toHaveBeenCalledWith(cards()[0].props.file);
+    expect(driver.drag).toHaveBeenCalledWith(cards()[0].props.file, expect.any(Function));
     expect(driver.store!.getState()).toMatchObject({ assetsPanelOpen: true, assetsPanelMode: 'page', currentProjectId: null });
     expect(driver.cursor).not.toHaveBeenCalled();
     expect(isExternalDropCaptured()).toBe(true);
@@ -295,6 +493,124 @@ describe('启动页资产入口与最近使用', () => {
     (cards()[0].props.onVideoExpandedChange as (expanded: boolean) => void)(true); render();
     (cards()[0].props.onVideoExpandedChange as (expanded: boolean) => void)(false); render();
     expect(driver.markUsed).toHaveBeenCalledOnce(); expect(driver.markUsed).toHaveBeenCalledWith(expect.objectContaining({ assetId: 'video' }));
+  });
+});
+
+describe('资产卡片悬浮提示', () => {
+  async function open(mode: 'drawer' | 'modal' | 'page' = 'drawer') {
+    driver.store!.getState().setAssetsPanelOpen(true, mode);
+    render(); await settle(); vi.useFakeTimers();
+  }
+  function hover(index = 0) { (cards()[index].props.onHover as () => void)(); render(); }
+  function leave(index = 0) { (cards()[index].props.onHoverEnd as () => void)(); render(); }
+  function cardElement(index = 0) {
+    const card = cards()[index];
+    return (card.type as (props: Record<string, unknown>) => Element)(card.props);
+  }
+  async function readPrompt() { await vi.advanceTimersByTimeAsync(400); render(); }
+
+  it('停留后读取编辑提示词并展示拖拽说明，悬浮不产生最近使用记录', async () => {
+    driver.imageDetails.mockResolvedValue({ record: { prompt: '编辑后的\n提示词' }, history: { prompt: '旧提示词' } });
+    await open(); hover();
+    expect(driver.imageDetails).not.toHaveBeenCalled();
+    expect(cardElement().props['data-tooltip']).toContain('正在读取');
+    await readPrompt();
+    expect(driver.imageDetails).toHaveBeenCalledWith(cards()[0].props.file, 'project-1', expect.any(AbortSignal));
+    expect(cardElement().props['data-tooltip']).toBe('提示词：编辑后的 提示词。拖拽到画布可添加节点');
+    expect(driver.markUsed).not.toHaveBeenCalled();
+    expect(all(cardElement(), (element) => element.type === 'asset-thumb')[0].props.showNativeTooltip).toBe(false);
+  });
+
+  it('快速扫过不读取；移开后忽略迟到结果，重新悬浮可读取最新内容', async () => {
+    await open(); hover(); leave(); await readPrompt();
+    expect(driver.imageDetails).not.toHaveBeenCalled();
+    let finish!: (value: unknown) => void;
+    driver.imageDetails.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    hover(); await readPrompt();
+    const signal = driver.imageDetails.mock.calls[0][2] as AbortSignal;
+    leave(); expect(signal.aborted).toBe(true);
+    finish({ record: { prompt: '已过期' } }); await readPrompt();
+    expect(cardElement().props['data-tooltip']).not.toContain('已过期');
+    hover(); await readPrompt();
+    expect(cardElement().props['data-tooltip']).toContain('历史提示词');
+  });
+
+  it('主动清空不回退历史，缺少记录与读取失败分别反馈', async () => {
+    driver.imageDetails.mockResolvedValueOnce({ record: { prompt: '' }, history: { prompt: '旧提示词' } })
+      .mockResolvedValueOnce({ record: null, history: null }).mockRejectedValueOnce(new Error('read failed'));
+    await open(); hover(); await readPrompt();
+    expect(cardElement().props['data-tooltip']).toContain('暂无提示词');
+    expect(cardElement().props['data-tooltip']).not.toContain('旧提示词');
+    leave(); hover(); await readPrompt();
+    expect(cardElement().props['data-tooltip']).toContain('暂无提示词');
+    leave(); hover(); await readPrompt();
+    expect(cardElement().props['data-tooltip']).toContain('读取失败，请重试');
+  });
+
+  it('视频按所查看项目查询；弹窗和整页使用相应的拖拽说明', async () => {
+    driver.listProject.mockResolvedValue([{ name: '视频', path: '/video.mp4', category: 'video', size: 12 }]);
+    await open('modal'); hover(); await readPrompt();
+    expect(driver.videoHistory).toHaveBeenCalledWith('/video.mp4', undefined, 'project-1', expect.any(AbortSignal));
+    expect(cardElement().props['data-tooltip']).toBe('提示词：视频提示词。拖出弹窗到画布可添加节点');
+    driver.store!.setState({ currentProjectId: null });
+    driver.store!.getState().setAssetsPanelOpen(true, 'page', { tab: 'permanent', folder: { kind: 'all' } });
+    render(); await vi.advanceTimersByTimeAsync(0); render(); hover(); await readPrompt();
+    expect(driver.imageDetails).toHaveBeenCalledWith(expect.objectContaining({ name: '全局参考' }), undefined, expect.any(AbortSignal));
+    expect(cardElement().props['data-tooltip']).toContain('可拖拽到其他窗口或应用');
+  });
+
+  it('文本、虚拟和离线素材不查询图像历史，提示拖拽可用性', async () => {
+    driver.listProject.mockResolvedValue([
+      { ...file('文本'), category: 'text' }, { ...file('虚拟'), path: 'virtual://image' },
+      { ...file('离线'), availability: 'offline' },
+    ]);
+    await open();
+    for (let index = 0; index < cards().length; index++) {
+      hover(index); await readPrompt();
+      expect(cardElement(index).props['data-tooltip']).toContain('暂无提示词');
+      if ((cards()[index].props.file as AssetFileEntry).category !== 'text') {
+        expect(cardElement(index).props['data-tooltip']).toContain('暂不支持拖拽');
+      }
+    }
+    expect(driver.imageDetails).not.toHaveBeenCalled(); expect(driver.videoHistory).not.toHaveBeenCalled();
+  });
+
+  it('搜索、项目切换和关闭面板取消读取，旧上下文内容不展示', async () => {
+    driver.imageDetails.mockImplementation(() => new Promise(() => {}));
+    await open(); hover(); await readPrompt();
+    const first = driver.imageDetails.mock.calls[0][2] as AbortSignal;
+    (find((element) => element.props.placeholder === '搜索名称或标签…').props.onChange as (event: unknown) => void)({ target: { value: '森林' } });
+    render(); expect(first.aborted).toBe(true);
+    hover(); await readPrompt();
+    const second = driver.imageDetails.mock.calls[1][2] as AbortSignal;
+    driver.store!.setState({ currentProjectId: 'project-2' }); render(); expect(second.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(0); render(); hover(); await readPrompt();
+    const third = driver.imageDetails.mock.calls[2][2] as AbortSignal;
+    driver.store!.getState().setAssetsPanelOpen(false); render(); expect(third.aborted).toBe(true);
+  });
+
+  it('长提示词截取摘要，拖拽与右键时隐藏提示，键盘焦点仍可读取', async () => {
+    driver.imageDetails.mockResolvedValue({ record: { prompt: '长'.repeat(1000) } });
+    await open('modal');
+    (cardElement().props.onFocus as (event: unknown) => void)({ currentTarget: { contains: () => false }, relatedTarget: null });
+    render(); await readPrompt();
+    expect(String(cardElement().props['data-tooltip'])).toContain('点击查看完整提示词');
+    expect(String(cardElement().props['data-tooltip']).length).toBeLessThan(300);
+    openFileMenu(); expect(cardElement().props['data-tooltip']).toBeUndefined();
+    fileMenu().onClose(); render(); leave(); hover(); await readPrompt();
+    (cards()[0].props.onDragStart as (event: unknown) => void)({ preventDefault: vi.fn(), currentTarget: { closest: () => null } });
+    render(); expect(cardElement().props['data-tooltip']).toBeUndefined();
+  });
+
+  it('鼠标和键盘焦点交接时保留已读取提示，均离开后取消', async () => {
+    await open(); hover(); await readPrompt();
+    const signal = driver.imageDetails.mock.calls[0][2] as AbortSignal;
+    (cardElement().props.onMouseLeave as (event: unknown) => void)({ currentTarget: { contains: () => true } });
+    expect(signal.aborted).toBe(false);
+    (cardElement().props.onBlur as (event: unknown) => void)({ currentTarget: { contains: () => false, matches: () => true }, relatedTarget: null });
+    expect(signal.aborted).toBe(false);
+    (cardElement().props.onBlur as (event: unknown) => void)({ currentTarget: { contains: () => false, matches: () => false }, relatedTarget: null });
+    expect(signal.aborted).toBe(true);
   });
 });
 
@@ -642,7 +958,7 @@ describe('资产库 Tab 抽屉', () => {
     expect(cards()).toHaveLength(2);
     expect(find((el) => el.props.placeholder === '搜索名称或标签…').props.value).toBe('人物');
     (cards()[0].props.onDragStart as (event: { preventDefault: () => void }) => void)({ preventDefault: vi.fn() });
-    expect(driver.drag).toHaveBeenCalledWith(expect.objectContaining({ path: '/library/hero.png' }));
+    expect(driver.drag).toHaveBeenCalledWith(expect.objectContaining({ path: '/library/hero.png' }), expect.any(Function));
   });
 
   it('无法访问和未扫描目录不冒充空目录，显示扫描上限提示', async () => {
@@ -732,7 +1048,7 @@ describe('资产库 Tab 抽屉', () => {
     (button('导入文件').props.onContextMenu as (event: unknown) => void)({ preventDefault: vi.fn(), stopPropagation: vi.fn(), currentTarget: {}, clientX: 100, clientY: 120 }); render();
     click(find((el) => el.props.role === 'menuitem' && (el.props.children as unknown[]).includes('粘贴'))); render(); await settle();
     const before = driver.listGlobal.mock.calls.length;
-    click(find((el) => el.props.children === '取消复制')); render(); await settle(); await settle();
+    click(find((el) => el.props.children === '取消操作')); render(); await settle(); await settle();
     expect(driver.listGlobal.mock.calls.length).toBeGreaterThan(before);
     expect(all(tree, (el) => el.props.children === '复制已取消；已复制内容保留在目标目录')).toHaveLength(1);
     expect(button('导入文件').props.disabled).toBe(false);

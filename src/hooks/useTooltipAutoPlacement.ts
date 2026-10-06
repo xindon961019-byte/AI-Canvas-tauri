@@ -7,6 +7,7 @@ import { useEffect } from 'react';
 type TooltipPosition = 'top' | 'bottom' | 'left' | 'right';
 
 const TOOLTIP_GAP = 6;
+const POINTER_GAP = 12;
 const VIEWPORT_MARGIN = 8;
 const SHOW_DELAY = 800;
 
@@ -64,9 +65,19 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), Math.max(min, max));
 }
 
-function positionTooltip(tooltip: HTMLDivElement, target: HTMLElement) {
-  const targetRect = target.getBoundingClientRect();
+function positionTooltip(tooltip: HTMLDivElement, target: HTMLElement, pointer?: { x: number; y: number } | null) {
   const tooltipRect = tooltip.getBoundingClientRect();
+  if (pointer && target.dataset.tooltipAnchor === 'pointer') {
+    const left = pointer.x + POINTER_GAP + tooltipRect.width <= window.innerWidth - VIEWPORT_MARGIN
+      ? pointer.x + POINTER_GAP : pointer.x - tooltipRect.width - POINTER_GAP;
+    const below = pointer.y + POINTER_GAP + tooltipRect.height <= window.innerHeight - VIEWPORT_MARGIN;
+    const top = below ? pointer.y + POINTER_GAP : pointer.y - tooltipRect.height - POINTER_GAP;
+    tooltip.style.left = `${Math.round(clamp(left, VIEWPORT_MARGIN, window.innerWidth - tooltipRect.width - VIEWPORT_MARGIN))}px`;
+    tooltip.style.top = `${Math.round(clamp(top, VIEWPORT_MARGIN, window.innerHeight - tooltipRect.height - VIEWPORT_MARGIN))}px`;
+    tooltip.dataset.position = below ? 'bottom' : 'top';
+    return;
+  }
+  const targetRect = target.getBoundingClientRect();
   const position = resolvePosition(
     getPreferredPosition(target),
     targetRect,
@@ -136,13 +147,25 @@ export function useTooltipAutoPlacement() {
     let focusedTarget: HTMLElement | null = null;
     let activeTarget: HTMLElement | null = null;
     let showTimer: number | null = null;
+    let pointer: { x: number; y: number } | null = null;
+    let positionFrame: number | null = null;
+    const positionActiveTooltip = () => {
+      if (activeTarget) positionTooltip(tooltip, activeTarget, hoveredTarget === activeTarget ? pointer : null);
+    };
+    const queuePosition = () => {
+      if (positionFrame !== null || tooltip.dataset.open !== 'true') return;
+      positionFrame = requestAnimationFrame(() => {
+        positionFrame = null;
+        if (tooltip.dataset.open === 'true') positionActiveTooltip();
+      });
+    };
     const activeTargetObserver = new MutationObserver(() => {
       if (!activeTarget) return;
       if (!updateTooltipContent(tooltip, activeTarget)) {
         hideTooltip();
         return;
       }
-      if (tooltip.dataset.open === 'true') positionTooltip(tooltip, activeTarget);
+      if (tooltip.dataset.open === 'true') positionActiveTooltip();
     });
 
     const clearShowTimer = () => {
@@ -153,6 +176,7 @@ export function useTooltipAutoPlacement() {
 
     function hideTooltip() {
       clearShowTimer();
+      if (positionFrame !== null) { cancelAnimationFrame(positionFrame); positionFrame = null; }
       tooltip.removeAttribute('data-open');
       tooltip.setAttribute('aria-hidden', 'true');
     }
@@ -171,7 +195,7 @@ export function useTooltipAutoPlacement() {
 
       tooltip.setAttribute('data-open', 'true');
       tooltip.setAttribute('aria-hidden', 'false');
-      positionTooltip(tooltip, activeTarget);
+      positionActiveTooltip();
     };
 
     const activateTarget = (nextTarget: HTMLElement | null) => {
@@ -184,17 +208,19 @@ export function useTooltipAutoPlacement() {
 
       activeTargetObserver.observe(activeTarget, {
         attributes: true,
-        attributeFilter: ['data-tooltip', 'data-tooltip-label', 'data-tooltip-action', 'data-tooltip-pos'],
+        attributeFilter: ['data-tooltip', 'data-tooltip-label', 'data-tooltip-action', 'data-tooltip-pos', 'data-tooltip-anchor'],
       });
       showTimer = window.setTimeout(showTooltip, SHOW_DELAY);
     };
 
     const syncActiveTarget = () => {
       activateTarget(hoveredTarget ?? focusedTarget);
+      queuePosition();
     };
 
     const handlePointerOver = (event: PointerEvent) => {
       hoveredTarget = findTooltipTarget(event.target);
+      pointer = { x: event.clientX, y: event.clientY };
       syncActiveTarget();
     };
 
@@ -202,7 +228,14 @@ export function useTooltipAutoPlacement() {
       const nextTarget = findTooltipTarget(event.relatedTarget);
       if (nextTarget === hoveredTarget) return;
       hoveredTarget = nextTarget;
+      pointer = nextTarget ? { x: event.clientX, y: event.clientY } : null;
       syncActiveTarget();
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      if (!hoveredTarget || hoveredTarget !== activeTarget || activeTarget.dataset.tooltipAnchor !== 'pointer') return;
+      pointer = { x: event.clientX, y: event.clientY };
+      queuePosition();
     };
 
     const handleFocusIn = (event: FocusEvent) => {
@@ -226,11 +259,12 @@ export function useTooltipAutoPlacement() {
         activateTarget(null);
         return;
       }
-      if (tooltip.dataset.open === 'true') positionTooltip(tooltip, activeTarget);
+      if (tooltip.dataset.open === 'true') positionActiveTooltip();
     };
 
     document.addEventListener('pointerover', handlePointerOver);
     document.addEventListener('pointerout', handlePointerOut);
+    document.addEventListener('pointermove', handlePointerMove);
     document.addEventListener('focusin', handleFocusIn);
     document.addEventListener('focusout', handleFocusOut);
     document.addEventListener('click', handleClick, true);
@@ -239,9 +273,11 @@ export function useTooltipAutoPlacement() {
 
     return () => {
       clearShowTimer();
+      if (positionFrame !== null) cancelAnimationFrame(positionFrame);
       activeTargetObserver.disconnect();
       document.removeEventListener('pointerover', handlePointerOver);
       document.removeEventListener('pointerout', handlePointerOut);
+      document.removeEventListener('pointermove', handlePointerMove);
       document.removeEventListener('focusin', handleFocusIn);
       document.removeEventListener('focusout', handleFocusOut);
       document.removeEventListener('click', handleClick, true);

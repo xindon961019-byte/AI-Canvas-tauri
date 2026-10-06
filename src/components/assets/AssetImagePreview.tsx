@@ -14,10 +14,11 @@ import { getNodeMetaMap } from '../nodes/shared/mentionEditorDom';
 import { renderPromptWithChips } from '../nodes/shared/PromptChipViewer';
 
 /** 资产库专用图片预览。列表与画布保留原状态，历史信息按图片身份只读加载。 */
-export default function AssetImagePreview({ files, initialPath, projectId, onClose }: {
+export default function AssetImagePreview({ files, initialPath, projectId: fallbackProjectId, projectIdForFile, onClose }: {
   files: AssetFileEntry[];
   initialPath: string;
   projectId?: string;
+  projectIdForFile?: (file: AssetFileEntry) => string | undefined;
   onClose: () => void;
 }) {
   const [activePath, setActivePath] = useState(initialPath);
@@ -44,6 +45,7 @@ export default function AssetImagePreview({ files, initialPath, projectId, onClo
   const infoContentRef = useRef<HTMLDivElement | null>(null);
   const index = files.findIndex((file) => file.path === activePath);
   const file = files[index];
+  const projectId = file ? projectIdForFile?.(file) ?? fallbackProjectId : fallbackProjectId;
   const queryKey = JSON.stringify([file?.path, file?.assetUrl, projectId, retry]);
   const referencePreview = referenceState?.key === queryKey ? referenceState : null;
   const imageKey = JSON.stringify([file?.path, file?.assetUrl, imageRetry]);

@@ -40,7 +40,7 @@ const defaultConfig: AppConfig = {
   interactionMode: 'default',
   nodeToolbarMode: 'icons',
   nodeLabelVisible: true,
-  startupView: 'last-project',
+  startupView: 'project-library',
   performanceMode: false,
   // language 不给默认值：未设置时按系统语言判定
 };

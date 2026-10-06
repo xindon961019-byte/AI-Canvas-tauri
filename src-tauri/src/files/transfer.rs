@@ -2,6 +2,7 @@
 
 use reqwest::blocking::Response;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs::{self, File},
@@ -126,11 +127,17 @@ where
     ensure_disk_space(parent, disk_space_bytes)?;
 
     let temp_path = temporary_path(destination, task_id)?;
+    let mut temporary_created = false;
     let transfer_result = (|| {
         if cancelled()? {
             return Err("文件传输已取消".to_string());
         }
-        let mut output = File::create(&temp_path).map_err(|e| format!("创建临时文件失败: {e}"))?;
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|e| format!("创建临时文件失败（禁止覆盖）: {e}"))?;
+        temporary_created = true;
         let mut buffer = vec![0_u8; BUFFER_SIZE];
         let mut transferred_bytes = 0_u64;
 
@@ -194,7 +201,7 @@ where
         Ok(transferred_bytes)
     })();
 
-    if transfer_result.is_err() {
+    if transfer_result.is_err() && temporary_created {
         let _ = fs::remove_file(&temp_path);
     }
     transfer_result
@@ -570,6 +577,206 @@ pub async fn copy_asset_folder(
     result?
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetFileCopyResult {
+    path: String,
+    total_bytes: u64,
+    digest: String,
+}
+
+fn file_digest(
+    path: &Path,
+    cancelled: impl Fn() -> Result<bool, String>,
+) -> Result<String, String> {
+    let mut input = File::open(path).map_err(|_| "无法读取文件内容")?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0; BUFFER_SIZE];
+    loop {
+        if cancelled()? {
+            return Err("文件操作已取消".into());
+        }
+        let read = input.read(&mut buffer).map_err(|_| "读取文件内容失败")?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn asset_file_destination(source: &Path, parent: &Path) -> Result<PathBuf, String> {
+    let name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("文件名无效")?;
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or("文件名无效")?;
+    let extension = source.extension().and_then(|value| value.to_str());
+    for index in 0..10_000 {
+        let file_name = if index == 0 {
+            name.to_string()
+        } else {
+            match extension {
+                Some(ext) => format!("{stem} ({index}).{ext}"),
+                None => format!("{stem} ({index})"),
+            }
+        };
+        let candidate = parent.join(file_name);
+        match fs::symlink_metadata(&candidate) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+            Err(_) => return Err("无法检查目标文件".into()),
+            Ok(_) => {}
+        }
+    }
+    Err("同名文件过多，请更换目标目录".into())
+}
+
+#[tauri::command]
+pub async fn copy_asset_file_to_folder(
+    app: AppHandle,
+    webview: Webview,
+    task_id: String,
+    source_path: String,
+    destination_directory: String,
+) -> Result<AssetFileCopyResult, String> {
+    ensure_trusted_caller(&webview)?;
+    if webview.label() != "main" {
+        return Err("文件拖放仅允许主窗口调用".into());
+    }
+    if task_id.is_empty()
+        || task_id.len() > 128
+        || !task_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+    {
+        return Err("传输标识无效".into());
+    }
+    let source = crate::path_policy::authorize_existing_plain_file(&app, &source_path)?;
+    let parent =
+        crate::path_policy::authorize_existing_plain_directory(&app, &destination_directory)?;
+    let worker_id = task_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let bytes = plain_copy_metadata(&source)?.len();
+        let digest = file_digest(&source, || is_cancelled(&worker_id))?;
+        let destination = asset_file_destination(&source, &parent)?;
+        let authorized = authorize_path(&app, &destination.to_string_lossy(), PathAccess::Write)?;
+        if authorized.parent() != Some(parent.as_path()) {
+            return Err("目标目录已变化".into());
+        }
+        let mut input = File::open(&source).map_err(|_| "无法打开源文件")?;
+        stream_to_file(
+            &worker_id,
+            &mut input,
+            &destination,
+            Some(bytes),
+            Some(bytes),
+            Some(bytes),
+            || is_cancelled(&worker_id),
+            |current| {
+                let _ = app.emit(
+                    PROGRESS_EVENT,
+                    FileTransferProgress {
+                        task_id: worker_id.clone(),
+                        transferred_bytes: current,
+                        total_bytes: Some(bytes),
+                    },
+                );
+            },
+            |temporary| {
+                crate::path_policy::reauthorize_existing_plain_directory(&app, &parent)?;
+                let current_source =
+                    crate::path_policy::authorize_existing_plain_file(&app, &source_path)?;
+                if current_source != source
+                    || plain_copy_metadata(&source)?.len() != bytes
+                    || file_digest(temporary, || is_cancelled(&worker_id))? != digest
+                    || file_digest(&source, || is_cancelled(&worker_id))? != digest
+                {
+                    return Err("源文件已变化，原文件已保留".into());
+                }
+                Ok(())
+            },
+        )?;
+        Ok(AssetFileCopyResult {
+            path: destination.to_string_lossy().into_owned(),
+            total_bytes: bytes,
+            digest,
+        })
+    })
+    .await
+    .map_err(|_| "文件复制任务失败".to_string());
+    clear_cancelled(&task_id);
+    result?
+}
+
+fn verify_move_copy(
+    source: &Path,
+    destination: &Path,
+    expected_digest: &str,
+    expected_bytes: u64,
+) -> Result<(), String> {
+    if source == destination {
+        return Err("源文件与目标文件相同".into());
+    }
+    if expected_digest.len() != 64 || !expected_digest.bytes().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("文件校验信息无效".into());
+    }
+    for path in [destination, source] {
+        if path == source
+            && fs::symlink_metadata(path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            // 原件已被回收而日志提交失败：目标仍通过校验时允许完成清理日志。
+            continue;
+        }
+        if plain_copy_metadata(path)?.len() != expected_bytes
+            || file_digest(path, || Ok(false))? != expected_digest
+        {
+            return Err("文件内容已变化，原文件已保留".into());
+        }
+    }
+    Ok(())
+}
+
+/** 仅在数据库引用迁移后调用；验证成功的副本存在才回收源文件。 */
+#[tauri::command]
+pub async fn finish_asset_file_move(
+    app: AppHandle,
+    webview: Webview,
+    source_path: String,
+    destination_path: String,
+    expected_digest: String,
+    expected_bytes: u64,
+) -> Result<(), String> {
+    ensure_trusted_caller(&webview)?;
+    if webview.label() != "main" {
+        return Err("资产移动仅允许主窗口调用".into());
+    }
+    let source = authorize_path(&app, &source_path, PathAccess::Write)?;
+    let destination = crate::path_policy::authorize_existing_plain_file(&app, &destination_path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        verify_move_copy(&source, &destination, &expected_digest, expected_bytes)?;
+        if fs::symlink_metadata(&source)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            return Ok(());
+        }
+        if crate::path_policy::authorize_existing_plain_file(&app, &source_path)? != source
+            || crate::path_policy::authorize_existing_plain_file(&app, &destination_path)?
+                != destination
+        {
+            return Err("文件位置已变化，原文件已保留".into());
+        }
+        authorize_path(&app, &source_path, PathAccess::Write)?;
+        trash::delete(&source)
+            .map_err(|_| "源文件无法放入回收站，目标副本和原文件均已保留".to_string())
+    })
+    .await
+    .map_err(|_| "资产移动任务失败，原文件已保留".to_string())?
+}
+
 #[tauri::command]
 pub fn cancel_file_transfer(task_id: String) -> Result<(), String> {
     cancelled_transfers()
@@ -583,6 +790,54 @@ pub fn cancel_file_transfer(task_id: String) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn asset_move_requires_identical_copy_and_never_overwrites_conflicts() {
+        let root = test_directory("asset-file-move");
+        let source = root.join("图片.png");
+        fs::write(&source, b"original").unwrap();
+        let destination = asset_file_destination(&source, &root).unwrap();
+        assert_eq!(
+            destination.file_name().unwrap().to_string_lossy(),
+            "图片 (1).png"
+        );
+        fs::write(&destination, b"original").unwrap();
+        let digest = file_digest(&source, || Ok(false)).unwrap();
+        assert!(verify_move_copy(&source, &destination, &digest, 8).is_ok());
+        assert!(verify_move_copy(&source, &source, &digest, 8).is_err());
+        fs::write(&destination, b"modified").unwrap();
+        assert!(verify_move_copy(&source, &destination, &digest, 8).is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"original");
+        assert!(file_digest(&source, || Ok(true)).is_err());
+        assert!(verify_move_copy(&source, &destination, "invalid", 8).is_err());
+        fs::write(&destination, b"original").unwrap();
+        fs::remove_file(&source).unwrap();
+        assert!(verify_move_copy(&source, &destination, &digest, 8).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transfer_never_overwrites_or_removes_an_existing_part_file() {
+        let root = test_directory("existing-part");
+        let destination = root.join("image.png");
+        let partial = temporary_path(&destination, "fixed-task").unwrap();
+        fs::write(&partial, b"existing").unwrap();
+        assert!(stream_to_file(
+            "fixed-task",
+            &mut Cursor::new(b"replacement"),
+            &destination,
+            None,
+            None,
+            None,
+            || Ok(false),
+            |_| {},
+            |_| Ok(())
+        )
+        .is_err());
+        assert_eq!(fs::read(&partial).unwrap(), b"existing");
+        assert!(!destination.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn folder_plan_preserves_nested_and_empty_directories() {

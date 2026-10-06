@@ -37,7 +37,7 @@ import { localMediaUrlToPath } from '../utils/mediaUrl';
 
 const LAST_ACTIVE_PROJECT_KEY = 'last-active-project';
 const RECENT_ASSET_USAGE_KEY = 'recent-asset-usage';
-const MAX_RECENT_ASSET_USAGE = 50;
+const MAX_RECENT_ASSET_USAGE = 10;
 
 function normalizeAssetUsage(value: unknown): AssetUsageRecord[] {
   if (!Array.isArray(value)) return [];

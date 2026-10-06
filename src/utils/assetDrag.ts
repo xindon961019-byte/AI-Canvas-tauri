@@ -17,9 +17,46 @@ const FALLBACK_ICON_B64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
 let _fallbackIconPath: string | null = null;
+const DRAG_ICON_SIZE = 80;
+const imageIcons = new Map<string, string>();
+const pendingIcons = new Set<string>();
 
-/** 预创建占位预览图并缓存路径（窗口加载时调用一次，使拖拽时同步可用） */
-export async function prepareDragIcon(): Promise<void> {
+function thumbnailIcon(image: HTMLImageElement): string | undefined {
+  if (!image.complete || !image.naturalWidth || !image.naturalHeight) return;
+  try {
+    const scale = Math.min(1, DRAG_ICON_SIZE / image.naturalWidth, DRAG_ICON_SIZE / image.naturalHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/png');
+  } catch { return; }
+}
+
+/** 加载时准备占位图；悬停时提前解码图片，使系统拖拽同步使用小缩略图。 */
+export async function prepareDragIcon(file?: AssetFileEntry): Promise<void> {
+  if (file?.category === 'image' && file.assetUrl) {
+    const key = file.assetUrl;
+    if (imageIcons.has(key) || pendingIcons.has(key)) return;
+    pendingIcons.add(key);
+    const image = new Image();
+    // 普通展示图片可能污染 canvas；单独用 CORS 加载，允许导出缩略图。
+    image.crossOrigin = 'anonymous';
+    image.onload = () => {
+      const icon = thumbnailIcon(image);
+      if (icon) {
+        imageIcons.set(key, icon);
+        if (imageIcons.size > 64) imageIcons.delete(imageIcons.keys().next().value!);
+      }
+      pendingIcons.delete(key);
+      image.onload = image.onerror = null;
+    };
+    image.onerror = () => { pendingIcons.delete(key); image.onload = image.onerror = null; };
+    image.src = key;
+    return;
+  }
   if (_fallbackIconPath) return;
   try {
     const { appDataDir } = await import('@tauri-apps/api/path');
@@ -37,11 +74,14 @@ export async function prepareDragIcon(): Promise<void> {
 
 /**
  * 同步发起文件拖拽（务必在 dragstart 内同步调用）。
- * 图片用自身做预览图，其它类型用预创建的占位图。
+ * 图片使用最长边 80px 的 PNG 缩略图，不把原图交给系统预览。
  */
-export function startAssetDrag(file: AssetFileEntry, onEnd?: () => void): void {
+export function startAssetDrag(file: AssetFileEntry, onEnd?: () => void, source?: Element | null): void {
   if (!file.path) { onEnd?.(); return; }
-  const icon = file.category === 'image' ? file.path : (_fallbackIconPath || file.path);
+  const image = file.category === 'image' ? source?.querySelector<HTMLImageElement>('img') : null;
+  const icon = (file.assetUrl && imageIcons.get(file.assetUrl))
+    || (image && thumbnailIcon(image))
+    || _fallbackIconPath || `data:image/png;base64,${FALLBACK_ICON_B64}`;
   // 原生拖拽会暂停 DOM 鼠标事件；完成和取消统一通过插件回调释放监听。
   void startDrag({ item: [file.path], icon, mode: 'copy' }, onEnd ? () => onEnd() : undefined)
     .catch(() => { onEnd?.(); console.warn('[assetDrag] startDrag 失败'); });

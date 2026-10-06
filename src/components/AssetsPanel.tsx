@@ -16,6 +16,7 @@ import {
   useRef,
   useDeferredValue,
   type DragEvent,
+  type PointerEvent as ReactPointerEvent,
   type MouseEvent as ReactMouseEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
@@ -25,6 +26,7 @@ import { motion, AnimatePresence, MotionConfig, useReducedMotion } from 'framer-
 import { useShallow } from 'zustand/react/shallow';
 import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
 import { useAppStore } from '../store/useAppStore';
+import { listTopLevelProjects, listEpisodes, seriesOwnerId } from '../store/store.utils';
 import {
   listProjectFiles,
   listGlobalFolderContents,
@@ -33,6 +35,7 @@ import {
   createAssetSubfolder,
   resolveAssetFolderDirectory,
   copyAssetFolder,
+  importAssetFilesToFolder,
   addAssetFilesToGlobal,
   pickAssetFolder,
   saveAssetToPermanent,
@@ -163,6 +166,14 @@ export default function AssetsPanel() {
   const canvasNodeData = useAppStore(useShallow((s) => assetsPanelOpen && isNodeList ? s.nodes.map((node) => node.data) : []));
   // 项目文件 Tab 查看的项目；null 表示「跟随当前项目」（关闭时复位，故每次打开默认当前项目）
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const selectedOwnerId = selectedProjectId ?? currentProjectId;
+  const viewProjectId = selectedOwnerId ? seriesOwnerId(projects, selectedOwnerId) : null;
+  const viewProjectIds = useMemo(() => viewProjectId
+    ? [viewProjectId, ...listEpisodes(projects, viewProjectId).map((project) => project.id)] : [], [projects, viewProjectId]);
+  const [projectFileOwners, setProjectFileOwners] = useState(new Map<string, string>());
+  const projectIdForFile = useCallback((file: AssetFileEntry) => activeTab === 'project'
+    ? projectFileOwners.get(file.path) ?? selectedProjectId ?? currentProjectId ?? undefined
+    : undefined, [activeTab, projectFileOwners, selectedProjectId, currentProjectId]);
   const [activeCategory, setActiveCategory] = useState<FileCategory | null>(null);
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -179,11 +190,30 @@ export default function AssetsPanel() {
   const [globalRootPath, setGlobalRootPath] = useState<string | null>(null);
   const [folderProgress, setFolderProgress] = useState<string | null>(null);
   const folderOperationRef = useRef<AbortController | null>(null);
+  const [folderDropTarget, setFolderDropTarget] = useState<AssetFolderSelection | null>(null);
+  const internalFolderDragRef = useRef<AssetFileEntry | null>(null);
+  const dragEndTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [folderSelection, setFolderSelection] = useState<AssetFolderSelection>({ kind: 'all' });
   const [imagePreview, setImagePreview] = useState<{ path: string; scope: string } | null>(null);
   const [fileMenu, setFileMenu] = useState<{ file: AssetFileEntry; scope: string; projectId?: string; x: number; y: number; confirmDelete?: boolean } | null>(null);
   const fileOperationRef = useRef<AbortController | null>(null);
   const fileScopeRef = useRef<string | null>(null);
+  const [hoverDetails, setHoverDetails] = useState<{ key: string; scope: string; text: string } | null>(null);
+  const hoverRequestRef = useRef<{ controller: AbortController; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const cancelHoverRead = useCallback(() => {
+    if (!hoverRequestRef.current) return;
+    clearTimeout(hoverRequestRef.current.timer);
+    hoverRequestRef.current.controller.abort();
+    hoverRequestRef.current = null;
+  }, []);
+  const clearHover = useCallback(() => {
+    cancelHoverRead();
+    setHoverDetails(null);
+  }, [cancelHoverRead]);
+  const dismissHover = useCallback(() => {
+    cancelHoverRead();
+    setHoverDetails((previous) => previous ? { ...previous, text: '' } : null);
+  }, [cancelHoverRead]);
   // 删除不改画布节点；防止刷新时将节点中残留的旧路径重新补入列表。
   const deletedFilePathsRef = useRef(new Set<string>());
   const closeFileMenu = useCallback(() => {
@@ -282,21 +312,29 @@ export default function AssetsPanel() {
     setLoading(true);
     try {
       if (activeTab === 'project') {
-        const viewProjectId = selectedProjectId ?? currentProjectId;
-        if (!viewProjectId) { setProjectFiles([]); return; }
-        const diskFiles = await listProjectFiles(viewProjectId);
+        if (!viewProjectIds.length) { setProjectFiles([]); setProjectFileOwners(new Map()); return; }
+        const owners = new Map<string, string>();
+        const diskEntries = new Map<string, AssetFileEntry>();
+        // 父项目后读取分集，重叠目录中的文件沿用具体分集的身份和历史归属。
+        for (const projectId of viewProjectIds) {
+          const entries = await listProjectFiles(projectId);
+          if (!isCurrentRequest()) return;
+          for (const file of entries) { diskEntries.set(file.path, file); owners.set(file.path, projectId); }
+        }
+        const diskFiles = Array.from(diskEntries.values());
         if (!isCurrentRequest()) return;
         const known = new Set(diskFiles.map((f) => f.path));
         for (const file of diskFiles) deletedFilePathsRef.current.delete(file.path);
         const nodeEntries: AssetFileEntry[] = [];
         // 仅当查看的是「当前项目」时，才并入画布上尚未落盘的节点文件
         // （store.nodes 始终是当前项目的画布，其他项目无法从内存取节点）
-        if (viewProjectId === currentProjectId) {
+        if (currentProjectId && viewProjectIds.includes(currentProjectId)) {
           for (const node of useAppStore.getState().nodes) {
             const entry = extractFilesFromNodeData(node.data as Record<string, unknown>);
-            if (entry && !known.has(entry.path) && !deletedFilePathsRef.current.has(entry.path)) { nodeEntries.push(entry); known.add(entry.path); }
+            if (entry && !known.has(entry.path) && !deletedFilePathsRef.current.has(entry.path)) { nodeEntries.push(entry); known.add(entry.path); owners.set(entry.path, currentProjectId); }
           }
         }
+        setProjectFileOwners(owners);
         setProjectFiles([...diskFiles, ...nodeEntries]);
       } else {
         // 永久 = 全局 file 目录 + 登记的外部文件夹（递归）
@@ -325,7 +363,7 @@ export default function AssetsPanel() {
     } catch { /* ignore */ } finally {
       if (isCurrentRequest()) setLoading(false);
     }
-  }, [activeTab, currentProjectId, selectedProjectId, folders]);
+  }, [activeTab, currentProjectId, viewProjectIds, folders]);
 
   useEffect(() => {
     if (assetsPanelOpen) {
@@ -417,8 +455,16 @@ export default function AssetsPanel() {
   }, [currentProjectId, handleClose, isDrawer, toast]);
 
   const dragMonitorRef = useRef<(() => void) | null>(null);
-  useEffect(() => () => { dragMonitorRef.current?.(); }, [assetsPanelOpen, assetsPanelMode, currentProjectId]);
+  const pointerDragStopRef = useRef<(() => void) | null>(null);
+  const suppressDragClickRef = useRef(0);
   const releaseDropCaptureRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => {
+    dragMonitorRef.current?.();
+    pointerDragStopRef.current?.();
+    if (isDrawer) releaseDropCaptureRef.current?.();
+    internalFolderDragRef.current = null;
+    clearTimeout(dragEndTimerRef.current);
+  }, [assetsPanelOpen, assetsPanelMode, currentProjectId, isDrawer]);
   useEffect(() => {
     if (!assetsPanelOpen || isDrawer) return;
     // 整页或弹窗覆盖画布时，不允许窗口级 drop 在背后创建节点。
@@ -434,24 +480,140 @@ export default function AssetsPanel() {
     return release;
   }, [assetsPanelOpen, isDrawer]);
 
-  // 原生拖拽不会持续发送 DOM dragover；仅弹窗用系统坐标检测越界。
+  const folderTargetAt = useCallback((x: number, y: number): AssetFolderSelection | null => {
+    if (!assetsPanelOpen || activeTab !== 'permanent' || visibleTab !== 'permanent' || folderOperationRef.current) return null;
+    const encoded = document.elementFromPoint?.(x, y)?.closest('[data-asset-folder-target]')?.getAttribute('data-asset-folder-target');
+    if (!encoded) return null;
+    try {
+      const target: AssetFolderSelection = JSON.parse(encoded);
+      if (target.kind === 'global') return globalRootPath ? target : null;
+      if (target.kind === 'folder' && externalFolders.some((folder) => folder.availability === 'online'
+        && folder.rootPath === target.rootPath && folder.relativePath === target.relativePath)) return target;
+    } catch { /* 非目录落点不接收文件。 */ }
+    return null;
+  }, [assetsPanelOpen, activeTab, visibleTab, globalRootPath, externalFolders]);
+
+  const highlightFolder = useCallback((target: AssetFolderSelection | null) => {
+    setFolderDropTarget((previous) => JSON.stringify(previous) === JSON.stringify(target) ? previous : target);
+  }, []);
+
+  const receiveFolderDrop = useCallback(async (selection: AssetFolderSelection, paths: string[], internal: AssetFileEntry | null) => {
+    if (folderOperationRef.current) return;
+    dismissHover(); highlightFolder(null);
+    const controller = new AbortController();
+    folderOperationRef.current = controller; setBusy(true);
+    const moving = internal?.category === 'image' && (internal.source === 'global' || internal.source === 'folder');
+    setFolderProgress(moving ? '正在移动图片…' : `正在导入 ${paths.length} 个文件…`);
+    try {
+      const options = { signal: controller.signal, onProgress: ({ transferredBytes, totalBytes }: { transferredBytes: number; totalBytes: number | null }) => {
+        if (!controller.signal.aborted) setFolderProgress(`${moving ? '正在移动' : '正在导入'} · ${totalBytes ? Math.min(100, Math.round(transferredBytes / totalBytes * 100)) : 100}%`);
+      } };
+      if (moving) {
+        const result = await useAppStore.getState().moveGlobalAssetToFolder(internal, selection, options);
+        toast(result.moved ? '图片已移动到文件夹' : '图片已在此文件夹内');
+      } else {
+        const count = await importAssetFilesToFolder(paths, selection, useAppStore.getState().config.assetFolders ?? [], options);
+        toast(`已导入 ${count} 个文件，外部原文件保留`);
+      }
+    } catch {
+      if (useAppStore.getState().assetsPanelOpen) toast(controller.signal.aborted
+        ? '操作已取消，原文件和已完成的副本均保留' : '操作未完成，原文件已保留；请检查目录权限或文件是否已变化');
+    } finally {
+      if (folderOperationRef.current === controller) { folderOperationRef.current = null; setBusy(false); setFolderProgress(null); }
+      if (useAppStore.getState().assetsPanelOpen && useAppStore.getState().currentProjectId === currentProjectId) await loadFiles().then(loadTags);
+    }
+  }, [dismissHover, highlightFolder, currentProjectId, loadFiles, loadTags, toast]);
+
+  // 原生插件拖拽与系统外部拖入使用不同事件通道；同时监听并去重。
+  const nativeFolderHandlersRef = useRef({ folderTargetAt, highlightFolder, receiveFolderDrop });
+  useEffect(() => { nativeFolderHandlersRef.current = { folderTargetAt, highlightFolder, receiveFolderDrop }; }, [folderTargetAt, highlightFolder, receiveFolderDrop]);
+  useEffect(() => {
+    if (!assetsPanelOpen || activeTab !== 'permanent' || visibleTab !== 'permanent' || !isTauriEnv()) return;
+    let disposed = false;
+    const unlisten: Array<() => void> = [];
+    let lastDrop = { signature: '', time: 0 };
+    let drawerCapture: boolean | null = null;
+    let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+    const releaseDrawer = () => {
+      if (drawerCapture !== null) { setExternalDropCaptured(drawerCapture); drawerCapture = null; }
+    };
+    const handle = (payload: { type: string; paths?: string[]; position?: { x: number; y: number } }) => {
+      if (disposed) return;
+      const handlers = nativeFolderHandlersRef.current;
+      if (payload.type === 'leave') { handlers.highlightFolder(null); releaseDrawer(); return; }
+      const ratio = window.devicePixelRatio || 1;
+      const target = payload.position ? handlers.folderTargetAt(payload.position.x / ratio, payload.position.y / ratio) : null;
+      handlers.highlightFolder(target);
+      if (isDrawer && target && drawerCapture === null) {
+        drawerCapture = isExternalDropCaptured(); setExternalDropCaptured(true);
+      }
+      if (payload.type !== 'drop') { if (!target) releaseDrawer(); return; }
+      // 留到本次事件分发结束，避免背后的画布也消费此落点。
+      clearTimeout(releaseTimer); releaseTimer = setTimeout(releaseDrawer, 0);
+      if (!target || !payload.paths?.length) return;
+      const signature = JSON.stringify([target, payload.paths]);
+      if (lastDrop.signature === signature && Date.now() - lastDrop.time < 400) return;
+      lastDrop = { signature, time: Date.now() };
+      const internal = internalFolderDragRef.current;
+      const same = (path: string) => {
+        const normalized = path.replace(/^\\\\\?\\/, '').replace(/\\/g, '/');
+        return /^[a-z]:\//i.test(normalized) || normalized.startsWith('//') ? normalized.toLowerCase() : normalized;
+      };
+      const movingFile = internal && payload.paths.length === 1 && same(internal.path) === same(payload.paths[0]) ? internal : null;
+      internalFolderDragRef.current = null;
+      void handlers.receiveFolderDrop(target, payload.paths, movingFile);
+    };
+    void (async () => {
+      try {
+        const [{ getCurrentWebview }, { listen }] = await Promise.all([import('@tauri-apps/api/webview'), import('@tauri-apps/api/event')]);
+        if (disposed) return;
+        const first = await getCurrentWebview().onDragDropEvent(({ payload }) => handle(payload));
+        if (disposed) { first(); return; } unlisten.push(first);
+        // 同进程插件也可能只投递到窗口通道；悬停和离开必须与 drop 一起补齐。
+        for (const type of ['enter', 'over', 'drop', 'leave'] as const) {
+          const stop = await listen<{ paths?: string[]; position?: { x: number; y: number } }>(`tauri://drag-${type}`, ({ payload }) => handle({ ...payload, type }));
+          if (disposed) { stop(); return; } unlisten.push(stop);
+        }
+      } catch { /* 浏览器预览不具备系统拖放能力。 */ }
+    })();
+    return () => { disposed = true; unlisten.forEach((stop) => stop()); clearTimeout(releaseTimer); releaseDrawer(); nativeFolderHandlersRef.current.highlightFolder(null); };
+  }, [assetsPanelOpen, activeTab, visibleTab, isDrawer]);
+
+  // 原生拖拽不会持续发送 DOM dragover；所有展示模式用系统坐标检测目录，弹窗额外检测越界。
   // startAssetDrag 仍在 dragstart 中同步调用，避免丢失鼠标手势。
   const handleCardDragStart = useCallback((file: AssetFileEntry, e: DragEvent) => {
+    dismissHover();
     if (!isDraggableEntry(file)) return;
     e.preventDefault();
     dragMonitorRef.current?.();
-    if (isPage || isDrawer || !currentProjectId) {
-      startAssetDrag(file);
+    clearTimeout(dragEndTimerRef.current);
+    if (isDrawer) releaseDropCaptureRef.current?.();
+    const folderDrag = activeTab === 'permanent' && isLocalAssetFile(file);
+    internalFolderDragRef.current = folderDrag ? file : null;
+    if (folderDrag && isDrawer) {
+      // 同进程原生拖拽可能没有 over 事件；从开始就阻止画布抢先消费目录落点。
+      const previouslyCaptured = isExternalDropCaptured();
+      setExternalDropCaptured(true);
+      const release = () => {
+        if (releaseDropCaptureRef.current !== release) return;
+        releaseDropCaptureRef.current = null; setExternalDropCaptured(previouslyCaptured);
+      };
+      releaseDropCaptureRef.current = release;
+    }
+    if (!folderDrag && (isPage || isDrawer || !currentProjectId)) {
+      startAssetDrag(file, undefined, e.currentTarget as Element);
       if (isDrawer) setAssetsPanelOpen(false);
       return;
     }
-    const bounds = e.currentTarget.closest('.assets-panel')?.getBoundingClientRect();
+    // 整页布局没有 .assets-panel 类，沿用三种布局共有的容器标记。
+    const bounds = e.currentTarget?.closest('[data-resource-video-boundary]')?.getBoundingClientRect();
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const stop = () => {
       stopped = true;
       if (timer !== undefined) clearTimeout(timer);
       if (dragMonitorRef.current === stop) dragMonitorRef.current = null;
+      highlightFolder(null);
     };
     dragMonitorRef.current = stop;
     if (bounds && bounds.width > 0 && bounds.height > 0) {
@@ -466,11 +628,12 @@ export default function AssetsPanel() {
               const point = await cursorPosition();
               if (stopped) return;
               const state = useAppStore.getState();
-              if (!state.assetsPanelOpen || state.assetsPanelMode !== 'modal' || state.currentProjectId !== currentProjectId) { stop(); return; }
+              if (!state.assetsPanelOpen || state.assetsPanelMode !== assetsPanelMode || state.currentProjectId !== currentProjectId) { stop(); return; }
               const x = (point.x - origin.x) / scale;
               const y = (point.y - origin.y) / scale;
               if (!Number.isFinite(x) || !Number.isFinite(y)) { stop(); return; }
-              if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) {
+              highlightFolder(nativeFolderHandlersRef.current.folderTargetAt(x, y));
+              if (!isPage && (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom)) {
                 stop(); releaseDropCaptureRef.current?.(); setAssetsPanelOpen(false); return;
               }
               timer = setTimeout(() => { void checkPosition(); }, 50);
@@ -480,14 +643,100 @@ export default function AssetsPanel() {
         } catch { stop(); }
       })();
     }
-    startAssetDrag(file, stop);
-  }, [currentProjectId, isDrawer, isPage, setAssetsPanelOpen]);
+    startAssetDrag(file, () => {
+      stop();
+      // 同一进程的 drop 可能晚于原生结束回调；短暂保留来源以区分移动与复制。
+      dragEndTimerRef.current = setTimeout(() => {
+        internalFolderDragRef.current = null;
+        if (isDrawer) releaseDropCaptureRef.current?.();
+      }, 400);
+    }, e.currentTarget as Element);
+  }, [currentProjectId, isDrawer, isPage, assetsPanelMode, activeTab, highlightFolder, setAssetsPanelOpen, dismissHover]);
+
+  // Windows 原生 DoDragDrop 会占用窗口事件循环，库内反馈不能依赖拖拽期间的 IPC。
+  // 保持 Pointer Events 到目录落点；越过面板边界时才同步交给系统文件拖拽。
+  const handleCardPointerDown = useCallback((file: AssetFileEntry, event: ReactPointerEvent<HTMLDivElement>) => {
+    if (activeTab !== 'permanent' || file.category !== 'image' || !isLocalAssetFile(file)
+      || folderOperationRef.current || event.button !== 0 || event.pointerType !== 'mouse') return;
+    const control = (event.target as HTMLElement).closest('button, input, textarea, select, a');
+    if (control && !control.classList.contains('asset-image-preview-trigger')) return;
+    const card = event.currentTarget;
+    const bounds = card.closest('[data-resource-video-boundary]')?.getBoundingClientRect();
+    if (!bounds || !card.setPointerCapture) return;
+    pointerDragStopRef.current?.();
+    event.preventDefault();
+    const pointerId = event.pointerId;
+    const start = { x: event.clientX, y: event.clientY };
+    let dragging = false;
+    let stopped = false;
+    let ghost: HTMLImageElement | null = null;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      window.removeEventListener('pointermove', move, true);
+      window.removeEventListener('pointerup', up, true);
+      window.removeEventListener('pointercancel', cancel, true);
+      window.removeEventListener('blur', stop);
+      window.removeEventListener('keydown', key, true);
+      card.removeEventListener('lostpointercapture', stop);
+      if (card.hasPointerCapture(pointerId)) card.releasePointerCapture(pointerId);
+      ghost?.remove();
+      highlightFolder(null);
+      if (pointerDragStopRef.current === stop) pointerDragStopRef.current = null;
+    };
+    const move = (e: PointerEvent) => {
+      if (stopped || e.pointerId !== pointerId) return;
+      if (!(e.buttons & 1)) { stop(); return; }
+      if (!dragging && Math.hypot(e.clientX - start.x, e.clientY - start.y) < 6) return;
+      if (!dragging) {
+        dragging = true; card.setPointerCapture(pointerId); dismissHover();
+        if (file.assetUrl) {
+          ghost = document.createElement('img');
+          ghost.src = file.assetUrl; ghost.alt = '';
+          ghost.setAttribute('aria-hidden', 'true');
+          ghost.className = 'pointer-events-none fixed left-0 top-0 z-[320] h-20 w-20 rounded-lg object-contain opacity-80 shadow-lg';
+          document.body.appendChild(ghost);
+        }
+      }
+      e.preventDefault();
+      suppressDragClickRef.current = Date.now() + 400;
+      if (ghost) ghost.style.transform = `translate(${e.clientX + 12}px, ${e.clientY + 12}px)`;
+      highlightFolder(nativeFolderHandlersRef.current.folderTargetAt(e.clientX, e.clientY));
+      if (e.clientX < bounds.left || e.clientX > bounds.right || e.clientY < bounds.top || e.clientY > bounds.bottom) {
+        stop();
+        handleCardDragStart(file, { currentTarget: card, preventDefault: () => e.preventDefault() } as DragEvent<HTMLDivElement>);
+        if (!isPage) { releaseDropCaptureRef.current?.(); setAssetsPanelOpen(false); }
+      }
+    };
+    const up = (e: PointerEvent) => {
+      if (stopped || e.pointerId !== pointerId) return;
+      const target = dragging ? nativeFolderHandlersRef.current.folderTargetAt(e.clientX, e.clientY) : null;
+      if (dragging) { e.preventDefault(); suppressDragClickRef.current = Date.now() + 400; }
+      stop();
+      if (target) void nativeFolderHandlersRef.current.receiveFolderDrop(target, [file.path], file);
+    };
+    const cancel = (e: PointerEvent) => { if (e.pointerId === pointerId) stop(); };
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault(); e.stopImmediatePropagation(); stop();
+    };
+    pointerDragStopRef.current = stop;
+    window.addEventListener('pointermove', move, true);
+    window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', cancel, true);
+    window.addEventListener('blur', stop);
+    window.addEventListener('keydown', key, true);
+    card.addEventListener('lostpointercapture', stop);
+  }, [activeTab, dismissHover, handleCardDragStart, highlightFolder, isPage, setAssetsPanelOpen]);
 
   // Esc 关闭
   useEffect(() => {
     if (!assetsPanelOpen) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return;
+      if (pointerDragStopRef.current) {
+        e.preventDefault(); pointerDragStopRef.current(); return;
+      }
       // 抽屉或整页之上的确认框/选择器先消费 Esc，避免连带关闭资产库。
       if ((isDrawer || isPage) && document.querySelector('[aria-modal="true"], [role="listbox"], dialog[open]')) return;
       handleClose();
@@ -625,15 +874,60 @@ export default function AssetsPanel() {
 
   const visibleFiles = useMemo(() => filteredFiles.slice(0, visibleCount), [filteredFiles, visibleCount]);
   const previewScope = JSON.stringify([currentProjectId, selectedProjectId, activeTab, folderSelection, assetsPanelMode, visibleTab]);
+  const hoverScope = JSON.stringify([assetsPanelOpen, previewScope, search, activeCategory, activeTag]);
+  useEffect(() => cancelHoverRead, [hoverScope, cancelHoverRead]);
+  const startHover = (file: AssetFileEntry) => {
+    if (hoverRequestRef.current && hoverDetails?.key === assetKey(file) && hoverDetails.scope === hoverScope) return;
+    cancelHoverRead();
+    const key = assetKey(file);
+    if (file.availability === 'offline' || !isDraggableEntry(file) || !['image', 'video'].includes(file.category)) {
+      setHoverDetails({ key, scope: hoverScope, text: '暂无提示词' });
+      return;
+    }
+    setHoverDetails({ key, scope: hoverScope, text: '正在读取…' });
+    const controller = new AbortController();
+    const projectId = projectIdForFile(file);
+    // 仅为实际停留的卡片读取，快速扫过不查询历史或磁盘；移开和切换上下文时撤销。
+    const timer = setTimeout(() => {
+      void (async () => {
+        const isCurrent = () => hoverRequestRef.current?.controller === controller && !controller.signal.aborted
+          && useAppStore.getState().assetsPanelOpen && useAppStore.getState().currentProjectId === currentProjectId;
+        try {
+          const details = file.category === 'image' ? await loadAssetImageDetails(file, projectId, controller.signal) : null;
+          const history = file.category === 'video'
+            ? await loadAssetVideoHistory(file.path, file.assetUrl, projectId, controller.signal) : details?.history;
+          if (!isCurrent()) return;
+          // 用户主动清空的提示词不能回退到历史；长文本只截取预览，完整内容仍在详情中。
+          const prompt = (details?.record?.prompt ?? history?.prompt ?? '').replace(/\s+/g, ' ').trim();
+          const text = !prompt ? '暂无提示词' : prompt.length > 240 ? `${prompt.slice(0, 240)}…（点击查看完整提示词）` : prompt;
+          setHoverDetails({ key, scope: hoverScope, text });
+        } catch {
+          if (isCurrent()) setHoverDetails({ key, scope: hoverScope, text: '读取失败，请重试' });
+        }
+      })();
+    }, 400);
+    hoverRequestRef.current = { controller, timer };
+  };
+  const cardTooltip = (file: AssetFileEntry): string | undefined => {
+    const current = hoverDetails?.key === assetKey(file) && hoverDetails.scope === hoverScope ? hoverDetails : null;
+    if (current?.text === '') return undefined;
+    const dragHint = !isDraggableEntry(file) || file.availability === 'offline' ? '此素材暂不支持拖拽'
+      : isPage || !currentProjectId ? '可拖拽到其他窗口或应用'
+        : isDrawer ? '拖拽到画布可添加节点' : '拖出弹窗到画布可添加节点';
+    const folderHint = activeTab === 'permanent' && file.category === 'image' && isLocalAssetFile(file)
+      && (file.source === 'global' || file.source === 'folder') ? '拖到左侧文件夹可移动。' : '';
+    return `提示词：${current?.text ?? '正在读取…'}。${folderHint}${dragHint}`;
+  };
   useEffect(() => {
     fileScopeRef.current = assetsPanelOpen ? previewScope : null;
     return () => { fileScopeRef.current = null; fileOperationRef.current?.abort(); };
   }, [assetsPanelOpen, previewScope]);
 
   const openFileMenu = (file: AssetFileEntry, x: number, y: number, confirmDelete = false) => {
+    dismissHover();
     fileOperationRef.current?.abort();
     setFileMenu({ file, scope: previewScope, x, y, confirmDelete,
-      projectId: activeTab === 'project' ? selectedProjectId ?? currentProjectId ?? undefined : undefined });
+      projectId: projectIdForFile(file) });
   };
   const handleFileContextMenu = (file: AssetFileEntry, event: ReactMouseEvent<HTMLDivElement>) => {
     if ((event.target as HTMLElement).closest?.('input, textarea, [contenteditable="true"]')) return;
@@ -697,6 +991,7 @@ export default function AssetsPanel() {
   };
   const imageFiles = useMemo(() => filteredFiles.filter((file) => file.category === 'image' && !!file.assetUrl), [filteredFiles]);
   const openImagePreview = (file: AssetFileEntry) => {
+    dismissHover();
     videoPreview.setExpanded(null);
     setImagePreview({ path: file.path, scope: previewScope });
     void markAssetUsed(file);
@@ -891,11 +1186,11 @@ export default function AssetsPanel() {
                   <Select
                     className="assets-project-select-wrap"
                     triggerClassName="assets-project-select"
-                    value={selectedProjectId ?? currentProjectId ?? ''}
+                    value={viewProjectId ?? ''}
                     onChange={(value) => setSelectedProjectId(value || null)}
-                    options={projects.map((p) => ({
+                    options={listTopLevelProjects(projects).map((p) => ({
                       value: p.id,
-                      label: p.id === currentProjectId ? `${p.name}（当前）` : p.name,
+                      label: currentProjectId && p.id === seriesOwnerId(projects, currentProjectId) ? `${p.name}（当前）` : p.name,
                     }))}
                   />
                 )}
@@ -1035,6 +1330,7 @@ export default function AssetsPanel() {
                       globalCount={permanentFiles.filter((file) => file.source === 'global').length}
                       compact={isDrawer} loading={loading || busy} onSelect={handleSelectFolder} globalRootPath={globalRootPath}
                       onCreate={handleCreateSubfolder}
+                      dropTarget={folderDropTarget}
                       onCopy={(selection) => { void handleFolderClipboard(selection, 'copy'); }}
                       onPaste={(selection) => { void handleFolderClipboard(selection, 'paste'); }}
                       onRemove={(rootPath) => { void handleRemoveFolder(rootPath); }}
@@ -1043,7 +1339,7 @@ export default function AssetsPanel() {
                   <div className="assets-file-content">
                     {folderProgress && <div role="status" className="flex items-center gap-2 p-2 text-xs text-canvas-text-secondary">
                       <Icon icon="lucide:loader-circle" className="animate-spin" aria-hidden="true" /><span className="flex-1">{folderProgress}</span>
-                      <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" onClick={() => folderOperationRef.current?.abort()}>取消复制</button>
+                      <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" onClick={() => folderOperationRef.current?.abort()}>取消操作</button>
                     </div>}
                     {activeTab === 'permanent' && (
                       <div className="flex shrink-0 items-center gap-2 px-3 pt-2 text-xs text-canvas-text-secondary">
@@ -1143,10 +1439,17 @@ export default function AssetsPanel() {
                                   file={file}
                                   isProject={activeTab === 'project'}
                                   draggable={isDraggableEntry(file)}
+                                  tooltip={cardTooltip(file)}
+                                  onHover={() => startHover(file)}
+                                  onHoverEnd={clearHover}
                                   onDragStart={(e) => handleCardDragStart(file, e)}
+                                  onPointerDown={(e) => handleCardPointerDown(file, e)}
+                                  onClickCapture={(e) => {
+                                    if (Date.now() < suppressDragClickRef.current) { e.preventDefault(); e.stopPropagation(); }
+                                  }}
                                   editing={editingPath === assetKey(file)}
                                   tagDraft={editingPath === assetKey(file) ? tagDraft : ''}
-                                  onToggleEdit={() => { const key = assetKey(file); setEditingPath((p) => (p === key ? null : key)); setTagDraft(''); }}
+                                  onToggleEdit={() => { dismissHover(); const key = assetKey(file); setEditingPath((p) => (p === key ? null : key)); setTagDraft(''); }}
                                   onTagDraftChange={setTagDraft}
                                   onAddTag={(t) => { addTag(file, t); setTagDraft(''); }}
                                   onRemoveTag={(t) => removeTag(file, t)}
@@ -1159,8 +1462,9 @@ export default function AssetsPanel() {
                                   onMenuKeyDown={(event) => handleFileMenuKey(file, event)}
                                   videoExpanded={videoPreview.expandedId === assetKey(file)}
                                   videoPresentation={isDrawer ? 'inline' : 'fullscreen'}
-                                  videoProjectId={activeTab === 'project' ? selectedProjectId ?? currentProjectId ?? undefined : undefined}
+                                  videoProjectId={projectIdForFile(file)}
                                   onVideoExpandedChange={(expanded) => {
+                                    dismissHover();
                                     videoPreview.setExpanded(expanded ? assetKey(file) : null);
                                     if (expanded) void markAssetUsed(file);
                                   }}
@@ -1218,7 +1522,7 @@ export default function AssetsPanel() {
         onReveal={() => performFileAction('reveal')} onDelete={() => performFileAction('delete')} onClose={closeFileMenu} />}
     {assetsPanelOpen && imagePreview?.scope === previewScope &&
       <AssetImagePreview key={`${imagePreview.scope}:${imagePreview.path}`} files={imageFiles} initialPath={imagePreview.path}
-        projectId={activeTab === 'project' ? selectedProjectId ?? currentProjectId ?? undefined : undefined} onClose={closeImagePreview} />}
+        projectIdForFile={projectIdForFile} onClose={closeImagePreview} />}
   </>;
 }
 
@@ -1229,7 +1533,12 @@ interface AssetCardProps {
   file: AssetFileEntry;
   isProject: boolean;
   draggable?: boolean;
+  tooltip?: string;
+  onHover: () => void;
+  onHoverEnd: () => void;
   onDragStart?: (e: DragEvent) => void;
+  onPointerDown?: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onClickCapture?: (e: ReactMouseEvent<HTMLDivElement>) => void;
   editing: boolean;
   tagDraft: string;
   onToggleEdit: () => void;
@@ -1248,7 +1557,7 @@ interface AssetCardProps {
 }
 
 function AssetCard({
-  file, isProject, draggable, onDragStart, editing, tagDraft,
+  file, isProject, draggable, tooltip, onHover, onHoverEnd, onDragStart, onPointerDown, onClickCapture, editing, tagDraft,
   onToggleEdit, onTagDraftChange, onAddTag, onRemoveTag, onSave, onDelete, onContextMenu, onMenuKeyDown,
   videoExpanded = false, videoPresentation, videoProjectId, onVideoExpandedChange, onImagePreview,
 }: AssetCardProps) {
@@ -1258,6 +1567,15 @@ function AssetCard({
       className={`assets-waterfall-card anim-card-in${videoExpanded ? ' has-expanded-video' : ''}`}
       draggable={draggable && !videoExpanded}
       onDragStart={onDragStart}
+      onPointerDown={editing ? undefined : onPointerDown}
+      onClickCapture={onClickCapture}
+      data-tooltip={videoExpanded || editing ? undefined : tooltip}
+      data-tooltip-pos="bottom"
+      data-tooltip-anchor="pointer"
+      onMouseEnter={videoExpanded || editing ? undefined : () => { void prepareDragIcon(file); onHover(); }}
+      onMouseLeave={(event) => { if (!event.currentTarget.contains(document.activeElement)) onHoverEnd(); }}
+      onFocus={(event) => { if (!videoExpanded && !editing && !event.currentTarget.contains(event.relatedTarget)) onHover(); }}
+      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget) && !event.currentTarget.matches(':hover')) onHoverEnd(); }}
       tabIndex={0}
       aria-label={file.name}
       aria-haspopup="menu"
@@ -1275,6 +1593,7 @@ function AssetCard({
         category={file.category}
         size={file.size}
         onImagePreview={onImagePreview}
+        showNativeTooltip={false}
         badge={file.source === 'folder' ? '外部' : undefined}
       >
         <CardActions isProject={isProject} onSave={onSave} onDelete={onDelete} onToggleEdit={onToggleEdit} />

@@ -9,6 +9,8 @@ export interface MediaRelocation {
   relativePath: string;
   projectId: string;
   ownerId?: string;
+  /** 全局资产移动：项目引用不再使用原项目相对路径，身份保持不变。 */
+  assetMove?: { assetId: string; rootPath: string; source: 'global' | 'folder'; digest: string; totalBytes: number; mtimeMs: number };
 }
 const JOURNAL_ID = 'media-relocations';
 const STORES = ['projects', 'history', 'chatMessages', 'assetIndex', 'assetMeta', 'assetMetaV2',
@@ -44,6 +46,10 @@ export function relocateMediaReferences<T>(value: T, moves: readonly MediaReloca
       return local ? local.assetUrl : item;
     }
     if (!item || typeof item !== 'object' || (Object.getPrototypeOf(item) !== Object.prototype && !Array.isArray(item))) return item;
+    const original = item as Record<string, unknown>;
+    const identityMove = resolve(typeof original.filePath === 'string' ? original.filePath : typeof original.path === 'string' ? original.path : undefined);
+    // 旧位置后来放入了另一份资产：旧日志只修复原身份，不能挪走新文件的索引或标签。
+    if (identityMove?.assetMove?.assetId && typeof original.assetId === 'string' && original.assetId !== identityMove.assetMove.assetId) return item;
     if (seen.has(item)) return seen.get(item);
     const next: Record<string, unknown> | unknown[] = Array.isArray(item) ? [] : {};
     seen.set(item, next);
@@ -56,7 +62,22 @@ export function relocateMediaReferences<T>(value: T, moves: readonly MediaReloca
     const record = item as Record<string, unknown>;
     const move = resolve(typeof record.filePath === 'string' ? record.filePath : typeof record.path === 'string' ? record.path : undefined);
     if (move && !Array.isArray(next)) {
-      if ('relativePath' in record || 'filePath' in record) next.relativePath = move.relativePath;
+      if (move.assetMove) {
+        if ('fingerprint' in record && 'assetId' in record) {
+          next.rootPath = move.assetMove.rootPath;
+          next.source = move.assetMove.source;
+          next.relativePath = move.relativePath;
+          next.mtimeMs = move.assetMove.mtimeMs;
+          next.fingerprint = `${move.assetMove.totalBytes}:${move.assetMove.mtimeMs}`;
+          next.size = move.assetMove.totalBytes;
+          next.status = 'online';
+          next.updatedAt = Date.now();
+          delete next.projectId;
+        } else {
+          // 此路径以全局资产根目录为基准，不能交给项目目录解析。
+          delete next.relativePath;
+        }
+      } else if ('relativePath' in record || 'filePath' in record) next.relativePath = move.relativePath;
       if (move.ownerId && 'assetId' in record) delete next.assetId;
       if ('fileName' in record) next.fileName = move.newPath.replace(/\\/g, '/').split('/').pop();
       changed = true;

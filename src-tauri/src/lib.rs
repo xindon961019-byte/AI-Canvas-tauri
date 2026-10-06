@@ -1197,6 +1197,8 @@ pub fn run() {
             thumbnail_cache::write_project_thumbnail,
             file_transfer::copy_file_streamed,
             file_transfer::copy_asset_folder,
+            file_transfer::copy_asset_file_to_folder,
+            file_transfer::finish_asset_file_move,
             file_transfer::download_file_streamed,
             file_transfer::cancel_file_transfer,
             director_desk_runtime::director_desk_runtime_status,
