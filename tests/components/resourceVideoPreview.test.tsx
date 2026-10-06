@@ -9,6 +9,7 @@ interface Harness {
 const driver = vi.hoisted(() => ({ current: null as Harness | null, visible: true, present: true, reduced: false, poster: vi.fn(), convert: vi.fn() }));
 vi.mock('react', async () => ({
   ...await vi.importActual<typeof import('react')>('react'),
+  lazy: () => 'asset-video-preview',
   useCallback: <T,>(callback: T) => callback,
   useState: <T,>(initial: T | (() => T)) => {
     const scope = driver.current!; const index = scope.stateIndex++;
@@ -65,7 +66,7 @@ function render<T>(scope: Harness, fn: () => T, video?: unknown): T {
   return tree;
 }
 const flush = async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); };
-const props = (extra: Partial<ComponentProps<typeof ResourceVideoPreview>> = {}): ComponentProps<typeof ResourceVideoPreview> => ({ src: 'https://media.test/a.mp4', name: '测试视频', expanded: false, onExpandedChange: vi.fn(), ...extra });
+const props = (extra: Partial<ComponentProps<typeof ResourceVideoPreview>> = {}): ComponentProps<typeof ResourceVideoPreview> => ({ src: 'https://media.test/a.mp4', name: '测试视频', presentation: 'inline', expanded: false, onExpandedChange: vi.fn(), ...extra });
 function preview(scope: Harness, input = props()) { return render(scope, () => ResourceVideoPreview(input)); }
 async function loaded(scope: Harness, input: ComponentProps<typeof ResourceVideoPreview>) {
   if (input.expanded && !scope.states[0]) {
@@ -88,6 +89,17 @@ beforeEach(() => {
 afterEach(() => { scopes.splice(0).forEach(dispose); vi.unstubAllGlobals(); });
 
 describe('资源视频封面与播放器', () => {
+  it('默认点击打开全屏信息面板，保留原查询地址并可关闭', async () => {
+    const scope = harness(); const input = props({ presentation: undefined, expanded: true, filePath: '/videos/test.mp4', projectId: 'project', size: 42 });
+    const tree = await loaded(scope, input);
+    const layer = elements(tree).find((item) => item.type === 'asset-video-preview')!;
+    expect(layer).toBeDefined();
+    expect(layer.props).toMatchObject({ filePath: '/videos/test.mp4', querySrc: input.src, projectId: 'project', size: 42 });
+    expect(elements(tree).some((item) => item.props.openingGeometry)).toBe(false);
+    (layer.props.onClose as () => void)();
+    expect(input.onExpandedChange).toHaveBeenLastCalledWith(false);
+    expect(elements(preview(scope, { ...input, expanded: false })).some((item) => item.type === 'asset-video-preview')).toBe(false);
+  });
   it('默认显示共享封面而不创建播放器，悬浮播放时保留原缩略卡片', async () => {
     const scope = harness(); const input = props(); const tree = await loaded(scope, input);
     expect(elements(tree).find((item) => item.type === 'img')?.props.src).toBe('blob:poster');

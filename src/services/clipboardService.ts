@@ -47,6 +47,12 @@ export async function readNativeClipboard(): Promise<NativeClipboardContent> {
   return invoke<NativeClipboardContent>('read_canvas_clipboard');
 }
 
+/** 读取当前系统剪贴板中的真实目录，原生端复核权限，不使用应用内复制缓存。 */
+export async function readClipboardFolders(): Promise<string[]> {
+  if (!isTauriEnv()) throw new Error('文件夹剪贴板仅支持桌面应用');
+  return invoke<string[]>('read_asset_folder_clipboard');
+}
+
 /**
  * 复制图像到系统剪贴板（位图格式，可粘贴到 PS、聊天工具）。
  * 支持 data: URL 和 http(s) URL（在 Tauri 环境用 fetch 拉取）。

@@ -16,27 +16,42 @@ import {
   useRef,
   useDeferredValue,
   type DragEvent,
+  type MouseEvent as ReactMouseEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '@iconify/react';
 import { motion, AnimatePresence, MotionConfig, useReducedMotion } from 'framer-motion';
 import { useShallow } from 'zustand/react/shallow';
+import { cursorPosition, getCurrentWindow } from '@tauri-apps/api/window';
 import { useAppStore } from '../store/useAppStore';
 import {
   listProjectFiles,
-  listGlobalFiles,
-  listExternalFolderFiles,
+  listGlobalFolderContents,
+  listExternalFolderContents,
+  selectAssetFolderFiles,
+  createAssetSubfolder,
+  resolveAssetFolderDirectory,
+  copyAssetFolder,
   addAssetFilesToGlobal,
   pickAssetFolder,
   saveAssetToPermanent,
   deletePermanentFile,
+  revealFileInFolder,
+  isTauriEnv,
   extractFilesFromNodeData,
   CATEGORY_LABELS,
   type AssetFileEntry,
   type FileCategory,
+  type AssetFolderEntry,
+  type AssetFolderSelection,
 } from '../services/fileService';
+import { copyFile, copyText, readClipboardFolders } from '../services/clipboardService';
+import { loadAssetImageDetails } from '../services/assetImageDetails';
+import { loadAssetVideoHistory } from '../services/assetVideoDetails';
 import { getAllAssetMeta, putAssetMeta, deleteAssetMeta } from '../services/indexedDbService';
 import { startAssetDrag, prepareDragIcon } from '../utils/assetDrag';
+import { isExternalDropCaptured, setExternalDropCaptured } from '../utils/dropCapture';
 import { ALL_CATEGORIES, CATEGORY_ICONS, shortFolderName } from '../utils/assetFormat';
 import AssetThumb from './shared/AssetThumb';
 import PopupCloseButton from './shared/PopupCloseButton';
@@ -47,6 +62,9 @@ import { countUnreadDramaAssets } from '../store/store.dramaAssets';
 import { distributeToColumns } from './assets/waterfallColumns';
 import { getNodeTypeConfig } from '../types';
 import CanvasNodeCardContent from './assets/CanvasNodeCardContent';
+import AssetFolderNavigation from './assets/AssetFolderNavigation';
+import AssetImagePreview from './assets/AssetImagePreview';
+import AssetFileContextMenu from './assets/AssetFileContextMenu';
 import { useResourceVideoPreview } from '../hooks/useResourceVideoPreview';
 
 const DramaAssetsPanel = lazy(() => import('./DramaAssetsPanel'));
@@ -55,6 +73,11 @@ const VolcengineAssetLibraryPanel = lazy(() => import('./volcengine/VolcengineAs
 /** 仅磁盘真实文件可拖拽（排除节点引用的 node:// / virtual:// 虚拟路径）*/
 function isDraggableEntry(file: AssetFileEntry): boolean {
   return !!file.path && !file.path.startsWith('node://') && !file.path.startsWith('virtual://');
+}
+
+function isLocalAssetFile(file: AssetFileEntry): boolean {
+  return isDraggableEntry(file) && file.availability !== 'offline'
+    && (!/^[a-z][\w+.-]*:/i.test(file.path) || /^[a-z]:[\\/]/i.test(file.path));
 }
 
 type FileTabKey = 'project' | 'permanent';
@@ -89,6 +112,8 @@ export default function AssetsPanel() {
   const {
     assetsPanelOpen,
     assetsPanelMode,
+    assetsPanelRequest,
+    markAssetUsed,
     setAssetsPanelOpen,
     dramaAssetsPanelOpen,
     setDramaAssetsPanelOpen,
@@ -107,6 +132,8 @@ export default function AssetsPanel() {
       useShallow((s) => ({
         assetsPanelOpen: s.assetsPanelOpen,
         assetsPanelMode: s.assetsPanelMode,
+        assetsPanelRequest: s.assetsPanelRequest,
+        markAssetUsed: s.markAssetUsed,
         setAssetsPanelOpen: s.setAssetsPanelOpen,
         dramaAssetsPanelOpen: s.dramaAssetsPanelOpen,
         setDramaAssetsPanelOpen: s.setDramaAssetsPanelOpen,
@@ -143,10 +170,28 @@ export default function AssetsPanel() {
   const [nodeSearch, setNodeSearch] = useState('');
   const deferredNodeSearch = useDeferredValue(nodeSearch);
   const isDrawer = assetsPanelMode === 'drawer';
+  const isPage = assetsPanelMode === 'page';
   const waterfallColumns = isDrawer ? DEFAULT_WATERFALL_COLUMNS : normalizeWaterfallColumns(assetWaterfallColumns);
 
   const [projectFiles, setProjectFiles] = useState<AssetFileEntry[]>([]);
   const [permanentFiles, setPermanentFiles] = useState<AssetFileEntry[]>([]);
+  const [externalFolders, setExternalFolders] = useState<AssetFolderEntry[]>([]);
+  const [globalRootPath, setGlobalRootPath] = useState<string | null>(null);
+  const [folderProgress, setFolderProgress] = useState<string | null>(null);
+  const folderOperationRef = useRef<AbortController | null>(null);
+  const [folderSelection, setFolderSelection] = useState<AssetFolderSelection>({ kind: 'all' });
+  const [imagePreview, setImagePreview] = useState<{ path: string; scope: string } | null>(null);
+  const [fileMenu, setFileMenu] = useState<{ file: AssetFileEntry; scope: string; projectId?: string; x: number; y: number; confirmDelete?: boolean } | null>(null);
+  const fileOperationRef = useRef<AbortController | null>(null);
+  const fileScopeRef = useRef<string | null>(null);
+  // 删除不改画布节点；防止刷新时将节点中残留的旧路径重新补入列表。
+  const deletedFilePathsRef = useRef(new Set<string>());
+  const closeFileMenu = useCallback(() => {
+    fileOperationRef.current?.abort();
+    setFileMenu(null);
+  }, []);
+  const closeImagePreview = useCallback(() => setImagePreview(null), []);
+  const [folderScanTruncated, setFolderScanTruncated] = useState(false);
   // 标签 Map（path -> tags），作为标签的唯一真相源，编辑时只更新它，避免重新读盘
   const [tagMap, setTagMap] = useState<Record<string, string[]>>({});
   const [arkAssetCount, setArkAssetCount] = useState(0);
@@ -171,6 +216,8 @@ export default function AssetsPanel() {
   const [motionMode, setMotionMode] = useState(assetsPanelMode);
   if (presentation !== previousPresentation) {
     setPreviousPresentation(presentation);
+    setImagePreview(null);
+    setFileMenu(null);
     if (presentation) setMotionMode(presentation);
     if (presentation === 'drawer') {
       setActiveTab('project');
@@ -188,6 +235,21 @@ export default function AssetsPanel() {
   }
 
   const folders = useMemo(() => assetFolders ?? [], [assetFolders]);
+  const [previousRequest, setPreviousRequest] = useState<typeof assetsPanelRequest>(null);
+  if (assetsPanelRequest !== previousRequest) {
+    setPreviousRequest(assetsPanelRequest);
+    if (assetsPanelOpen && assetsPanelRequest) {
+      setActiveTab(assetsPanelRequest.tab);
+      setSelectedProjectId(assetsPanelRequest.projectId ?? null);
+      setFolderSelection(assetsPanelRequest.folder ?? { kind: 'all' });
+      setArkLibraryOpen(false);
+      setNodeListOpen(false);
+      setSearch('');
+      setActiveCategory(null);
+      setActiveTag(null);
+      setVisibleCount(PAGE_SIZE);
+    }
+  }
 
   const toast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -225,31 +287,40 @@ export default function AssetsPanel() {
         const diskFiles = await listProjectFiles(viewProjectId);
         if (!isCurrentRequest()) return;
         const known = new Set(diskFiles.map((f) => f.path));
+        for (const file of diskFiles) deletedFilePathsRef.current.delete(file.path);
         const nodeEntries: AssetFileEntry[] = [];
         // 仅当查看的是「当前项目」时，才并入画布上尚未落盘的节点文件
         // （store.nodes 始终是当前项目的画布，其他项目无法从内存取节点）
         if (viewProjectId === currentProjectId) {
           for (const node of useAppStore.getState().nodes) {
             const entry = extractFilesFromNodeData(node.data as Record<string, unknown>);
-            if (entry && !known.has(entry.path)) { nodeEntries.push(entry); known.add(entry.path); }
+            if (entry && !known.has(entry.path) && !deletedFilePathsRef.current.has(entry.path)) { nodeEntries.push(entry); known.add(entry.path); }
           }
         }
         setProjectFiles([...diskFiles, ...nodeEntries]);
       } else {
         // 永久 = 全局 file 目录 + 登记的外部文件夹（递归）
-        const [globalFiles, folderFiles] = await Promise.all([
-          listGlobalFiles(),
-          listExternalFolderFiles(folders),
+        const [globalContents, contents] = await Promise.all([
+          listGlobalFolderContents(),
+          listExternalFolderContents(folders),
         ]);
         if (!isCurrentRequest()) return;
         const seen = new Set<string>();
         const merged: AssetFileEntry[] = [];
-        for (const f of [...globalFiles, ...folderFiles]) {
+        for (const f of [...globalContents.files, ...contents.files]) {
           if (seen.has(f.path)) continue;
           seen.add(f.path);
           merged.push(f);
         }
         setPermanentFiles(merged);
+        const allFolders = Array.from(new Map([...globalContents.folders, ...contents.folders]
+          .map((folder) => [JSON.stringify([folder.rootPath, folder.relativePath]), folder])).values());
+        setGlobalRootPath(globalContents.rootPath);
+        setExternalFolders(allFolders);
+        setFolderScanTruncated(contents.truncated || globalContents.truncated);
+        setFolderSelection((selection) => selection.kind === 'folder'
+          && !allFolders.some((folder) => folder.rootPath === selection.rootPath && folder.relativePath === selection.relativePath)
+          ? { kind: 'all' } : selection);
       }
     } catch { /* ignore */ } finally {
       if (isCurrentRequest()) setLoading(false);
@@ -266,6 +337,52 @@ export default function AssetsPanel() {
     return () => { loadRequestRef.current += 1; };
   }, [assetsPanelOpen, loadFiles, loadTags]);
 
+  useEffect(() => () => { folderOperationRef.current?.abort(); }, [assetsPanelOpen, activeTab, currentProjectId]);
+
+  const handleCreateSubfolder = async (selection: AssetFolderSelection, name: string) => {
+    if (folderOperationRef.current) throw new Error('请等待当前目录操作完成');
+    const controller = new AbortController();
+    folderOperationRef.current = controller; setBusy(true);
+    try {
+      await createAssetSubfolder(selection, useAppStore.getState().config.assetFolders ?? [], name);
+      if (!controller.signal.aborted) { await loadFiles(); toast('文件夹已创建'); }
+    } finally {
+      if (folderOperationRef.current === controller) { folderOperationRef.current = null; setBusy(false); }
+    }
+  };
+
+  const handleFolderClipboard = async (selection: AssetFolderSelection, operation: 'copy' | 'paste') => {
+    if (folderOperationRef.current) return;
+    const controller = new AbortController();
+    folderOperationRef.current = controller; setBusy(true);
+    try {
+      const directory = await resolveAssetFolderDirectory(selection, useAppStore.getState().config.assetFolders ?? []);
+      if (controller.signal.aborted) return;
+      if (operation === 'copy') {
+        if (!(await copyFile(directory))) throw new Error('复制失败，请检查目录权限和系统剪贴板');
+        if (!controller.signal.aborted) toast('文件夹已复制，可在这里或系统中粘贴');
+      } else {
+        const sources = await readClipboardFolders();
+        for (const [index, source] of sources.entries()) {
+          if (controller.signal.aborted) throw new Error('复制已取消；已复制内容保留在目标目录');
+          setFolderProgress(`正在粘贴文件夹 ${index + 1}/${sources.length}…`);
+          await copyAssetFolder(source, directory, { signal: controller.signal, onProgress: ({ transferredBytes, totalBytes }) => {
+            if (!controller.signal.aborted) setFolderProgress(`正在粘贴文件夹 ${index + 1}/${sources.length} · ${totalBytes ? Math.min(100, Math.round(transferredBytes / totalBytes * 100)) : 100}%`);
+          } });
+        }
+        if (!controller.signal.aborted) toast(`已粘贴 ${sources.length} 个文件夹`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '目录操作失败，请检查权限';
+      if (useAppStore.getState().assetsPanelOpen) toast(controller.signal.aborted ? '复制已取消；已复制内容保留在目标目录' : message);
+    } finally {
+      if (folderOperationRef.current === controller) {
+        folderOperationRef.current = null; setBusy(false); setFolderProgress(null);
+      }
+      if (operation === 'paste' && useAppStore.getState().assetsPanelOpen && useAppStore.getState().currentProjectId === currentProjectId) await loadFiles();
+    }
+  };
+
   useEffect(() => {
     if (!assetsPanelOpen || visibleTab !== 'drama') return;
     if (unreadDramaAssetCount > 0 || useAppStore.getState().dramaAssets.lastViewedAt === undefined) {
@@ -274,6 +391,7 @@ export default function AssetsPanel() {
   }, [assetsPanelOpen, markDramaAssetsViewed, unreadDramaAssetCount, visibleTab]);
 
   const handleClose = useCallback(() => {
+    setImagePreview(null);
     setSelectedProjectId(null); // 复位项目选择，下次打开默认当前项目
     setFilterRowExpanded(false);
     setAssetsPanelOpen(false);
@@ -298,26 +416,85 @@ export default function AssetsPanel() {
     }
   }, [currentProjectId, handleClose, isDrawer, toast]);
 
-  // 拖拽文件到画布：dragstart 内同步发起原生拖拽，并立即隐藏弹窗露出画布
+  const dragMonitorRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => { dragMonitorRef.current?.(); }, [assetsPanelOpen, assetsPanelMode, currentProjectId]);
+  const releaseDropCaptureRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (!assetsPanelOpen || isDrawer) return;
+    // 整页或弹窗覆盖画布时，不允许窗口级 drop 在背后创建节点。
+    // 尊重先前已存在的独占状态；拖出弹窗时提前释放，露出的画布可接收落点。
+    const previouslyCaptured = isExternalDropCaptured();
+    setExternalDropCaptured(true);
+    const release = () => {
+      if (releaseDropCaptureRef.current !== release) return;
+      releaseDropCaptureRef.current = null;
+      setExternalDropCaptured(previouslyCaptured);
+    };
+    releaseDropCaptureRef.current = release;
+    return release;
+  }, [assetsPanelOpen, isDrawer]);
+
+  // 原生拖拽不会持续发送 DOM dragover；仅弹窗用系统坐标检测越界。
+  // startAssetDrag 仍在 dragstart 中同步调用，避免丢失鼠标手势。
   const handleCardDragStart = useCallback((file: AssetFileEntry, e: DragEvent) => {
     if (!isDraggableEntry(file)) return;
     e.preventDefault();
-    startAssetDrag(file);
-    setAssetsPanelOpen(false);
-  }, [setAssetsPanelOpen]);
+    dragMonitorRef.current?.();
+    if (isPage || isDrawer || !currentProjectId) {
+      startAssetDrag(file);
+      if (isDrawer) setAssetsPanelOpen(false);
+      return;
+    }
+    const bounds = e.currentTarget.closest('.assets-panel')?.getBoundingClientRect();
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = () => {
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+      if (dragMonitorRef.current === stop) dragMonitorRef.current = null;
+    };
+    dragMonitorRef.current = stop;
+    if (bounds && bounds.width > 0 && bounds.height > 0) {
+      void (async () => {
+        try {
+          const nativeWindow = getCurrentWindow();
+          const [origin, scale] = await Promise.all([nativeWindow.innerPosition(), nativeWindow.scaleFactor()]);
+          if (!Number.isFinite(scale) || scale <= 0) { stop(); return; }
+          const checkPosition = async () => {
+            if (stopped) return;
+            try {
+              const point = await cursorPosition();
+              if (stopped) return;
+              const state = useAppStore.getState();
+              if (!state.assetsPanelOpen || state.assetsPanelMode !== 'modal' || state.currentProjectId !== currentProjectId) { stop(); return; }
+              const x = (point.x - origin.x) / scale;
+              const y = (point.y - origin.y) / scale;
+              if (!Number.isFinite(x) || !Number.isFinite(y)) { stop(); return; }
+              if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) {
+                stop(); releaseDropCaptureRef.current?.(); setAssetsPanelOpen(false); return;
+              }
+              timer = setTimeout(() => { void checkPosition(); }, 50);
+            } catch { stop(); }
+          };
+          await checkPosition();
+        } catch { stop(); }
+      })();
+    }
+    startAssetDrag(file, stop);
+  }, [currentProjectId, isDrawer, isPage, setAssetsPanelOpen]);
 
   // Esc 关闭
   useEffect(() => {
     if (!assetsPanelOpen) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return;
-      // 抽屉之上的确认框/选择器先消费 Esc，避免连带关闭资产库。
-      if (isDrawer && document.querySelector('[aria-modal="true"], [role="listbox"], dialog[open]')) return;
+      // 抽屉或整页之上的确认框/选择器先消费 Esc，避免连带关闭资产库。
+      if ((isDrawer || isPage) && document.querySelector('[aria-modal="true"], [role="listbox"], dialog[open]')) return;
       handleClose();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [assetsPanelOpen, handleClose, isDrawer]);
+  }, [assetsPanelOpen, handleClose, isDrawer, isPage]);
 
   // 点击外部关闭「添加」菜单
   const addWrapRef = useRef<HTMLDivElement | null>(null);
@@ -331,7 +508,20 @@ export default function AssetsPanel() {
   }, [addMenuOpen]);
 
   // 原始文件（按 Tab）
-  const rawFiles = activeTab === 'project' ? projectFiles : permanentFiles;
+  const rawFiles = useMemo(() => activeTab === 'project' ? projectFiles : selectAssetFolderFiles(permanentFiles, folderSelection),
+    [activeTab, projectFiles, permanentFiles, folderSelection]);
+  const selectedFolder = folderSelection.kind === 'folder' ? externalFolders.find((folder) =>
+    folder.rootPath === folderSelection.rootPath && folder.relativePath === folderSelection.relativePath) : undefined;
+  const folderLabel = folderSelection.kind === 'all' ? '全部资产' : folderSelection.kind === 'global' ? '导入文件'
+    : `${shortFolderName(folderSelection.rootPath)}${folderSelection.relativePath ? ` / ${folderSelection.relativePath.replace(/\//g, ' / ')}` : ''}`;
+  const handleSelectFolder = useCallback((selection: AssetFolderSelection) => {
+    setFolderSelection(selection);
+    setActiveCategory(null);
+    setActiveTag(null);
+    setEditingPath(null);
+    setFilterRowExpanded(false);
+    setVisibleCount(PAGE_SIZE);
+  }, []);
 
   // 合并标签（useMemo，标签变化时不动文件数组）
   const files = useMemo(
@@ -434,6 +624,83 @@ export default function AssetsPanel() {
   }, [files, activeCategory, activeTag, deferredSearch]);
 
   const visibleFiles = useMemo(() => filteredFiles.slice(0, visibleCount), [filteredFiles, visibleCount]);
+  const previewScope = JSON.stringify([currentProjectId, selectedProjectId, activeTab, folderSelection, assetsPanelMode, visibleTab]);
+  useEffect(() => {
+    fileScopeRef.current = assetsPanelOpen ? previewScope : null;
+    return () => { fileScopeRef.current = null; fileOperationRef.current?.abort(); };
+  }, [assetsPanelOpen, previewScope]);
+
+  const openFileMenu = (file: AssetFileEntry, x: number, y: number, confirmDelete = false) => {
+    fileOperationRef.current?.abort();
+    setFileMenu({ file, scope: previewScope, x, y, confirmDelete,
+      projectId: activeTab === 'project' ? selectedProjectId ?? currentProjectId ?? undefined : undefined });
+  };
+  const handleFileContextMenu = (file: AssetFileEntry, event: ReactMouseEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest?.('input, textarea, [contenteditable="true"]')) return;
+    event.preventDefault(); event.stopPropagation(); event.currentTarget.focus();
+    openFileMenu(file, event.clientX, event.clientY);
+  };
+  const handleFileMenuKey = (file: AssetFileEntry, event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+    if ((event.target as HTMLElement).closest?.('input, textarea, [contenteditable="true"]')) return;
+    event.preventDefault(); event.stopPropagation(); event.currentTarget.focus();
+    const rect = event.currentTarget.getBoundingClientRect();
+    openFileMenu(file, rect.left + 12, rect.top + 12);
+  };
+
+  const performFileAction = async (action: 'copy' | 'prompt' | 'reveal' | 'delete') => {
+    const target = fileMenu;
+    if (!target || fileScopeRef.current !== target.scope) return;
+    fileOperationRef.current?.abort();
+    const controller = new AbortController();
+    fileOperationRef.current = controller;
+    const isCurrent = () => !controller.signal.aborted && fileScopeRef.current === target.scope
+      && useAppStore.getState().assetsPanelOpen && useAppStore.getState().currentProjectId === currentProjectId;
+    try {
+      if (!isCurrent()) return;
+      if (action === 'prompt') {
+        toast('正在读取提示词…');
+        const details = target.file.category === 'image'
+          ? await loadAssetImageDetails(target.file, target.projectId, controller.signal) : null;
+        const history = target.file.category === 'video'
+          ? await loadAssetVideoHistory(target.file.path, target.file.assetUrl, target.projectId, controller.signal) : details?.history;
+        if (!isCurrent()) return;
+        const prompt = details?.record?.prompt ?? history?.prompt ?? '';
+        if (!prompt.trim()) { toast('此资产暂无提示词'); return; }
+        if (!(await copyText(prompt))) throw new Error('clipboard');
+        if (isCurrent()) toast('提示词已复制');
+      } else {
+        if (!isLocalAssetFile(target.file) || !isTauriEnv()) throw new Error('unavailable');
+        if (action === 'copy') {
+          if (!(await copyFile(target.file.path))) throw new Error('clipboard');
+          if (isCurrent()) toast('文件已复制，可在系统中粘贴');
+        } else if (action === 'reveal') {
+          await revealFileInFolder(target.file.path);
+        } else {
+          await deletePermanentFile(target.file.path);
+          deletedFilePathsRef.current.add(target.file.path);
+          if (!isCurrent()) return;
+          setProjectFiles((prev) => prev.filter((file) => file.path !== target.file.path));
+          setPermanentFiles((prev) => prev.filter((file) => file.path !== target.file.path));
+          await loadFiles();
+          if (isCurrent()) toast('文件已移入系统回收站');
+        }
+      }
+    } catch {
+      if (!isCurrent()) return;
+      if (action === 'delete') throw new Error('删除失败');
+      toast(action === 'copy' ? '复制失败，请检查文件和系统剪贴板'
+        : action === 'prompt' ? '提示词读取或复制失败，请重试' : '打开目录失败，请检查文件位置和权限');
+    } finally {
+      if (fileOperationRef.current === controller) fileOperationRef.current = null;
+    }
+  };
+  const imageFiles = useMemo(() => filteredFiles.filter((file) => file.category === 'image' && !!file.assetUrl), [filteredFiles]);
+  const openImagePreview = (file: AssetFileEntry) => {
+    videoPreview.setExpanded(null);
+    setImagePreview({ path: file.path, scope: previewScope });
+    void markAssetUsed(file);
+  };
 
   const filteredNodes = useMemo(() => {
     const query = deferredNodeSearch.trim().toLowerCase();
@@ -446,7 +713,7 @@ export default function AssetsPanel() {
       .some((value) => value.toLowerCase().includes(query)));
   }, [canvasNodeData, canvasNodeIds, deferredNodeSearch]);
   const videoPreview = useResourceVideoPreview(
-    JSON.stringify([assetsPanelOpen, assetsPanelMode, currentProjectId, visibleTab, selectedProjectId, search, nodeSearch, activeCategory, activeTag]),
+    JSON.stringify([assetsPanelOpen, assetsPanelMode, currentProjectId, visibleTab, selectedProjectId, folderSelection, search, nodeSearch, activeCategory, activeTag]),
     isNodeList ? filteredNodes.map((node) => node.id) : visibleFiles.map(assetKey),
   );
   const totalResultCount = isNodeList ? filteredNodes.length : filteredFiles.length;
@@ -463,7 +730,7 @@ export default function AssetsPanel() {
     }, { rootMargin: '300px' });
     io.observe(el);
     return () => io.disconnect();
-  }, [totalResultCount, visibleCount, visibleTab]);
+  }, [totalResultCount, visibleCount, visibleTab, folderSelection]);
 
   // ── 添加文件 / 文件夹 ──
   const handleAddFiles = useCallback(async () => {
@@ -484,16 +751,16 @@ export default function AssetsPanel() {
         updateConfig({ assetFolders: [...folders, path] });
         await saveConfig();
         toast(`已添加文件夹: ${shortFolderName(path)}`);
-        if (activeTab === 'permanent') await loadFiles();
       }
     } catch { toast('添加失败'); } finally { setBusy(false); }
-  }, [folders, updateConfig, saveConfig, activeTab, loadFiles, toast]);
+  }, [folders, updateConfig, saveConfig, toast]);
 
   const handleRemoveFolder = useCallback(async (path: string) => {
     updateConfig({ assetFolders: folders.filter((f) => f !== path) });
     try { await saveConfig(); } catch { return; }
-    if (activeTab === 'permanent') await loadFiles();
-  }, [folders, updateConfig, saveConfig, activeTab, loadFiles]);
+    if (folderSelection.kind === 'folder' && folderSelection.rootPath === path) handleSelectFolder({ kind: 'all' });
+    // config.assetFolders 的变更触发 loadFiles，避免用旧目录清单再次覆盖新结果。
+  }, [folders, updateConfig, saveConfig, folderSelection, handleSelectFolder]);
 
   // ── 全局资产 / 删除 ──
   const handleSavePermanent = useCallback(async (file: AssetFileEntry) => {
@@ -501,12 +768,6 @@ export default function AssetsPanel() {
     toast(dest ? `已保存: ${file.name}` : '保存失败');
     if (dest && activeTab === 'permanent') await loadFiles();
   }, [activeTab, loadFiles, toast]);
-
-  const handleDeletePermanent = useCallback(async (file: AssetFileEntry) => {
-    await deletePermanentFile(file.path);
-    setPermanentFiles((prev) => prev.filter((f) => f.path !== file.path));
-    toast(`已删除: ${file.name}`);
-  }, [toast]);
 
   // ── 标签编辑（手动）──
   const persistTags = useCallback(async (assetId: string, path: string, tags: string[]) => {
@@ -563,7 +824,7 @@ export default function AssetsPanel() {
     <AnimatePresence>
       {assetsPanelOpen && (
         <>
-          {!isDrawer && <motion.div
+          {!isDrawer && !isPage && <motion.div
             data-tauri-drag-region
             className="assets-panel-backdrop"
             variants={backdropVariants}
@@ -571,14 +832,18 @@ export default function AssetsPanel() {
             transition={{ duration: 0.2 }}
             onClick={handleClose}
           />}
-          <div className={`assets-panel-wrapper${isDrawer ? ' assets-panel-wrapper--drawer' : ''}`}>
+          <div className={isPage ? 'absolute inset-0 z-40' : `assets-panel-wrapper${isDrawer ? ' assets-panel-wrapper--drawer' : ''}`}>
             <motion.div
               data-resource-video-boundary
-              className={`assets-panel${isDrawer ? ' assets-panel--drawer' : ''}`}
-              role={isDrawer ? 'region' : 'dialog'}
-              aria-label={isDrawer ? '资产库快捷面板' : '资产管理'}
-              aria-modal={isDrawer ? undefined : true}
-              variants={isDrawer ? {
+              className={isPage ? 'flex h-full min-h-0 w-full flex-col overflow-hidden bg-canvas-bg pb-3' : `assets-panel${isDrawer ? ' assets-panel--drawer' : ''}`}
+              role={isPage ? 'main' : isDrawer ? 'region' : 'dialog'}
+              aria-label={isPage ? '资源库' : isDrawer ? '资产库快捷面板' : '资产管理'}
+              aria-modal={isDrawer || isPage ? undefined : true}
+              variants={isPage ? {
+                hidden: { opacity: 0 },
+                visible: { opacity: 1, transition: { duration: 0.12 } },
+                exit: { opacity: 0, transition: { duration: 0 } },
+              } : isDrawer ? {
                 hidden: { opacity: 0, x: reduceMotion ? 0 : '-100%' },
                 visible: { opacity: 1, x: 0, transition: drawerTransition },
                 exit: { opacity: 0, x: reduceMotion ? 0 : '-100%', transition: drawerTransition },
@@ -587,10 +852,13 @@ export default function AssetsPanel() {
               onClick={(e) => e.stopPropagation()}
             >
               {/* Header */}
-              <div className="assets-panel-header px-2.5 py-2">
+              <div data-tauri-drag-region={isPage ? true : undefined} className={isPage ? 'relative flex h-11 shrink-0 items-center gap-3 px-3' : 'assets-panel-header px-2.5 py-2'}>
+                {isPage && <button type="button" autoFocus className="ui-btn ui-btn--ghost ui-btn--sm" onClick={handleClose}>
+                  <Icon icon="mdi:arrow-left" width="16" aria-hidden="true" /> 返回启动页
+                </button>}
                 <h2 className="assets-panel-title">
-                  {isDrawer ? '资产库' : '资产管理'}
-                  {!isDrawer && <span className="assets-panel-subtitle">
+                  {isPage ? '资源库' : isDrawer ? '资产库' : '资产管理'}
+                  {!isDrawer && !isPage && <span className="assets-panel-subtitle">
                     {visibleTab === 'drama' ? '管理人物、场景和道具简介与绑图' : visibleTab === 'ark' ? '管理火山方舟虚拟人像素材' : isNodeList ? '查看当前画布中的全部节点' : '拖拽卡片到画布即可添加节点'}
                   </span>}
                 </h2>
@@ -598,7 +866,7 @@ export default function AssetsPanel() {
                   <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" onClick={handleClose} aria-label="收起资产库">
                     收起 <kbd>Tab</kbd>
                   </button>
-                ) : <PopupCloseButton onClick={handleClose} />}
+                ) : !isPage && <PopupCloseButton onClick={handleClose} />}
               </div>
 
               {/* Tabs */}
@@ -727,6 +995,7 @@ export default function AssetsPanel() {
                               </button>
                             </div>
                             <CanvasNodeCardContent nodeId={node.id} data={node.data} projectId={currentProjectId} connectable={isDrawer}
+                              videoPresentation={isDrawer ? 'inline' : 'fullscreen'}
                               videoExpanded={videoPreview.expandedId === node.id}
                               onVideoExpandedChange={(expanded) => videoPreview.setExpanded(expanded ? node.id : null)} />
                           </li>
@@ -759,18 +1028,32 @@ export default function AssetsPanel() {
                   />
                 </Suspense>
               ) : (
-                <>
-              {/* 已添加的外部文件夹 */}
-              {activeTab === 'permanent' && folders.length > 0 && (
-                <div className="assets-folder-row">
-                  {folders.map((f) => (
-                    <span key={f} className="assets-folder-chip">
-                      📁 {shortFolderName(f)}
-                      <button type="button" onClick={() => handleRemoveFolder(f)} aria-label="移除">×</button>
-                    </span>
-                  ))}
-                </div>
-              )}
+                <div className="assets-file-browser">
+                  {activeTab === 'permanent' && (
+                    <AssetFolderNavigation
+                      folders={externalFolders} selection={folderSelection} totalCount={permanentFiles.length}
+                      globalCount={permanentFiles.filter((file) => file.source === 'global').length}
+                      compact={isDrawer} loading={loading || busy} onSelect={handleSelectFolder} globalRootPath={globalRootPath}
+                      onCreate={handleCreateSubfolder}
+                      onCopy={(selection) => { void handleFolderClipboard(selection, 'copy'); }}
+                      onPaste={(selection) => { void handleFolderClipboard(selection, 'paste'); }}
+                      onRemove={(rootPath) => { void handleRemoveFolder(rootPath); }}
+                    />
+                  )}
+                  <div className="assets-file-content">
+                    {folderProgress && <div role="status" className="flex items-center gap-2 p-2 text-xs text-canvas-text-secondary">
+                      <Icon icon="lucide:loader-circle" className="animate-spin" aria-hidden="true" /><span className="flex-1">{folderProgress}</span>
+                      <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" onClick={() => folderOperationRef.current?.abort()}>取消复制</button>
+                    </div>}
+                    {activeTab === 'permanent' && (
+                      <div className="flex shrink-0 items-center gap-2 px-3 pt-2 text-xs text-canvas-text-secondary">
+                        <span className="min-w-0 flex-1 truncate" title={folderLabel}>{folderLabel}</span>
+                        <span className="shrink-0 text-canvas-text-muted">{files.length} 个文件</span>
+                      </div>
+                    )}
+                    {activeTab === 'permanent' && folderScanTruncated && (
+                      <p role="status" className="px-3 pt-2 text-xs text-canvas-text-muted">已达到扫描上限，当前仅显示已扫描的目录和文件。可单独添加子文件夹继续浏览。</p>
+                    )}
 
               {/* 分类 + 标签筛选 */}
               <div
@@ -828,7 +1111,7 @@ export default function AssetsPanel() {
 
               {/* 文件瀑布流 */}
               <div className="assets-file-scroll-shell">
-                <div className="assets-file-scroll">
+                <div className="assets-file-scroll" key={activeTab === 'permanent' ? JSON.stringify(folderSelection) : 'project'}>
                   <div className="assets-file-waterfall" data-columns={waterfallColumns}>
                     {loading ? (
                       <div className="assets-empty">
@@ -841,7 +1124,13 @@ export default function AssetsPanel() {
                           <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                           <polyline points="14 2 14 8 20 8" /><line x1="9" y1="15" x2="15" y2="15" />
                         </svg>
-                        <span>{search || activeCategory || activeTag ? '没有匹配的文件' : activeTab === 'project' ? '暂无项目文件' : '暂无文件，点击「添加」导入'}</span>
+                        <span>{activeTab === 'permanent' && selectedFolder?.availability === 'offline' ? '文件夹无法访问，请检查位置或权限'
+                          : activeTab === 'permanent' && selectedFolder?.availability === 'unscanned' ? '此文件夹尚未扫描，可单独添加此目录继续浏览'
+                          : search || activeCategory || activeTag ? '没有匹配的文件' : activeTab === 'project' ? '暂无项目文件'
+                            : selectedFolder ? externalFolders.some((folder) => folder.rootPath === selectedFolder.rootPath
+                              && folder.parentRelativePath === selectedFolder.relativePath)
+                              ? '此文件夹没有本层文件，请选择子文件夹浏览' : '此文件夹为空'
+                              : '暂无文件，点击「添加」导入'}</span>
                       </div>
                     ) : (
                       <>
@@ -862,9 +1151,20 @@ export default function AssetsPanel() {
                                   onAddTag={(t) => { addTag(file, t); setTagDraft(''); }}
                                   onRemoveTag={(t) => removeTag(file, t)}
                                   onSave={() => handleSavePermanent(file)}
-                                  onDelete={() => handleDeletePermanent(file)}
+                                  onDelete={() => {
+                                    if (isLocalAssetFile(file) && isTauriEnv()) openFileMenu(file, 0, 0, true);
+                                    else toast('此文件无法使用系统回收站');
+                                  }}
+                                  onContextMenu={(event) => handleFileContextMenu(file, event)}
+                                  onMenuKeyDown={(event) => handleFileMenuKey(file, event)}
                                   videoExpanded={videoPreview.expandedId === assetKey(file)}
-                                  onVideoExpandedChange={(expanded) => videoPreview.setExpanded(expanded ? assetKey(file) : null)}
+                                  videoPresentation={isDrawer ? 'inline' : 'fullscreen'}
+                                  videoProjectId={activeTab === 'project' ? selectedProjectId ?? currentProjectId ?? undefined : undefined}
+                                  onVideoExpandedChange={(expanded) => {
+                                    videoPreview.setExpanded(expanded ? assetKey(file) : null);
+                                    if (expanded) void markAssetUsed(file);
+                                  }}
+                                  onImagePreview={file.category === 'image' ? () => openImagePreview(file) : undefined}
                                 />
                               ))}
                             </div>
@@ -878,7 +1178,8 @@ export default function AssetsPanel() {
                   </div>
                 </div>
               </div>
-                </>
+                  </div>
+                </div>
               )}
 
               {/* Toast */}
@@ -904,9 +1205,21 @@ export default function AssetsPanel() {
 
   // 关闭 Action 会重置展示模式；保留上次打开的动效宿主，避免退场被中断。
   // 局部覆盖性能模式，仍尊重系统减少动态效果设置。
-  return motionMode === 'drawer'
+  const presentationPanel = motionMode === 'page' ? panel : motionMode === 'drawer'
     ? <MotionConfig reducedMotion="user" transition={drawerTransition}>{panel}</MotionConfig>
     : createPortal(panel, document.body);
+  return <>{presentationPanel}
+    {assetsPanelOpen && fileMenu?.scope === previewScope &&
+      <AssetFileContextMenu key={`${fileMenu.scope}:${fileMenu.file.path}:${fileMenu.confirmDelete}`} name={fileMenu.file.name}
+        x={fileMenu.x} y={fileMenu.y} confirmDelete={fileMenu.confirmDelete}
+        canFileActions={isLocalAssetFile(fileMenu.file) && isTauriEnv()}
+        canCopyPrompt={fileMenu.file.category === 'image' || fileMenu.file.category === 'video'}
+        onCopy={() => performFileAction('copy')} onCopyPrompt={() => performFileAction('prompt')}
+        onReveal={() => performFileAction('reveal')} onDelete={() => performFileAction('delete')} onClose={closeFileMenu} />}
+    {assetsPanelOpen && imagePreview?.scope === previewScope &&
+      <AssetImagePreview key={`${imagePreview.scope}:${imagePreview.path}`} files={imageFiles} initialPath={imagePreview.path}
+        projectId={activeTab === 'project' ? selectedProjectId ?? currentProjectId ?? undefined : undefined} onClose={closeImagePreview} />}
+  </>;
 }
 
 /* ============================================
@@ -925,14 +1238,19 @@ interface AssetCardProps {
   onRemoveTag: (tag: string) => void;
   onSave: () => void;
   onDelete: () => void;
+  onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  onMenuKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
   videoExpanded?: boolean;
+  videoPresentation?: 'inline' | 'fullscreen';
+  videoProjectId?: string;
   onVideoExpandedChange?: (expanded: boolean) => void;
+  onImagePreview?: () => void;
 }
 
 function AssetCard({
   file, isProject, draggable, onDragStart, editing, tagDraft,
-  onToggleEdit, onTagDraftChange, onAddTag, onRemoveTag, onSave, onDelete,
-  videoExpanded = false, onVideoExpandedChange,
+  onToggleEdit, onTagDraftChange, onAddTag, onRemoveTag, onSave, onDelete, onContextMenu, onMenuKeyDown,
+  videoExpanded = false, videoPresentation, videoProjectId, onVideoExpandedChange, onImagePreview,
 }: AssetCardProps) {
   const tags = file.tags ?? [];
   return (
@@ -940,15 +1258,23 @@ function AssetCard({
       className={`assets-waterfall-card anim-card-in${videoExpanded ? ' has-expanded-video' : ''}`}
       draggable={draggable && !videoExpanded}
       onDragStart={onDragStart}
+      tabIndex={0}
+      aria-label={file.name}
+      aria-haspopup="menu"
+      onContextMenu={onContextMenu}
+      onKeyDown={onMenuKeyDown}
     >
       <AssetThumb
         assetUrl={file.assetUrl}
         filePath={file.path}
         videoExpanded={videoExpanded}
+        videoPresentation={videoPresentation}
+        videoProjectId={videoProjectId}
         onVideoExpandedChange={onVideoExpandedChange}
         name={file.name}
         category={file.category}
         size={file.size}
+        onImagePreview={onImagePreview}
         badge={file.source === 'folder' ? '外部' : undefined}
       >
         <CardActions isProject={isProject} onSave={onSave} onDelete={onDelete} onToggleEdit={onToggleEdit} />
@@ -973,7 +1299,6 @@ function AssetCard({
           )}
         </div>
       )}
-      {!isProject && <div className="assets-card-name">{file.name}</div>}
     </div>
   );
 }

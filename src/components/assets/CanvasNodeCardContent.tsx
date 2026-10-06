@@ -16,10 +16,11 @@ interface Props {
   projectId: string | null;
   connectable: boolean;
   videoExpanded?: boolean;
+  videoPresentation?: 'inline' | 'fullscreen';
   onVideoExpandedChange?: (expanded: boolean) => void;
 }
 
-function CanvasNodeCardContent({ nodeId, data, projectId, connectable, videoExpanded = false, onVideoExpandedChange }: Props) {
+function CanvasNodeCardContent({ nodeId, data, projectId, connectable, videoExpanded = false, videoPresentation, onVideoExpandedChange }: Props) {
   const plugins = useAppStore((state) => state.installedPlugins);
   const ports = useMemo(() => getAssetNodePorts(data, plugins), [data, plugins]);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -79,6 +80,7 @@ function CanvasNodeCardContent({ nodeId, data, projectId, connectable, videoExpa
     <div ref={bodyRef} className={`assets-node-content${videoExpanded ? ' has-expanded-video' : ''}`}>
       {video ? (
         <ResourceVideoPreview key={`${projectId}:${nodeId}`} src={data.videoUrl} filePath={data.filePath} poster={image}
+          presentation={videoPresentation} projectId={projectId ?? undefined}
           revision={data.mediaVersion} name={data.label} expanded={videoExpanded}
           onExpandedChange={(expanded) => onVideoExpandedChange?.(expanded)} />
       ) : mediaSource ? (

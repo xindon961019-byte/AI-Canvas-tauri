@@ -922,6 +922,128 @@ describe('project switching', () => {
     expect(fileMocks.saveProject).not.toHaveBeenCalled();
     expect(showToast).toHaveBeenCalledWith('项目数据读取失败，未创建空项目', 'error');
   });
+
+  it('starts at the project list without reading canvas data or resuming generation', async () => {
+    stubInitializationActions();
+    useAppStore.setState({
+      config: { ...useAppStore.getState().config, startupView: 'project-library' },
+    });
+    fileMocks.loadProjectsList.mockResolvedValue([
+      { id: 'project-list', name: '列表项目', createdAt: 1, updatedAt: 2 },
+      { id: 'project-other', name: '其他项目', createdAt: 1, updatedAt: 1 },
+    ]);
+
+    await useAppStore.getState().initFromDb();
+
+    expect(useAppStore.getState()).toMatchObject({
+      currentProjectId: null, projectName: '', projectLoadStatus: 'ready',
+      nodes: [], edges: [], groups: [],
+    });
+    expect(useAppStore.getState().projects.map((project) => project.id)).toEqual(['project-list', 'project-other']);
+    expect(fileMocks.loadProjectData).not.toHaveBeenCalled();
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+    expect(pollMocks.resumePendingTasks).not.toHaveBeenCalled();
+    expect(metadataMocks.getLastActiveProjectId).not.toHaveBeenCalled();
+    expect(metadataMocks.setLastActiveProjectId).not.toHaveBeenCalled();
+    expect(useAppStore.getState().loadConversationsForProject).not.toHaveBeenCalled();
+    expect(useAppStore.getState().repairInterruptedAgentTasksForProject).toHaveBeenCalledWith('project-list');
+    expect(useAppStore.getState().repairInterruptedAgentTasksForProject).toHaveBeenCalledWith('project-other');
+
+    fileMocks.loadProjectData.mockResolvedValue({ id: 'project-list', nodes: [], edges: [], name: '列表项目' });
+    await useAppStore.getState().switchProject('project-list');
+    expect(useAppStore.getState().currentProjectId).toBe('project-list');
+    expect(fileMocks.loadProjectData).toHaveBeenCalledWith('project-list');
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+  });
+
+  it('keeps an empty startup list without creating a default canvas', async () => {
+    stubInitializationActions();
+    useAppStore.setState({ config: { ...useAppStore.getState().config, startupView: 'project-library' } });
+    fileMocks.loadProjectsList.mockResolvedValue([]);
+
+    await useAppStore.getState().initFromDb();
+
+    expect(useAppStore.getState()).toMatchObject({ projects: [], currentProjectId: null, projectLoadStatus: 'ready' });
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+    expect(fileMocks.ensureProjectDataDir).not.toHaveBeenCalled();
+    expect(metadataMocks.setLastActiveProjectId).not.toHaveBeenCalled();
+  });
+});
+
+describe('returning to the startup page', () => {
+  function openProject() {
+    useAppStore.setState({
+      projects: [{ id: 'logo-project', name: 'Logo 项目', createdAt: 1, updatedAt: 1 }],
+      currentProjectId: 'logo-project', projectName: 'Logo 项目',
+      nodes: [{ id: 'text', type: 'ai-text', position: { x: 0, y: 0 }, data: { label: '已编辑内容' } as BaseNodeData }],
+      selectedNodeIds: ['text'], assetsPanelOpen: true, chatOpen: true,
+      activeNodeId: 'text', projectLibraryOpen: true,
+    });
+  }
+
+  it('waits for saving before leaving the canvas and keeps the project available to reopen', async () => {
+    openProject();
+    let finishSave!: (id: string) => void;
+    fileMocks.saveProject.mockImplementation(() => new Promise<string>((resolve) => { finishSave = resolve; }));
+    const pending = useAppStore.getState().returnToStartPage();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useAppStore.getState().currentProjectId).toBe('logo-project');
+    expect(useAppStore.getState().isReturningToStartPage).toBe(true);
+    finishSave('logo-project');
+    expect(await pending).toBe(true);
+    expect(fileMocks.saveProject).toHaveBeenCalledWith(expect.objectContaining({ id: 'logo-project', nodes: expect.arrayContaining([expect.objectContaining({ id: 'text' })]) }));
+    expect(useAppStore.getState()).toMatchObject({
+      currentProjectId: null, projectLoadStatus: 'ready', nodes: [], edges: [], groups: [],
+      selectedNodeIds: [], activeNodeId: null, assetsPanelOpen: false, chatOpen: false,
+      projectLibraryOpen: false, isReturningToStartPage: false,
+    });
+    expect(useAppStore.getState().projects).toHaveLength(1);
+    fileMocks.loadProjectData.mockResolvedValue({ id: 'logo-project', nodes: [], edges: [] });
+    await useAppStore.getState().switchProject('logo-project');
+    expect(useAppStore.getState().currentProjectId).toBe('logo-project');
+  });
+
+  it('keeps the current canvas when saving fails', async () => {
+    openProject();
+    fileMocks.saveProject.mockRejectedValue(new Error('Save unavailable'));
+    expect(await useAppStore.getState().returnToStartPage()).toBe(false);
+    expect(useAppStore.getState()).toMatchObject({ currentProjectId: 'logo-project', nodes: [expect.objectContaining({ id: 'text' })], isReturningToStartPage: false });
+  });
+
+  it('does not replace a different project selected while saving was in progress', async () => {
+    openProject();
+    let finishSave!: (id: string) => void;
+    fileMocks.saveProject.mockImplementation(() => new Promise<string>((resolve) => { finishSave = resolve; }));
+    const pending = useAppStore.getState().returnToStartPage();
+    await vi.advanceTimersByTimeAsync(0);
+    useAppStore.setState({ currentProjectId: 'another-project' });
+    finishSave('logo-project');
+    expect(await pending).toBe(false);
+    expect(useAppStore.getState().currentProjectId).toBe('another-project');
+  });
+
+  it('ignores repeated returns and blocks create/switch until saving finishes', async () => {
+    openProject();
+    let finishSave!: (id: string) => void;
+    fileMocks.saveProject.mockImplementation(() => new Promise<string>((resolve) => { finishSave = resolve; }));
+    const pending = useAppStore.getState().returnToStartPage();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await useAppStore.getState().returnToStartPage()).toBe(false);
+    expect(await useAppStore.getState().createProject()).toBeUndefined();
+    await useAppStore.getState().switchProject('logo-project');
+    expect(fileMocks.loadProjectData).not.toHaveBeenCalled();
+    expect(fileMocks.saveProject).toHaveBeenCalledOnce();
+    finishSave('logo-project');
+    await pending;
+  });
+
+  it('leaves an unready project intact', async () => {
+    openProject();
+    useAppStore.setState({ projectLoadStatus: 'error' });
+    expect(await useAppStore.getState().returnToStartPage()).toBe(false);
+    expect(fileMocks.saveProject).not.toHaveBeenCalled();
+    expect(useAppStore.getState().currentProjectId).toBe('logo-project');
+  });
 });
 
 describe('episode creative content', () => {

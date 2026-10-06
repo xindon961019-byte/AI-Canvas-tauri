@@ -24,6 +24,7 @@ import {
   stripVerbatimPrefix,
   getConvertFileSrc,
   getAssetUrlFromPath,
+  getBaseDir,
   ensureProjectDataDir,
   getProjectDataDir,
   joinPath,
@@ -364,7 +365,7 @@ function createTransferTaskId(): string {
 }
 
 async function runNativeFileTransfer(
-  command: 'copy_file_streamed' | 'download_file_streamed',
+  command: 'copy_file_streamed' | 'download_file_streamed' | 'copy_asset_folder',
   args: Record<string, string>,
   options?: FileTransferOptions,
 ): Promise<NativeFileTransferResult> {
@@ -391,11 +392,29 @@ async function runNativeFileTransfer(
       });
     }
     options?.signal?.addEventListener('abort', cancel, { once: true });
+    if (options?.signal?.aborted) throw new DOMException('File transfer aborted', 'AbortError');
     return await invoke<NativeFileTransferResult>(command, { taskId, ...args });
   } finally {
     options?.signal?.removeEventListener('abort', cancel);
     unlisten?.();
   }
+}
+
+/** 复制真实目录；原生端负责授权、禁止覆盖、进度及取消。 */
+export async function copyAssetFolder(sourcePath: string, destinationDirectory: string, options?: FileTransferOptions): Promise<string> {
+  if (!isTauriEnv()) throw new Error('文件夹粘贴仅支持桌面应用');
+  const result = await runNativeFileTransfer('copy_asset_folder', { sourcePath, destinationDirectory }, options);
+  return result.path;
+}
+
+/** 图片信息的引用副本只写应用自有目录，复用原生受控、可取消的流式复制。 */
+export async function copyAssetImageReference(sourcePath: string, relativePath: string, expectedRoot: string, options?: FileTransferOptions): Promise<void> {
+  if (!isTauriEnv()) throw new Error('参考图保存仅支持桌面应用');
+  if (!/^asset-image-references\/[a-f0-9-]{36}\.[a-z0-9]{1,8}$/.test(relativePath)) throw new Error('参考图引用无效');
+  const root = await getBaseDir();
+  if (!root || root !== expectedRoot) throw new Error('保存目录已变化，请重试');
+  await mkdir(joinPath(root, 'asset-image-references'), { recursive: true });
+  await runNativeFileTransfer('copy_file_streamed', { sourcePath, destinationPath: joinPath(root, relativePath) }, options);
 }
 
 // ── 统一对外导出：存储、基础设施、删除域、资产库域 ──

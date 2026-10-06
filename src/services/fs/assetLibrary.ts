@@ -10,13 +10,43 @@ import {
   getBaseDir,
   getConvertFileSrc,
   resolveUniqueDestPath,
-  listDirectoryFiles,
   getFileCategory,
   CATEGORY_EXTENSIONS,
   type AssetFileEntry,
 } from './core';
 import { moveToTrash } from './trash';
 import { identifyAsset } from './assetIndex';
+
+/** 仅用于目录浏览的运行时条目，不写入资产索引或持久化配置。 */
+export interface AssetFolderEntry {
+  rootPath: string;
+  relativePath: string;
+  parentRelativePath: string | null;
+  name: string;
+  fileCount: number;
+  availability: 'online' | 'offline' | 'unscanned';
+}
+
+export type AssetFolderSelection =
+  | { kind: 'all' }
+  | { kind: 'global' }
+  | { kind: 'folder'; rootPath: string; relativePath: string };
+
+function comparablePath(path: string): string {
+  const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
+  return /^[a-z]:\//i.test(normalized) || normalized.startsWith('//') ? normalized.toLowerCase() : normalized;
+}
+
+/** 按实际父目录筛选，兼容 Windows 分隔符和重复登记的父/子目录。 */
+export function selectAssetFolderFiles(files: AssetFileEntry[], selection: AssetFolderSelection): AssetFileEntry[] {
+  if (selection.kind === 'all') return files;
+  if (selection.kind === 'global') return files.filter((file) => file.source === 'global' && !file.relativePath?.includes('/'));
+  const directory = comparablePath(`${selection.rootPath.replace(/[\\/]+$/, '')}/${selection.relativePath}`);
+  return files.filter((file) => {
+    const path = comparablePath(file.path);
+    return path.slice(0, path.lastIndexOf('/')) === directory;
+  });
+}
 
 /** 全局文件目录：{baseDataDir}/file（手动添加的单文件落此处）*/
 export async function getGlobalFilesDir(): Promise<string | null> {
@@ -38,43 +68,85 @@ async function ensureGlobalFilesDir(): Promise<string | null> {
   }
 }
 
-/** 列出全局 file 目录（顶层）*/
+/** 列出全局 file 目录的文件，包含用户创建的子目录。 */
 export async function listGlobalFiles(): Promise<AssetFileEntry[]> {
+  return (await listGlobalFolderContents()).files;
+}
+
+export async function listGlobalFolderContents(): Promise<{ files: AssetFileEntry[]; folders: AssetFolderEntry[]; truncated: boolean; rootPath: string | null }> {
   const dir = await getGlobalFilesDir();
-  if (!dir) return [];
-  if (!(await exists(dir).catch(() => false))) return [];
-  const files = await listDirectoryFiles(dir);
-  return Promise.all(files.map(async (f) => {
-    const identity = await identifyAsset(f.path, { rootPath: dir, source: 'global', size: f.size });
-    return { ...f, assetId: identity.assetId, relativePath: identity.relativePath, source: 'global' as const, availability: 'online' as const };
-  }));
+  if (!dir || !(await exists(dir).catch(() => false))) return { files: [], folders: [], truncated: false, rootPath: dir };
+  return { ...await scanDirectoryFiles(dir, { source: 'global' }), rootPath: dir };
+}
+
+/** 只把已登记目录或全局目录作为写入目标，不接受聚合视图。 */
+export async function resolveAssetFolderDirectory(selection: AssetFolderSelection, roots: readonly string[]): Promise<string> {
+  if (!isTauriEnv()) throw new Error('目录操作仅支持桌面应用');
+  const globalRoot = await getGlobalFilesDir();
+  if (selection.kind === 'all') throw new Error('请选择具体文件夹');
+  if (selection.kind === 'global') {
+    const directory = await ensureGlobalFilesDir();
+    if (!directory) throw new Error('无法访问导入文件目录');
+    return directory;
+  }
+  if (![...roots, ...(globalRoot ? [globalRoot] : [])].some((root) => comparablePath(root) === comparablePath(selection.rootPath))) {
+    throw new Error('该文件夹引用已移除');
+  }
+  if (selection.relativePath && selection.relativePath.split(/[\\/]/).some((part) => !part || part === '.' || part === '..' || part.includes(':'))) {
+    throw new Error('文件夹相对路径无效');
+  }
+  return selection.relativePath ? joinPath(selection.rootPath, selection.relativePath) : selection.rootPath;
+}
+
+export async function createAssetSubfolder(selection: AssetFolderSelection, roots: readonly string[], name: string): Promise<string> {
+  const clean = name.trim();
+  if (!clean || clean === '.' || clean === '..' || /[\\/:*?"<>|]/.test(clean) || [...clean].some((char) => char.charCodeAt(0) < 32)
+    || /[. ]$/.test(clean) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(clean) || clean.length > 255) {
+    throw new Error('文件夹名称无效，请去掉特殊字符');
+  }
+  const parent = await resolveAssetFolderDirectory(selection, roots);
+  const directory = joinPath(parent, clean);
+  if (await exists(directory)) throw new Error('同名文件夹或文件已存在');
+  // 非 recursive 创建不覆盖同名目录；权限仍由 fs 插件 scope 校验。
+  await mkdir(directory);
+  return directory;
 }
 
 /**
  * 递归遍历目录收集文件（带数量/深度上限，避免超大目录卡死）。
  * 每个目录内的 stat 并行，整体用栈迭代而非深递归。
  */
-export async function walkDirectoryFiles(
+async function scanDirectoryFiles(
   rootDir: string,
-  opts: { maxFiles?: number; maxDepth?: number; excludedRootDirectories?: readonly string[] } = {},
-): Promise<AssetFileEntry[]> {
-  if (!isTauriEnv()) return [];
+  opts: { maxFiles?: number; maxDepth?: number; maxDirectories?: number; excludedRootDirectories?: readonly string[]; source?: 'folder' | 'global' } = {},
+): Promise<{ files: AssetFileEntry[]; folders: AssetFolderEntry[]; truncated: boolean }> {
+  if (!isTauriEnv()) return { files: [], folders: [], truncated: false };
   const maxFiles = opts.maxFiles ?? 3000;
   const maxDepth = opts.maxDepth ?? 8;
+  const maxDirectories = Math.max(1, opts.maxDirectories ?? 3000);
   const convertFileSrc = await getConvertFileSrc();
   const out: AssetFileEntry[] = [];
-  const stack: { dir: string; depth: number }[] = [{ dir: rootDir, depth: 0 }];
+  const root: AssetFolderEntry = {
+    rootPath: rootDir, relativePath: '', parentRelativePath: null,
+    name: rootDir.split(/[\\/]/).filter(Boolean).pop() || rootDir, fileCount: 0, availability: 'unscanned',
+  };
+  const folders: AssetFolderEntry[] = [root];
+  const stack: { dir: string; depth: number; folder: AssetFolderEntry }[] = [{ dir: rootDir, depth: 0, folder: root }];
+  let truncated = false;
 
   while (stack.length > 0 && out.length < maxFiles) {
-    const { dir, depth } = stack.pop()!;
+    const { dir, depth, folder } = stack.pop()!;
     let entries: Awaited<ReturnType<typeof readDir>>;
     try {
       entries = await readDir(dir);
+      folder.availability = 'online';
     } catch {
+      folder.availability = 'offline';
       continue;
     }
-    const fileEntries = entries.filter((e) => e.isFile);
-    const subDirs = entries.filter((e) => e.isDirectory);
+    // 不跟随符号链接扩大外部目录授权或形成遍历环。
+    const fileEntries = entries.filter((e) => e.isFile && !e.isSymlink);
+    const subDirs = entries.filter((e) => e.isDirectory && !e.isSymlink);
 
     const statResults = await Promise.all(
       fileEntries.map(async (e) => {
@@ -88,9 +160,10 @@ export async function walkDirectoryFiles(
       }),
     );
 
+    const initialFileCount = out.length;
     for (const r of statResults) {
       if (!r) continue;
-      if (out.length >= maxFiles) break;
+      if (out.length >= maxFiles) { truncated = true; break; }
       const ext = `.${r.name.split('.').pop()?.toLowerCase()}`;
       let assetUrl: string | undefined;
       if (CATEGORY_EXTENSIONS.image.includes(ext) && convertFileSrc) {
@@ -98,7 +171,7 @@ export async function walkDirectoryFiles(
       }
       const identity = await identifyAsset(r.filePath, {
         rootPath: rootDir,
-        source: 'folder',
+        source: opts.source ?? 'folder',
         size: r.size,
         mtimeMs: r.mtimeMs,
       });
@@ -111,18 +184,59 @@ export async function walkDirectoryFiles(
         size: r.size,
         category: getFileCategory(r.name),
         availability: 'online',
+        source: opts.source,
       });
     }
 
+    folder.fileCount = out.length - initialFileCount;
     if (depth < maxDepth) {
       for (const d of subDirs) {
         // 项目派生缓存只占用根目录；分组和外部目录内的同名文件夹仍是用户素材。
         if (depth === 0 && opts.excludedRootDirectories?.includes(d.name)) continue;
-        stack.push({ dir: joinPath(dir, d.name), depth: depth + 1 });
+        if (folders.length >= maxDirectories) { truncated = true; break; }
+        const child: AssetFolderEntry = {
+          rootPath: rootDir,
+          relativePath: folder.relativePath ? `${folder.relativePath}/${d.name}` : d.name,
+          parentRelativePath: folder.relativePath,
+          name: d.name,
+          fileCount: 0,
+          availability: 'unscanned',
+        };
+        folders.push(child);
+        stack.push({ dir: joinPath(dir, d.name), depth: depth + 1, folder: child });
       }
+    } else if (subDirs.length > 0) {
+      truncated = true;
     }
   }
-  return out;
+  return { files: out, folders, truncated: truncated || stack.length > 0 };
+}
+
+/** 保留原文件扫描接口，项目文件和独立资源搜索继续返回扁平列表。 */
+export async function walkDirectoryFiles(
+  rootDir: string,
+  opts: { maxFiles?: number; maxDepth?: number; excludedRootDirectories?: readonly string[] } = {},
+): Promise<AssetFileEntry[]> {
+  return (await scanDirectoryFiles(rootDir, opts)).files;
+}
+
+/** 一次扫描同时收集真实目录和文件，空目录也可浏览。 */
+export async function listExternalFolderContents(
+  roots: string[],
+  opts: { maxFilesPerFolder?: number; maxDepth?: number; maxDirectories?: number } = {},
+): Promise<{ files: AssetFileEntry[]; folders: AssetFolderEntry[]; truncated: boolean }> {
+  if (!isTauriEnv()) return { files: [], folders: [], truncated: false };
+  const results = await Promise.all(roots.map(async (root) => {
+    const result = await scanDirectoryFiles(root, {
+      maxFiles: opts.maxFilesPerFolder, maxDepth: opts.maxDepth, maxDirectories: opts.maxDirectories,
+    });
+    return { ...result, files: result.files.map((file) => ({ ...file, source: 'folder' as const, folderRoot: root })) };
+  }));
+  return {
+    files: results.flatMap((result) => result.files),
+    folders: results.flatMap((result) => result.folders),
+    truncated: results.some((result) => result.truncated),
+  };
 }
 
 /** 列出登记的外部文件夹中的全部文件（递归，整体上限） */
@@ -237,5 +351,5 @@ export async function saveAssetToPermanent(
 
 /** 删除全局资产的文件（移入回收站） */
 export async function deletePermanentFile(filePath: string): Promise<void> {
-  await moveToTrash(filePath);
+  await moveToTrash(filePath, { throwOnError: true });
 }

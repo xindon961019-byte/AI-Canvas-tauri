@@ -352,6 +352,224 @@ pub async fn download_file_streamed(
     result
 }
 
+fn plain_copy_metadata(path: &Path) -> Result<fs::Metadata, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| "复制源不可访问")?;
+    #[cfg(target_os = "windows")]
+    let reparse = {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    };
+    #[cfg(not(target_os = "windows"))]
+    let reparse = false;
+    if reparse || metadata.file_type().is_symlink() || !(metadata.is_dir() || metadata.is_file()) {
+        return Err("文件夹包含链接或特殊文件，已停止复制".into());
+    }
+    Ok(metadata)
+}
+
+struct FolderCopyPlan {
+    directories: Vec<PathBuf>,
+    files: Vec<(PathBuf, u64)>,
+    bytes: u64,
+}
+
+fn plan_folder_copy<C, V>(
+    source: &Path,
+    mut cancelled: C,
+    mut validate: V,
+) -> Result<FolderCopyPlan, String>
+where
+    C: FnMut() -> Result<bool, String>,
+    V: FnMut(&Path, bool) -> Result<(), String>,
+{
+    if !plain_copy_metadata(source)?.is_dir() {
+        return Err("复制源必须是文件夹".into());
+    }
+    let mut plan = FolderCopyPlan {
+        directories: vec![PathBuf::new()],
+        files: Vec::new(),
+        bytes: 0,
+    };
+    let mut stack = vec![(PathBuf::new(), 0_usize)];
+    while let Some((relative, depth)) = stack.pop() {
+        if cancelled()? {
+            return Err("文件夹复制已取消".into());
+        }
+        let directory = source.join(&relative);
+        validate(&directory, true)?;
+        for entry in fs::read_dir(&directory).map_err(|_| "无法读取复制源目录")? {
+            if cancelled()? {
+                return Err("文件夹复制已取消".into());
+            }
+            let entry = entry.map_err(|_| "无法读取复制源条目")?;
+            let child = relative.join(entry.file_name());
+            let metadata = plain_copy_metadata(&source.join(&child))?;
+            validate(&source.join(&child), metadata.is_dir())?;
+            if plan.files.len() + plan.directories.len() >= 100_000 || depth >= 128 {
+                return Err("目录条目或深度超过复制上限，未开始写入".into());
+            }
+            if metadata.is_dir() {
+                plan.directories.push(child.clone());
+                stack.push((child, depth + 1));
+            } else {
+                plan.bytes = plan
+                    .bytes
+                    .checked_add(metadata.len())
+                    .ok_or("目录体积超过上限")?;
+                plan.files.push((child, metadata.len()));
+            }
+        }
+    }
+    plan.directories
+        .sort_by_key(|path| path.components().count());
+    Ok(plan)
+}
+
+fn folder_copy_destination(source: &Path, parent: &Path) -> Result<PathBuf, String> {
+    if parent.starts_with(source) {
+        return Err("不能将文件夹粘贴到自身或其子目录".into());
+    }
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("无法复制磁盘根目录")?;
+    for index in 0..10_000 {
+        let candidate = parent.join(if index == 0 {
+            name.to_string()
+        } else {
+            format!("{name} - 副本 ({index})")
+        });
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err("创建粘贴目标失败".into()),
+        }
+    }
+    Err("同名文件夹过多，请更换目标目录".into())
+}
+
+#[tauri::command]
+pub async fn copy_asset_folder(
+    app: AppHandle,
+    webview: Webview,
+    task_id: String,
+    source_path: String,
+    destination_directory: String,
+) -> Result<FileTransferResult, String> {
+    ensure_trusted_caller(&webview)?;
+    if webview.label() != "main" {
+        return Err("文件夹粘贴仅允许主窗口调用".into());
+    }
+    if task_id.is_empty()
+        || task_id.len() > 128
+        || !task_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+    {
+        return Err("传输标识无效".into());
+    }
+    let source = crate::path_policy::authorize_existing_plain_directory(&app, &source_path)?;
+    let parent =
+        crate::path_policy::authorize_existing_plain_directory(&app, &destination_directory)?;
+    if parent.starts_with(&source) {
+        return Err("不能将文件夹粘贴到自身或其子目录".into());
+    }
+    let worker_id = task_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let validate_source = |path: &Path, directory: bool| -> Result<(), String> {
+            let raw = path.to_string_lossy();
+            let authorized = if directory {
+                crate::path_policy::authorize_existing_plain_directory(&app, &raw)?
+            } else {
+                crate::path_policy::authorize_existing_plain_file(&app, &raw)?
+            };
+            if !authorized.starts_with(&source) {
+                return Err("复制源已变化，已停止复制".into());
+            }
+            Ok(())
+        };
+        let plan = plan_folder_copy(&source, || is_cancelled(&worker_id), validate_source)?;
+        ensure_disk_space(&parent, Some(plan.bytes))?;
+        crate::path_policy::reauthorize_existing_plain_directory(&app, &parent)?;
+        if is_cancelled(&worker_id)? {
+            return Err("文件夹复制已取消".into());
+        }
+        let destination = folder_copy_destination(&source, &parent)?;
+        // 取消/失败保留已经完成的副本；从不删除原目录或覆盖既有目标。
+        let copy_result = (|| {
+            let mut completed_bytes = 0;
+            for relative in plan.directories.iter().skip(1) {
+                if is_cancelled(&worker_id)? {
+                    return Err("文件夹复制已取消".to_string());
+                }
+                let target = destination.join(relative);
+                let authorized =
+                    authorize_path(&app, &target.to_string_lossy(), PathAccess::Write)?;
+                if !authorized.starts_with(&destination) {
+                    return Err("粘贴目标已变化".into());
+                }
+                fs::create_dir(&target).map_err(|_| "创建子文件夹失败")?;
+            }
+            for (relative, expected) in &plan.files {
+                if is_cancelled(&worker_id)? {
+                    return Err("文件夹复制已取消".into());
+                }
+                let path = source.join(relative);
+                validate_source(&path, false)?;
+                if plain_copy_metadata(&path)?.len() != *expected {
+                    return Err("复制源文件已变化".into());
+                }
+                let target = destination.join(relative);
+                let authorized =
+                    authorize_path(&app, &target.to_string_lossy(), PathAccess::Write)?;
+                if !authorized.starts_with(&destination) {
+                    return Err("粘贴目标已变化".into());
+                }
+                let mut input = File::open(path).map_err(|_| "无法打开复制源文件")?;
+                stream_to_file(
+                    &worker_id,
+                    &mut input,
+                    &target,
+                    Some(*expected),
+                    Some(*expected),
+                    None,
+                    || is_cancelled(&worker_id),
+                    |current| {
+                        let _ = app.emit(
+                            PROGRESS_EVENT,
+                            FileTransferProgress {
+                                task_id: worker_id.clone(),
+                                transferred_bytes: completed_bytes + current,
+                                total_bytes: Some(plan.bytes),
+                            },
+                        );
+                    },
+                    |_| Ok(()),
+                )?;
+                completed_bytes += expected;
+            }
+            let _ = app.emit(
+                PROGRESS_EVENT,
+                FileTransferProgress {
+                    task_id: worker_id.clone(),
+                    transferred_bytes: plan.bytes,
+                    total_bytes: Some(plan.bytes),
+                },
+            );
+            Ok(FileTransferResult {
+                path: destination.to_string_lossy().into_owned(),
+                total_bytes: plan.bytes,
+                content_type: None,
+            })
+        })();
+        copy_result.map_err(|error: String| format!("{error}；已复制内容保留在目标目录"))
+    })
+    .await
+    .map_err(|_| "文件夹复制任务失败".to_string());
+    clear_cancelled(&task_id);
+    result?
+}
+
 #[tauri::command]
 pub fn cancel_file_transfer(task_id: String) -> Result<(), String> {
     cancelled_transfers()
@@ -365,6 +583,46 @@ pub fn cancel_file_transfer(task_id: String) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn folder_plan_preserves_nested_and_empty_directories() {
+        let root = test_directory("folder-plan");
+        fs::create_dir_all(root.join("人物/空目录")).unwrap();
+        fs::write(root.join("人物/image.png"), b"data").unwrap();
+        let plan = plan_folder_copy(&root, || Ok(false), |_, _| Ok(())).unwrap();
+        assert_eq!(plan.bytes, 4);
+        assert_eq!(plan.directories.len(), 3);
+        assert_eq!(plan.files[0].0, PathBuf::from("人物/image.png"));
+        assert!(plan_folder_copy(&root, || Ok(true), |_, _| Ok(())).is_err());
+        assert!(folder_copy_destination(&root, &root.join("人物")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn folder_destination_uses_exclusive_creation_and_keeps_existing_content() {
+        let parent = test_directory("folder-conflict");
+        let source = parent.join("素材");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("original"), b"original").unwrap();
+        let destination = folder_copy_destination(&source, &parent).unwrap();
+        assert_ne!(destination, source);
+        assert!(destination
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("副本"));
+        assert_eq!(fs::read(source.join("original")).unwrap(), b"original");
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_plan_rejects_symlinks_before_copying() {
+        let root = test_directory("folder-link");
+        std::os::unix::fs::symlink(&root, root.join("cycle")).unwrap();
+        assert!(plan_folder_copy(&root, || Ok(false), |_, _| Ok(())).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     struct GeneratedReader {
         remaining: u64,

@@ -1,4 +1,4 @@
-//! 主窗口显式读取 Windows 剪贴板图片/文本；不读取文件路径或更改剪贴板。
+//! 主窗口显式读取剪贴板；图片/文本与授权目录使用独立命令。
 use serde::Serialize;
 
 #[cfg(any(target_os = "windows", test))]
@@ -179,9 +179,192 @@ pub async fn read_canvas_clipboard(webview: tauri::Webview) -> Result<ClipboardC
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn decode_drop_folders(bytes: &[u8]) -> Result<Vec<String>, String> {
+    if bytes.len() < 24 || bytes.len() > 1024 * 1024 {
+        return Err("剪贴板文件列表无效或过大".into());
+    }
+    let offset = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let wide = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+    if wide != 1 || offset < 20 || offset >= bytes.len() || (bytes.len() - offset) % 2 != 0 {
+        return Err("剪贴板文件列表编码无效".into());
+    }
+    let units: Vec<u16> = bytes[offset..]
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let mut paths = Vec::new();
+    let mut start = 0;
+    for end in 0..units.len() {
+        if units[end] != 0 {
+            continue;
+        }
+        if end == start {
+            if paths.is_empty() {
+                return Err("剪贴板中没有文件夹".into());
+            }
+            return Ok(paths);
+        }
+        if end - start > 32_768 || paths.len() >= 128 {
+            return Err("剪贴板文件列表超过上限".into());
+        }
+        paths.push(String::from_utf16(&units[start..end]).map_err(|_| "剪贴板路径编码无效")?);
+        start = end + 1;
+    }
+    Err("剪贴板文件列表缺少终止符".into())
+}
+
+#[cfg(target_os = "windows")]
+fn read_folder_paths() -> Result<Vec<String>, String> {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    struct ClipboardLease;
+    impl Drop for ClipboardLease {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseClipboard();
+            }
+        }
+    }
+    unsafe {
+        OpenClipboard(None).map_err(|_| "剪贴板暂时被占用，请稍后重试")?;
+        let _lease = ClipboardLease;
+        let handle = GetClipboardData(15).map_err(|_| "剪贴板中没有可粘贴的文件夹")?;
+        let memory = HGLOBAL(handle.0);
+        let size = GlobalSize(memory);
+        if size == 0 || size > 1024 * 1024 {
+            return Err("剪贴板文件列表无效或过大".into());
+        }
+        let pointer = GlobalLock(memory);
+        if pointer.is_null() {
+            return Err("无法读取剪贴板文件列表".into());
+        }
+        let bytes = std::slice::from_raw_parts(pointer as *const u8, size).to_vec();
+        let _ = GlobalUnlock(memory);
+        decode_drop_folders(&bytes)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_folder_paths() -> Result<Vec<String>, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut cmd = Command::new("osascript");
+        cmd.args(["-e", "set copiedItems to the clipboard as list\nset resultText to \"\"\nrepeat with copiedItem in copiedItems\nset resultText to resultText & (POSIX path of copiedItem) & linefeed\nend repeat\nreturn resultText"]);
+        cmd
+    };
+    #[cfg(target_os = "linux")]
+    let mut command = if std::env::var("XDG_SESSION_TYPE").unwrap_or_default() == "wayland" {
+        let mut cmd = Command::new("wl-paste");
+        cmd.args(["--no-newline", "--type", "text/uri-list"]);
+        cmd
+    } else {
+        let mut cmd = Command::new("xclip");
+        cmd.args([
+            "-o",
+            "-selection",
+            "clipboard",
+            "-target",
+            "x-special/gnome-copied-files",
+        ]);
+        cmd
+    };
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "无法读取系统文件剪贴板，请检查系统剪贴板工具")?;
+    let mut bytes = Vec::new();
+    let read_result = child
+        .stdout
+        .take()
+        .ok_or("无法读取剪贴板")?
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes);
+    if read_result.is_err() || bytes.len() > 1024 * 1024 {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("剪贴板读取失败或超过上限".into());
+    }
+    if !child.wait().map_err(|_| "剪贴板读取失败")?.success() {
+        return Err("剪贴板中没有可粘贴的文件夹".into());
+    }
+    let text = String::from_utf8(bytes).map_err(|_| "剪贴板路径编码无效")?;
+    let mut paths = Vec::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        #[cfg(target_os = "linux")]
+        let path = {
+            if line == "copy" || line == "cut" || line.starts_with('#') {
+                continue;
+            }
+            url::Url::parse(line)
+                .map_err(|_| "剪贴板文件地址无效")?
+                .to_file_path()
+                .map_err(|_| "剪贴板中包含非本地文件")?
+                .to_string_lossy()
+                .into_owned()
+        };
+        #[cfg(target_os = "macos")]
+        let path = line.to_string();
+        if paths.len() >= 128 {
+            return Err("剪贴板文件夹数量超过上限".into());
+        }
+        paths.push(path);
+    }
+    if paths.is_empty() {
+        return Err("剪贴板中没有可粘贴的文件夹".into());
+    }
+    Ok(paths)
+}
+
+#[tauri::command]
+pub async fn read_asset_folder_clipboard(
+    app: tauri::AppHandle,
+    webview: tauri::Webview,
+) -> Result<Vec<String>, String> {
+    crate::path_policy::ensure_trusted_caller(&webview)?;
+    ensure_main_label(webview.label())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut paths = Vec::new();
+        for raw in read_folder_paths()? {
+            let directory = crate::path_policy::authorize_existing_plain_directory(&app, &raw)
+                .map_err(|_| "剪贴板中包含非文件夹或未授权目录；请先将源目录添加到资产库")?;
+            let path = directory.to_string_lossy().into_owned();
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
+    })
+    .await
+    .map_err(|_| "读取文件夹剪贴板失败")?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn decodes_bounded_drop_files_and_rejects_malformed_lists() {
+        let mut bytes = vec![0_u8; 20];
+        bytes[0..4].copy_from_slice(&20_u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&1_u32.to_le_bytes());
+        bytes.extend(
+            "D:\\素材\\人物\0D:\\素材\\场景\0\0"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes),
+        );
+        assert_eq!(
+            decode_drop_folders(&bytes).unwrap(),
+            vec!["D:\\素材\\人物", "D:\\素材\\场景"]
+        );
+        assert!(decode_drop_folders(&bytes[..bytes.len() - 2]).is_err());
+        bytes[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_drop_folders(&bytes).is_err());
+        assert!(decode_drop_folders(&vec![0; 1024 * 1024 + 1]).is_err());
+    }
     #[test]
     fn restricts_window_and_decodes_bounded_unicode() {
         assert!(ensure_main_label("main").is_ok());

@@ -354,6 +354,7 @@ export interface ProjectSlice {
   projectName: string;
   projectLoadStatus: ProjectLoadStatus;
   isCreatingProject: boolean;
+  isReturningToStartPage: boolean;
   /** 正在切换到的画布名；非 null 时显示切换遮罩 */
   switchingProjectName: string | null;
   /** 自动保存持续失败时的诊断状态；成功保存后清空 */
@@ -387,6 +388,8 @@ export interface ProjectSlice {
   deleteProject: (id: string) => Promise<void>;
   /** captureSnapshot：切走前给当前画布重拍缩略图，只有项目库弹窗需要（拍一张要跑一轮位图合成） */
   switchProject: (id: string, options?: { captureSnapshot?: boolean }) => void;
+  /** 保存当前画布后返回启动页；保存失败不卸载当前画布。 */
+  returnToStartPage: () => Promise<boolean>;
   saveCurrentProject: () => Promise<string | undefined>;
   saveCurrentProjectSilent: () => Promise<string | undefined>;
   loadProject: () => Promise<void>;
@@ -568,6 +571,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
   projectName: '新项目',
   projectLoadStatus: 'loading',
   isCreatingProject: false,
+  isReturningToStartPage: false,
   switchingProjectName: null,
   autoSaveFailure: null,
 
@@ -803,7 +807,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
   },
 
   createProject: async (name) => {
-    if (get().isCreatingProject) return undefined;
+    if (get().isCreatingProject || get().isReturningToStartPage) return undefined;
     set({ isCreatingProject: true });
     try {
       const createSequence = ++projectSwitchSequence;
@@ -1255,6 +1259,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
   },
 
   switchProject: async (requestedId, options) => {
+    if (get().isReturningToStartPage) return;
     if (!get().projects.some((project) => project.id === requestedId)) return;
     // 剧集项目自身没有画布，点它等于打开它的分集。
     // ponytail: 固定开第一集；要「回到上次打开的那集」再往剧集记录里存一个 lastEpisodeId。
@@ -1337,6 +1342,45 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       setTimeout(() => window.dispatchEvent(new CustomEvent('canvas-fit-view')), 0);
     } finally {
       if (isLatestSwitch()) set({ switchingProjectName: null });
+    }
+  },
+
+  returnToStartPage: async () => {
+    const state = get();
+    if (!state.currentProjectId) return true;
+    if (state.isReturningToStartPage || state.isCreatingProject || state.switchingProjectName !== null) return false;
+    if (state.projectLoadStatus !== 'ready') {
+      state.showToast('项目尚未成功加载，暂时无法返回启动页', 'error');
+      return false;
+    }
+    const projectId = state.currentProjectId;
+    const sequence = projectSwitchSequence;
+    set({ isReturningToStartPage: true });
+    try {
+      // 列表即将出现，复用缩略图捕获；截图失败不妨碍正常保存。
+      await get().captureCurrentProjectSnapshot().catch(() => undefined);
+      if (get().currentProjectId !== projectId || projectSwitchSequence !== sequence) return false;
+      const savedId = await get().saveCurrentProjectSilent();
+      if (savedId !== projectId || get().currentProjectId !== projectId || projectSwitchSequence !== sequence) return false;
+      cancelProjectCanvasDerivations(projectId);
+      set({
+        currentProjectId: null,
+        projectName: '',
+        projectLoadStatus: 'ready',
+        nodes: [], edges: [], groups: [],
+        history: [], historyIndex: -1, selectedNodeIds: [],
+        activeNodeId: null, dialogPosition: null, pendingPresetAction: null,
+        nodeMenuVisible: false, nodePickerOpen: false, projectLibraryOpen: false,
+        assetsPanelOpen: false, characterLibraryOpen: false, characterActionLibraryOpen: false,
+        historyPanelOpen: false, dramaAssetsPanelOpen: false, workflowPanelOpen: false,
+        chatOpen: false, reversePromptRequest: null,
+      });
+      return true;
+    } catch {
+      get().showToast('返回启动页失败，已保留当前画布，请重试', 'error');
+      return false;
+    } finally {
+      set({ isReturningToStartPage: false });
     }
   },
 
@@ -1459,6 +1503,7 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
   },
 
   initFromDb: async () => {
+    set({ currentProjectId: null, projectLoadStatus: 'loading' });
     try {
       await Promise.all([get().loadConfig(), get().loadWorkflows(), get().loadPresets(), get().loadSkills(), get().loadSubAgentProfiles(), get().loadCustomStyles(), get().loadToolbarLayouts(), get().loadPlugins(), get().loadAppearanceThemes()]);
 
@@ -1468,16 +1513,30 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
         fileService.deleteProjectData('default').catch((e) => console.warn('[初始化] 清理默认项目数据失败:', e));
       }
       let activeProjectId: string | null = null;
-      if (valid.length > 0) {
-        const mapped: CanvasProject[] = withInheritedDataFolders(valid.map((p) => ({
-          id: p.id, name: p.name, createdAt: p.createdAt, updatedAt: p.updatedAt,
-          snapshot: p.snapshot, dataFolder: p.dataFolder, settings: p.settings,
-          parentId: p.parentId, episodeNo: p.episodeNo, episodeOutline: p.episodeOutline,
-          episodeScript: p.episodeScript, episodeCreative: p.episodeCreative,
-          series: p.series,
-        })));
-        fileService.registerProjectFolders(mapped);
-        mapped.sort((a, b) => b.updatedAt - a.updatedAt);
+      const mapped: CanvasProject[] = withInheritedDataFolders(valid.map((p) => ({
+        id: p.id, name: p.name, createdAt: p.createdAt, updatedAt: p.updatedAt,
+        snapshot: p.snapshot, dataFolder: p.dataFolder, settings: p.settings,
+        parentId: p.parentId, episodeNo: p.episodeNo, episodeOutline: p.episodeOutline,
+        episodeScript: p.episodeScript, episodeCreative: p.episodeCreative,
+        series: p.series,
+      })));
+      fileService.registerProjectFolders(mapped);
+      mapped.sort((a, b) => b.updatedAt - a.updatedAt);
+      if (get().config.startupView === 'project-library') {
+        // 启动页只读摘要；选定项目后才通过既有切换流程加载画布及项目域数据。
+        set({
+          projects: mapped,
+          currentProjectId: null,
+          projectName: '',
+          nodes: [],
+          edges: [],
+          groups: [],
+          history: [],
+          historyIndex: -1,
+          selectedNodeIds: [],
+          projectLoadStatus: 'ready',
+        });
+      } else if (valid.length > 0) {
         const rememberedProjectId = await getLastActiveProjectId().catch(() => null);
         const targetId = resolveOpenTargetId(mapped, rememberedProjectId
           && mapped.some((project) => project.id === rememberedProjectId)
@@ -1545,12 +1604,11 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
         get().repairInterruptedForProject(activeProjectId).catch((e) => console.warn('[初始化] 修复中断消息失败:', e));
         get().loadProjectMemoriesForProject(seriesOwnerId(get().projects, activeProjectId))
           .catch((e) => console.warn('[初始化] 加载项目记忆失败:', e));
-        // 应用重启后，所有项目的未完成 Agent 任务都必须恢复为暂停，禁止自动续跑。
-        const projectIds = get().projects.map((project) => project.id);
-        await Promise.all(projectIds.map((projectId) =>
-          get().repairInterruptedAgentTasksForProject(projectId),
-        ));
       }
+      // 即使停留在启动页，也修复所有项目的遗留 Agent 任务，禁止打开项目时自动续跑。
+      await Promise.all(get().projects.map((project) =>
+        get().repairInterruptedAgentTasksForProject(project.id),
+      ));
     } catch (error) {
       console.error('Init from IndexedDB failed:', error);
       set({ currentProjectId: null, projectLoadStatus: 'error' });

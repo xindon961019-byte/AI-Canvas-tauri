@@ -13,6 +13,7 @@ const fsMocks = vi.hoisted(() => ({
 const coreMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   notifyProjectDiskChanged: vi.fn(),
+  isTauriEnv: vi.fn(() => true),
 }));
 
 vi.mock('@tauri-apps/plugin-fs', () => fsMocks);
@@ -22,7 +23,7 @@ const projectDirMock = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock('../../src/services/fs/core', () => ({
   getProjectDataDir: projectDirMock.get,
   sanitizeFolderName: (name: string) => name.replace(/[<>:"|?*/\\]/g, "_"),
-  isTauriEnv: () => true,
+  isTauriEnv: coreMocks.isTauriEnv,
   joinPath: (...parts: string[]) => parts.join('/'),
   notifyProjectDiskChanged: coreMocks.notifyProjectDiskChanged,
 }));
@@ -35,10 +36,44 @@ import {
   isPathInsideDir,
   isProjectOwnedFile,
   moveToUndoTrash,
+  moveToTrash,
   resolveNodeUndoTrashPaths,
   restoreFromUndoTrash,
   waitForPendingNodeFileDeletions,
 } from '../../src/services/fs/trash';
+
+describe('显式资产删除的回收站结果', () => {
+  beforeEach(() => {
+    coreMocks.invoke.mockReset(); coreMocks.isTauriEnv.mockReturnValue(true); coreMocks.notifyProjectDiskChanged.mockClear();
+  });
+  it('等待原生回收站操作成功后才完成', async () => {
+    let finish!: () => void;
+    coreMocks.invoke.mockReturnValue(new Promise<void>((resolve) => { finish = resolve; }));
+    let completed = false;
+    const deletion = moveToTrash('/assets/image.png', { throwOnError: true }).then(() => { completed = true; });
+    await Promise.resolve(); expect(completed).toBe(false);
+    expect(coreMocks.notifyProjectDiskChanged).not.toHaveBeenCalled();
+    expect(coreMocks.invoke).toHaveBeenCalledWith('move_to_trash', { path: '/assets/image.png' });
+    finish(); await deletion; expect(completed).toBe(true);
+    expect(coreMocks.notifyProjectDiskChanged).toHaveBeenCalledOnce();
+  });
+  it('原生失败向资产库抛出，兼容调用仍忽略失败', async () => {
+    const failure = new Error('locked'); coreMocks.invoke.mockRejectedValue(failure);
+    await expect(moveToTrash('/assets/image.png', { throwOnError: true })).rejects.toBe(failure);
+    expect(coreMocks.notifyProjectDiskChanged).not.toHaveBeenCalled();
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await expect(moveToTrash('/assets/image.png')).resolves.toBeUndefined();
+    warning.mockRestore();
+  });
+  it('Web 环境显式删除失败，不报告虚假的成功', async () => {
+    coreMocks.isTauriEnv.mockReturnValue(false);
+    try {
+      await expect(moveToTrash('/assets/image.png', { throwOnError: true })).rejects.toThrow('桌面应用');
+      await expect(moveToTrash('/assets/image.png')).resolves.toBeUndefined();
+      expect(coreMocks.invoke).not.toHaveBeenCalled();
+    } finally { coreMocks.isTauriEnv.mockReturnValue(true); }
+  });
+});
 
 function directorSceneReference(sceneId = 'scene-main') {
   return {

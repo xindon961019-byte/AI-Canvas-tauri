@@ -444,6 +444,7 @@ function SearchCard({ file, onReveal, onDragStart, videoExpanded, onVideoExpande
   return (
     <div className={`assets-waterfall-card anim-card-in${videoExpanded ? ' has-expanded-video' : ''}`} draggable={!videoExpanded} onDragStart={onDragStart} data-tooltip={videoExpanded ? undefined : '拖拽到主窗口画布以添加节点'} data-tooltip-pos="bottom">
       <AssetThumb assetUrl={file.assetUrl} filePath={file.path} videoExpanded={videoExpanded} onVideoExpandedChange={onVideoExpandedChange}
+        videoPresentation="inline"
         name={file.name} category={file.category} size={file.size} badge={sourceLabel}>
         <div className="assets-card-actions">
           <button type="button" className="assets-card-action-btn" data-tooltip="在文件夹中显示" onClick={onReveal}>

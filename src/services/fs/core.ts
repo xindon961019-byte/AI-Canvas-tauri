@@ -7,6 +7,7 @@ import {
   exists,
   mkdir,
   lstat,
+  open as fsOpen,
   remove,
   readDir,
   readFile,
@@ -152,6 +153,94 @@ export type FileWatchEvent = WatchEvent;
 /** 通过文件服务边界读取 Tauri 已授权的本地二进制文件。 */
 export async function readBinaryFile(filePath: string): Promise<Uint8Array<ArrayBuffer>> {
   return readFile(filePath);
+}
+
+const TEXT_PREVIEW_CACHE_MAX = 300;
+const textPreviewCache = new Map<string, string>();
+
+/** 同步读取已缓存的文本预览片段（若存在） */
+export function getCachedTextPreview(filePath: string, size?: number): string | undefined {
+  if (!filePath) return undefined;
+  return textPreviewCache.get(`${filePath}:${size ?? 0}`);
+}
+
+/** 清理文本预览缓存（测试或重置时使用） */
+export function clearTextPreviewCache(): void {
+  textPreviewCache.clear();
+}
+
+function setPreviewCache(key: string, val: string): void {
+  if (textPreviewCache.size >= TEXT_PREVIEW_CACHE_MAX) {
+    const firstKey = textPreviewCache.keys().next().value;
+    if (firstKey) textPreviewCache.delete(firstKey);
+  }
+  textPreviewCache.set(key, val);
+}
+
+/**
+ * 读取文本文件的前若干字节（默认 2048 字节）作为预览字符串。
+ * 内存缓存避免在瀑布流滚动时频繁读取磁盘。
+ */
+export async function readTextFilePreview(
+  filePath: string,
+  size?: number,
+  maxBytes = 2048,
+): Promise<string> {
+  if (!filePath) return '';
+  const cacheKey = `${filePath}:${size ?? 0}`;
+  const cached = textPreviewCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  if (size === 0) {
+    setPreviewCache(cacheKey, '');
+    return '';
+  }
+
+  if (!isTauriEnv()) return '';
+
+  try {
+    let bytes: Uint8Array | null = null;
+    if (typeof fsOpen === 'function') {
+      try {
+        const file = await fsOpen(filePath, { read: true });
+        try {
+          const buf = new Uint8Array(maxBytes);
+          const n = await file.read(buf);
+          if (n && n > 0) {
+            bytes = buf.subarray(0, n);
+          } else {
+            bytes = new Uint8Array(0);
+          }
+        } finally {
+          await file.close();
+        }
+      } catch {
+        // 若 fs.open 失败，降级到 readFile
+      }
+    }
+
+    if (!bytes) {
+      const allBytes = await readFile(filePath);
+      bytes = allBytes.subarray(0, maxBytes);
+    }
+
+    if (!bytes || bytes.length === 0) {
+      setPreviewCache(cacheKey, '');
+      return '';
+    }
+
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+    const text = decoder.decode(bytes).replace(/\uFFFD+$/, '').replace(/^\uFEFF/, '');
+    if (text.includes('\0')) {
+      setPreviewCache(cacheKey, '');
+      return '';
+    }
+
+    setPreviewCache(cacheKey, text);
+    return text;
+  } catch {
+    return '';
+  }
 }
 
 /** 确保二进制文件存在；已存在时不覆盖。 */

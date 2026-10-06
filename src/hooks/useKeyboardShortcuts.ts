@@ -175,6 +175,13 @@ export function useKeyboardShortcuts() {
         return;
       }
 
+      // 启动页保留应用入口快捷键，禁止创建、粘贴或撤销画布内容。
+      if (useAppStore.getState().currentProjectId === null) {
+        if (e.key === 'Escape') useAppStore.getState().setSettingsOpen(false);
+        const togglesMascot = (e.ctrlKey || e.metaKey) && e.shiftKey
+          && (e.code === 'KeyM' || e.key === 'm' || e.key === 'M');
+        if (!togglesMascot) return;
+      }
       // Space: 选中节点时弹出 AI 对话框（在 isEditing 守卫之前，防止 React Flow 内部拦截 Space 事件）
       if ((e.key === ' ' || e.code === 'Space') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && !e.repeat) {
         if (!isEditing) {

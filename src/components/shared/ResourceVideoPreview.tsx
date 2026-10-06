@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '@iconify/react';
 import { AnimatePresence, MotionConfig, motion, useIsPresent, useReducedMotion } from 'framer-motion';
@@ -8,6 +8,9 @@ import { getResourceVideoFloatingRect, resolveResourceVideoSource } from '../../
 import { acquireCanvasVideoPoster } from '../nodes/shared/video/canvasVideoPreviewCache';
 import { releaseViewportVideoElement } from './viewportVideoResource';
 import { fadeFast, springSmooth } from '../../utils/motion';
+import type { HistoryRecord } from '../../services/indexedDbService';
+
+const AssetVideoPreview = lazy(() => import('../assets/AssetVideoPreview'));
 
 type VideoGeometry = ReturnType<typeof getResourceVideoFloatingRect>;
 const VIDEO_SPRING = { ...springSmooth, visualDuration: 0.48, bounce: 0.32 };
@@ -32,10 +35,14 @@ interface Props {
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
   className?: string;
+  presentation?: 'inline' | 'fullscreen';
+  projectId?: string;
+  historyRecord?: HistoryRecord;
+  size?: number;
 }
 
 /** 仅显式展开时挂载播放器；缩略列表复用串行、可取消的共享封面缓存。 */
-export default function ResourceVideoPreview({ src, filePath, poster, revision = 0, name, expanded, onExpandedChange, className = '' }: Props) {
+export default function ResourceVideoPreview({ src, filePath, poster, revision = 0, name, expanded, onExpandedChange, className = '', presentation = 'fullscreen', projectId, historyRecord, size }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   // 多张卡片可能引用同一资产 ID；只有收到点击的卡片可以拥有播放器。
   const [requested, setRequested] = useState(false);
@@ -87,7 +94,7 @@ export default function ResourceVideoPreview({ src, filePath, poster, revision =
       onDragStart={(event) => { if (active) { event.preventDefault(); event.stopPropagation(); } }}>
       <button type="button" className="resource-video-open" aria-label={`展开播放 ${name}`} aria-expanded={active}
         onClick={() => {
-          if (!active && rootRef.current) {
+          if (presentation === 'inline' && !active && rootRef.current) {
             setOpeningGeometry(measureVideoGeometry(rootRef.current,
               preview?.source === source ? preview?.width ?? 640 : 640,
               preview?.source === source ? preview?.height ?? 360 : 360));
@@ -99,7 +106,13 @@ export default function ResourceVideoPreview({ src, filePath, poster, revision =
           : <Icon icon="lucide:film" className="resource-video-placeholder" aria-hidden="true" />}
         <span className="resource-video-play"><Icon icon="lucide:play" width="20" aria-hidden="true" /></span>
       </button>
-      {(active || closing) && openingGeometry && createPortal(
+      {presentation === 'fullscreen' && active && <Suspense fallback={<div className="fixed inset-0 z-[360] flex items-center justify-center bg-canvas-bg text-canvas-text-muted" role="status">加载视频预览…</div>}>
+        <AssetVideoPreview key={identity} src={source} querySrc={src} filePath={filePath} poster={posterSource} name={name}
+          projectId={projectId} historyRecord={historyRecord} size={size} unavailable={resolved?.identity === identity}
+          onClose={() => { setClosing(false); setRequested(false); onExpandedChange(false); }}
+          onSourceError={() => { if (primary && src && primary !== src) setFailedSource(primary); }} />
+      </Suspense>}
+      {presentation === 'inline' && (active || closing) && openingGeometry && createPortal(
         <MotionConfig reducedMotion="user" transition={VIDEO_SPRING}>
           <AnimatePresence onExitComplete={() => setClosing(false)}>
             {active && <ResourceVideoPlayer key="resource-video" src={source} poster={posterSource} name={name} anchorRef={rootRef}

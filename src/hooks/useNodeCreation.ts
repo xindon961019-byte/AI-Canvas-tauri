@@ -281,6 +281,13 @@ export function useNodeCreation() {
         const scale = window.devicePixelRatio || 1;
         const flowPos = rf.screenToFlowPosition({ x: position.x / scale, y: position.y / scale });
         const store = useAppStore.getState();
+        const recordSuccessfulDrop = (path: string, nodeId: string, projectId: string) => {
+          const current = useAppStore.getState();
+          if (current.currentProjectId === projectId
+            && current.nodes.some((node) => node.id === nodeId && node.data.status === 'success')) {
+            void current.markAssetUsed({ path });
+          }
+        };
         let count = 0;
         const maxItems = 20;
 
@@ -322,6 +329,7 @@ export function useNodeCreation() {
                         const dims = await computeImageNodeDimensions(dataUrl);
                         store.updateNodeDataTransient(nodeId, { imageUrl: dataUrl, status: 'success', ...dims });
                       }
+                      recordSuccessfulDrop(fp, nodeId, projectId);
                     } catch (err) {
                       console.error(`[drop] failed for "${fp}":`, err);
                       store.updateNodeDataTransient(nodeId, { status: 'error', error: err instanceof Error ? err.message : '拷贝失败' });
@@ -348,6 +356,7 @@ export function useNodeCreation() {
                         const dataUrl = `data:${mime};base64,${base64}`;
                         store.updateNodeDataTransient(nodeId, { videoUrl: dataUrl, status: 'success' });
                       }
+                      recordSuccessfulDrop(fp, nodeId, projectId);
                     } catch (err) {
                       console.error(`[drop] failed for "${fp}":`, err);
                       store.updateNodeDataTransient(nodeId, { status: 'error', error: err instanceof Error ? err.message : '拷贝失败' });
@@ -374,6 +383,7 @@ export function useNodeCreation() {
                         const dataUrl = `data:${mime};base64,${base64}`;
                         store.updateNodeDataTransient(nodeId, { audioUrl: dataUrl, status: 'success' });
                       }
+                      recordSuccessfulDrop(fp, nodeId, projectId);
                     } catch (err) {
                       console.error(`[drop] failed for "${fp}":`, err);
                       store.updateNodeDataTransient(nodeId, { status: 'error', error: err instanceof Error ? err.message : '拷贝失败' });
@@ -425,6 +435,9 @@ export function useNodeCreation() {
                 position: { x: flowPos.x + offX, y: flowPos.y + offY },
                 data: { label: fileName, type: 'ai-text', role: 'source', output: text, status: 'success', fileName, nodeWidth: 280, nodeHeight: h },
               } as Parameters<typeof store.addNode>[0]);
+            }
+            if (store.currentProjectId && useAppStore.getState().currentProjectId === store.currentProjectId) {
+              void useAppStore.getState().markAssetUsed({ path: fp });
             }
             count++;
           } catch (err) {

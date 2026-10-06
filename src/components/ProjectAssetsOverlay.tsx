@@ -255,6 +255,7 @@ export default function ProjectAssetsOverlay({
                         >
                           {file.category === 'video' ? (
                             <ResourceVideoPreview src={file.assetUrl} filePath={file.path} name={file.name}
+                              projectId={file.episodeId} size={file.size}
                               expanded={videoPreview.expandedId === assetKey(file)}
                               onExpandedChange={(expanded) => videoPreview.setExpanded(expanded ? assetKey(file) : null)} />
                           ) : (

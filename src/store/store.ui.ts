@@ -4,6 +4,8 @@
 import type { StateCreator } from 'zustand';
 import type { AppState } from './useAppStore';
 import type { ReversePromptRequest } from '../types';
+import type { AssetFileEntry, AssetFolderSelection, FileTransferOptions } from '../services/fileService';
+import type { AssetImageRecord, AssetImageSaveInput } from '../types/assetImage';
 
 export type SettingsTab = 'general' | 'appearance' | 'files' | 'api' | 'shortcuts' | 'comfyui' | 'storage' | 'plugins' | 'mcp';
 export const NEW_API_KEY_CONNECTION_ID = '__new__';
@@ -25,6 +27,11 @@ export interface ComfyNodeProgress {
 }
 
 export interface UISlice {
+  recentAssetsRevision: number;
+  markAssetUsed: (file: Pick<AssetFileEntry, 'path' | 'assetId'>) => Promise<boolean>;
+  /** 当前运行期入口请求，不进入项目或配置持久化。 */
+  assetsPanelRequest: { tab: 'project' | 'permanent'; projectId?: string; folder?: AssetFolderSelection } | null;
+  saveAssetImageDetails: (file: AssetFileEntry, input: AssetImageSaveInput, options?: FileTransferOptions) => Promise<AssetImageRecord>;
   settingsOpen: boolean;
   /** 打开设置时要激活的标签页；SettingsPanel 消费后清空 */
   settingsInitialTab: SettingsTab | null;
@@ -41,7 +48,7 @@ export interface UISlice {
   dialogPosition: { x: number; y: number } | null;
   assetsPanelOpen: boolean;
   /** 同一资产库的展示方式，仅用于当前界面，不持久化。 */
-  assetsPanelMode: 'modal' | 'drawer';
+  assetsPanelMode: 'modal' | 'drawer' | 'page';
   characterLibraryOpen: boolean;
   /** 角色库里的动作库弹层；圆环快捷入口要能越过角色列表直接打开它 */
   characterActionLibraryOpen: boolean;
@@ -86,7 +93,7 @@ export interface UISlice {
   setHelpOpen: (open: boolean) => void;
   openNodeDialog: (nodeId: string, position?: { x: number; y: number }) => void;
   closeNodeDialog: () => void;
-  setAssetsPanelOpen: (open: boolean, mode?: UISlice['assetsPanelMode']) => void;
+  setAssetsPanelOpen: (open: boolean, mode?: UISlice['assetsPanelMode'], request?: UISlice['assetsPanelRequest']) => void;
   setCharacterLibraryOpen: (open: boolean) => void;
   setCharacterActionLibraryOpen: (open: boolean) => void;
   setHistoryPanelOpen: (open: boolean) => void;
@@ -106,6 +113,20 @@ export interface UISlice {
 }
 
 export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => ({
+  recentAssetsRevision: 0,
+  assetsPanelRequest: null,
+  markAssetUsed: async (file) => {
+    try {
+      const { markRecentAssetUsed } = await import('../services/fs/recentAssets');
+      const recorded = await markRecentAssetUsed(file);
+      if (recorded) set((state) => ({ recentAssetsRevision: state.recentAssetsRevision + 1 }));
+      return recorded;
+    } catch { return false; } // 最近记录写入失败不阻断预览或导入。
+  },
+  saveAssetImageDetails: async (file, input, options) => {
+    const { saveAssetImageMetadata } = await import('../services/fs/assetImageMetadata');
+    return saveAssetImageMetadata(file, input, options);
+  },
   settingsOpen: false,
   settingsInitialTab: null,
   pendingApiKeyConnectionId: null,
@@ -171,18 +192,20 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
     return { activeNodeId: nodeId, dialogPosition: position ?? null };
   }),
   closeNodeDialog: () => set({ activeNodeId: null, dialogPosition: null, pendingPresetAction: null }),
-  setAssetsPanelOpen: (open, mode = 'modal') => set(open
+  setAssetsPanelOpen: (open, mode = 'modal', request = null) => set(open
     ? {
         settingsOpen: false,
         assetsPanelOpen: true,
         assetsPanelMode: mode,
+        assetsPanelRequest: request,
+        ...(request ? { dramaAssetsPanelOpen: false } : {}),
         characterLibraryOpen: false,
         characterActionLibraryOpen: false,
         historyPanelOpen: false,
         dramaAssetsPanelOpen: false,
         chatOpen: false,
       }
-    : { assetsPanelOpen: false, assetsPanelMode: 'modal', dramaAssetsPanelOpen: false }),
+    : { assetsPanelOpen: false, assetsPanelMode: 'modal', assetsPanelRequest: null, dramaAssetsPanelOpen: false }),
   setCharacterLibraryOpen: (open) => set(open
     ? {
         settingsOpen: false,

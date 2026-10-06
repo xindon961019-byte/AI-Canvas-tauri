@@ -140,6 +140,7 @@ function CompactHistoryRow({
     >
       {entry.nodeType === 'ai-video' && !isError && (entry.mediaUrl || entry.filePath) ? (
         <ResourceVideoPreview src={entry.mediaUrl} filePath={entry.filePath} name={entry.nodeLabel} className="resource-video-compact"
+          historyRecord={entry} projectId={entry.projectId}
           expanded={videoExpanded} onExpandedChange={onVideoExpandedChange} />
       ) : hasThumb ? (
         <HistoryThumbnail mediaUrl={entry.mediaUrl} filePath={entry.filePath} className="w-9 h-9" />
@@ -704,6 +705,7 @@ export default function OutputHistoryPanel() {
                                 {/* Image thumbnail — local file first, online URL fallback */}
                                 {entry.nodeType === 'ai-video' && (entry.mediaUrl || entry.filePath) && (
                                   <ResourceVideoPreview src={entry.mediaUrl} filePath={entry.filePath} name={entry.nodeLabel}
+                                    historyRecord={entry} projectId={entry.projectId}
                                     expanded={videoPreview.expandedId === entry.id}
                                     onExpandedChange={(expanded) => videoPreview.setExpanded(expanded ? entry.id : null)} />
                                 )}

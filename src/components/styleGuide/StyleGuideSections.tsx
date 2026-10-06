@@ -11,6 +11,8 @@ import Select from '../shared/Select';
 import NumberStepper from '../shared/NumberStepper';
 import Tabs from '../shared/Tabs';
 import PopupCloseButton from '../shared/PopupCloseButton';
+import VideoPlayer from '../shared/VideoPlayer';
+import FileUploadButton from '../shared/FileUploadButton';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import StyleGuideMascot from './StyleGuideMascot';
 
@@ -715,13 +717,24 @@ function SelectsSection() {
 
 function DropzoneSection() {
   const [dragOver, setDragOver] = useState(false);
+  const [fileName, setFileName] = useState('');
 
   return (
     <Section
       id="sg-dropzones"
       title="上传区"
-      desc="拖放上传的统一样式：虚线边框、中央图标、hover/拖拽悬停时高亮。WorkflowPanel 与 PluginSettings 已统一使用 ui-dropzone。"
+      desc="按钮式文件选择适合工具栏和紧凑表单；拖放区适合批量导入。文件选择只交给调用方处理，不自动上传或保存。"
     >
+      <Demo label="按钮上传 · 紧凑文件选择" code={'<FileUploadButton fileName={fileName} onChange={handleFile} /> · .ui-file-upload'}>
+        <div className="ui-stack">
+          <FileUploadButton aria-label="选择上传样例文件" fileName={fileName} onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            if (file) setFileName(file.name);
+          }} />
+          <FileUploadButton disabled label="选择文件" placeholder="当前不可上传" />
+          <p className="ui-hint">支持键盘操作；长文件名自动省略，悬停可查看完整名称。</p>
+        </div>
+      </Demo>
       <Demo code="ui-dropzone > ui-dropzone__title / __icon / __hint（.is-dragover 高亮）">
         <div
           className={`ui-dropzone${dragOver ? ' is-dragover' : ''}`}
@@ -1263,6 +1276,32 @@ function LayoutSection() {
 /* ==========================================================================
    内容装配
    ========================================================================== */
+function VideoPlayerSection() {
+  const [media, setMedia] = useState<{ src: string; name: string } | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => () => { if (media) URL.revokeObjectURL(media.src); }, [media]);
+  return <Section id="sg-video-player" title="视频播放器" desc="公用 VideoPlayer；主题色进度、倍速、音量、悬停预览与全屏。选择本地视频试播，样例仅在本窗口使用，关闭或替换时释放资源。">
+    <Demo code={'<VideoPlayer src={videoUrl} name="示例视频" onMetadata={handleMetadata} />'}>
+      <div className="ui-stack">
+        <div className="ui-row">
+          <FileUploadButton label="选择视频" accept="video/*" aria-label="选择视频样例" fileName={media?.name ?? ''} placeholder="选择本地视频试播" className="min-w-0 flex-1" onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = '';
+            if (!file) return;
+            if (file.type && !file.type.startsWith('video/')) { setError('请选择视频文件'); return; }
+            setError(''); setMedia({ src: URL.createObjectURL(file), name: file.name });
+          }} />
+          <button type="button" className="ui-btn ui-btn--ghost" disabled={!media} onClick={() => setMedia(null)}>移除样例</button>
+        </div>
+        {error && <p role="status" className="text-xs text-canvas-text-secondary">{error}</p>}
+        <div className="h-[380px] min-w-0 rounded-lg bg-canvas-bg">
+          <VideoPlayer key={media?.src ?? 'empty'} src={media?.src} name={media?.name ?? '视频样例'} unavailable={!media} />
+        </div>
+      </div>
+    </Demo>
+  </Section>;
+}
+
 export function StyleGuideContent({ theme }: { theme: 'dark' | 'light' }) {
   return (
     <>
@@ -1287,6 +1326,7 @@ export function StyleGuideContent({ theme }: { theme: 'dark' | 'light' }) {
       <CardsSection />
       <BadgesSection />
       <FeedbackSection />
+      <VideoPlayerSection />
       <Section id="sg-mascot" title="吉祥物" desc="预览真实吉祥物的状态、表情与身体动作，支持循环演示和不同尺寸查看。">
         <StyleGuideMascot theme={theme} />
       </Section>

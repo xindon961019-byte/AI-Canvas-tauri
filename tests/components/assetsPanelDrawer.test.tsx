@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createStore, type StoreApi } from 'zustand/vanilla';
 import type { AppState } from '../../src/store/useAppStore';
-import type { AssetFileEntry } from '../../src/services/fileService';
+import type { AssetFileEntry, AssetFolderEntry } from '../../src/services/fileService';
 import { createUISlice } from '../../src/store/store.ui';
 import type { NodeType } from '../../src/types';
 
@@ -11,10 +11,17 @@ const driver = vi.hoisted(() => ({
   states: [] as unknown[], refs: [] as Array<{ current: unknown }>,
   effects: [] as Array<{ deps?: readonly unknown[]; cleanup?: () => void }>,
   pending: [] as Array<() => void>, stateIndex: 0, refIndex: 0, effectIndex: 1,
-  dirty: false, listProject: vi.fn(), listGlobal: vi.fn(), drag: vi.fn(),
+  dirty: false, listProject: vi.fn(), listGlobal: vi.fn(), listExternal: vi.fn(), drag: vi.fn(),
   portal: vi.fn((children: unknown) => children),
   memos: [] as Array<{ value: unknown; deps: readonly unknown[] }>, memoIndex: 0,
   reduceMotion: true,
+  createFolder: vi.fn(), resolveFolder: vi.fn(), copyFolder: vi.fn(), copyClipboard: vi.fn(), readClipboard: vi.fn(),
+  copyText: vi.fn(), deleteFile: vi.fn(), revealFile: vi.fn(), imageDetails: vi.fn(), videoHistory: vi.fn(),
+  native: true,
+  nodeFile: null as AssetFileEntry | null,
+  globalFolders: [] as AssetFolderEntry[],
+  markUsed: vi.fn(),
+  monitorNativeDrag: false, cursor: vi.fn(), origin: vi.fn(), scale: vi.fn(),
 }));
 
 // 与仓库其他组件交互测试一样，驱动真实组件的状态、effect 和事件，不依赖 DOM 库。
@@ -69,12 +76,20 @@ vi.mock('framer-motion', () => ({
   motion: { div: 'div', button: 'button' }, AnimatePresence: 'presence', MotionConfig: 'motion-config',
   useReducedMotion: () => driver.reduceMotion,
 }));
-vi.mock('../../src/services/fileService', () => ({
+vi.mock('../../src/services/fileService', async () => ({
   listProjectFiles: driver.listProject, listGlobalFiles: driver.listGlobal,
-  listExternalFolderFiles: async () => [], extractFilesFromNodeData: () => null,
-  addAssetFilesToGlobal: vi.fn(), pickAssetFolder: vi.fn(), saveAssetToPermanent: vi.fn(), deletePermanentFile: vi.fn(),
+  listGlobalFolderContents: async () => ({ files: await driver.listGlobal(), folders: driver.globalFolders, truncated: false, rootPath: '/global/file' }),
+  createAssetSubfolder: driver.createFolder, resolveAssetFolderDirectory: driver.resolveFolder, copyAssetFolder: driver.copyFolder,
+  listExternalFolderContents: driver.listExternal,
+  selectAssetFolderFiles: (await vi.importActual<typeof import('../../src/services/fs/assetLibrary')>('../../src/services/fs/assetLibrary')).selectAssetFolderFiles,
+  extractFilesFromNodeData: () => driver.nodeFile,
+  addAssetFilesToGlobal: vi.fn(), pickAssetFolder: vi.fn(), saveAssetToPermanent: vi.fn(), deletePermanentFile: driver.deleteFile,
+  revealFileInFolder: driver.revealFile, isTauriEnv: () => driver.native,
   CATEGORY_LABELS: { image: '图像', video: '视频', audio: '音频', text: '文本', other: '其他' },
 }));
+vi.mock('../../src/services/clipboardService', () => ({ copyFile: driver.copyClipboard, copyText: driver.copyText, readClipboardFolders: driver.readClipboard }));
+vi.mock('../../src/services/assetImageDetails', () => ({ loadAssetImageDetails: driver.imageDetails }));
+vi.mock('../../src/services/assetVideoDetails', () => ({ loadAssetVideoHistory: driver.videoHistory }));
 vi.mock('../../src/services/indexedDbService', () => ({
   getAllAssetMeta: async () => [], putAssetMeta: vi.fn(), deleteAssetMeta: vi.fn(),
 }));
@@ -84,14 +99,24 @@ vi.mock('../../src/utils/assetSearchWindow', () => ({ openAssetSearchWindow: vi.
 vi.mock('../../src/utils/nodeAnimations', () => ({ playNodeExit: vi.fn() }));
 vi.mock('../../src/services/pollManager', () => ({ cancelNodePolling: vi.fn() }));
 vi.mock('../../src/services/canvasPointerService', () => ({ getCanvasPointerPosition: vi.fn() }));
-vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => { throw new Error('Web test'); } }));
+vi.mock('@tauri-apps/api/window', () => ({
+  cursorPosition: driver.cursor,
+  getCurrentWindow: () => {
+    if (!driver.monitorNativeDrag) throw new Error('Web test');
+    return { innerPosition: driver.origin, scaleFactor: driver.scale };
+  },
+}));
 vi.mock('@tauri-apps/plugin-global-shortcut', () => ({}));
 vi.mock('../../src/components/shared/AssetThumb', () => ({ default: 'asset-thumb' }));
 vi.mock('../../src/components/shared/Select', () => ({ default: 'asset-select' }));
+vi.mock('../../src/components/assets/AssetImagePreview', () => ({ default: 'asset-image-preview' }));
 
 import AssetsPanel from '../../src/components/AssetsPanel';
 import Tabs, { type TabsProps } from '../../src/components/shared/Tabs';
+import AssetFolderNavigation, { type AssetFolderNavigationProps } from '../../src/components/assets/AssetFolderNavigation';
+import AssetFileContextMenu, { type AssetFileContextMenuProps } from '../../src/components/assets/AssetFileContextMenu';
 import { useKeyboardShortcuts } from '../../src/hooks/useKeyboardShortcuts';
+import { isExternalDropCaptured } from '../../src/utils/dropCapture';
 
 class Target {
   tagName = 'DIV'; isContentEditable = false; canvas = true; control = false; drawer = false;
@@ -125,6 +150,7 @@ function renderTabs(root: unknown): unknown {
   if (!root || typeof root !== 'object' || !('props' in root)) return root;
   const element = root as Element;
   if (element.type === Tabs) return Tabs(element.props as unknown as TabsProps);
+  if (element.type === AssetFolderNavigation) return renderTabs(AssetFolderNavigation(element.props as unknown as AssetFolderNavigationProps));
   return { ...element, props: { ...element.props, children: renderTabs(element.props.children) } };
 }
 function render() {
@@ -149,6 +175,15 @@ function file(name: string, tags: string[] = []): AssetFileEntry {
   return { name, path: `assets/${name}.png`, category: 'image', size: 123, tags };
 }
 function cards() { return all(tree, (element) => !!element.props.file); }
+function fileMenu() { return find((element) => element.type === AssetFileContextMenu).props as unknown as AssetFileContextMenuProps; }
+function openFileMenu(index = 0) {
+  const focus = vi.fn();
+  (cards()[index].props.onContextMenu as (event: unknown) => void)({
+    target: { closest: () => null }, currentTarget: { focus }, clientX: 120, clientY: 180,
+    preventDefault: vi.fn(), stopPropagation: vi.fn(),
+  });
+  render(); expect(focus).toHaveBeenCalledOnce(); return fileMenu();
+}
 function canvasNode(id: string, type: NodeType, label = id): AppState['nodes'][number] {
   return { id, type, position: { x: 0, y: 0 }, data: { type, label } };
 }
@@ -161,6 +196,18 @@ beforeEach(() => {
   driver.states = []; driver.refs = []; driver.effects = []; driver.pending = [];
   driver.memos = []; driver.memoIndex = 0;
   driver.reduceMotion = true;
+  driver.globalFolders = [];
+  driver.native = true; driver.nodeFile = null;
+  driver.copyText.mockReset().mockResolvedValue(true);
+  driver.deleteFile.mockReset().mockResolvedValue(undefined);
+  driver.revealFile.mockReset().mockResolvedValue(undefined);
+  driver.imageDetails.mockReset().mockResolvedValue({ record: null, history: { prompt: '历史提示词' } });
+  driver.videoHistory.mockReset().mockResolvedValue({ prompt: '视频提示词' });
+  driver.createFolder.mockReset().mockResolvedValue('/global/file/新建文件夹');
+  driver.resolveFolder.mockReset().mockResolvedValue('/global/file');
+  driver.copyFolder.mockReset().mockResolvedValue('/global/file/素材');
+  driver.copyClipboard.mockReset().mockResolvedValue(true);
+  driver.readClipboard.mockReset().mockResolvedValue(['/library/素材']);
   blockingModal = false;
   doc = Object.assign(new EventTarget(), {
     body: new Target(), documentElement: new Target(),
@@ -172,14 +219,21 @@ beforeEach(() => {
   vi.stubGlobal('cancelAnimationFrame', vi.fn());
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
   driver.listProject.mockReset().mockResolvedValue([file('森林', ['夜景']), file('人物')]);
-  driver.listGlobal.mockReset().mockResolvedValue([file('全局参考')]);
+  driver.listGlobal.mockReset().mockResolvedValue([{ ...file('全局参考'), source: 'global' }]);
+  driver.listExternal.mockReset().mockResolvedValue({ files: [], folders: [], truncated: false });
   driver.portal.mockClear();
+  driver.markUsed.mockReset().mockResolvedValue(true);
+  driver.drag.mockReset(); driver.monitorNativeDrag = false;
+  driver.cursor.mockReset().mockResolvedValue({ x: 1400, y: 800 });
+  driver.origin.mockReset().mockResolvedValue({ x: 1000, y: 500 });
+  driver.scale.mockReset().mockResolvedValue(2);
   driver.store = createStore<AppState>()((set, get, api) => ({
     ...createUISlice(set, get, api), currentProjectId: 'project-1', nodes: [],
     projects: [{ id: 'project-1', name: '项目一' }], config: { assetWaterfallColumns: 6 },
     dramaAssets: { characters: [], scenes: [], props: [], lastViewedAt: 1 },
     setDramaAssetsPanelOpen: (open: boolean) => set({ dramaAssetsPanelOpen: open }),
     updateConfig: vi.fn(), saveConfig: vi.fn(), markDramaAssetsViewed: vi.fn(),
+    markAssetUsed: driver.markUsed,
   } as unknown as AppState));
   driver.effectIndex = 0;
   useKeyboardShortcuts();
@@ -192,7 +246,212 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('启动页资产入口与最近使用', () => {
+  it('整页资源库发起原生拖拽时保持页面，不返回启动页', async () => {
+    driver.store!.setState({ currentProjectId: null });
+    driver.store!.getState().setAssetsPanelOpen(true, 'page', { tab: 'permanent', folder: { kind: 'all' } });
+    render(); await settle();
+    (cards()[0].props.onDragStart as (event: unknown) => void)({ preventDefault: vi.fn() });
+    expect(driver.drag).toHaveBeenCalledWith(cards()[0].props.file);
+    expect(driver.store!.getState()).toMatchObject({ assetsPanelOpen: true, assetsPanelMode: 'page', currentProjectId: null });
+    expect(driver.cursor).not.toHaveBeenCalled();
+    expect(isExternalDropCaptured()).toBe(true);
+  });
+  it('没有当前项目也可直接打开全局资产，目录请求不创建或恢复画布', async () => {
+    driver.store!.setState({ currentProjectId: null, dramaAssetsPanelOpen: true });
+    driver.store!.getState().setAssetsPanelOpen(true, 'page', { tab: 'permanent', folder: { kind: 'all' } });
+    render(); await settle();
+    expect(driver.listGlobal).toHaveBeenCalled(); expect(driver.listProject).not.toHaveBeenCalled();
+    expect(cards()[0].props.file).toMatchObject({ name: '全局参考' });
+    expect(driver.store!.getState().currentProjectId).toBeNull();
+    expect(driver.store!.getState().dramaAssetsPanelOpen).toBe(false);
+  });
+  it('资源库整页展示，不创建弹窗或背景遮罩；返回时仍未打开画布', async () => {
+    driver.store!.setState({ currentProjectId: null, recentAssetsRevision: 7 });
+    driver.store!.getState().setAssetsPanelOpen(true, 'page', { tab: 'permanent', folder: { kind: 'all' } });
+    render(); await settle();
+    expect(find((element) => element.props.role === 'main').props['aria-label']).toBe('资源库');
+    expect(all(tree, (element) => element.props.role === 'dialog' || element.props.className === 'assets-panel-backdrop')).toHaveLength(0);
+    expect(driver.portal).not.toHaveBeenCalled();
+    expect(cards()[0].props.videoPresentation).toBe('fullscreen');
+    blockingModal = true;
+    win.dispatchEvent(Object.assign(new Event('keydown', { cancelable: true }), { key: 'Escape' }));
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+    blockingModal = false;
+    click(find((element) => element.type === 'button' && Array.isArray(element.props.children) && element.props.children.includes(' 返回启动页')));
+    render();
+    expect(driver.store!.getState()).toMatchObject({ assetsPanelOpen: false, assetsPanelRequest: null, currentProjectId: null, recentAssetsRevision: 7 });
+  });
+  it('图片预览才写入使用记录，列表加载和关闭预览不产生记录', async () => {
+    key(); render(); await settle(); expect(driver.markUsed).not.toHaveBeenCalled();
+    (cards()[0].props.onImagePreview as () => void)(); render();
+    expect(driver.markUsed).toHaveBeenCalledWith(expect.objectContaining({ name: '森林' }));
+    const preview = find((element) => element.type === 'asset-image-preview');
+    (preview.props.onClose as () => void)(); render(); expect(driver.markUsed).toHaveBeenCalledOnce();
+  });
+  it('视频展开记录一次，收起和再次加载不产生使用记录', async () => {
+    driver.listProject.mockResolvedValue([{ name: '视频', path: '/video.mp4', assetId: 'video', category: 'video', size: 12 }]);
+    key(); render(); await settle();
+    (cards()[0].props.onVideoExpandedChange as (expanded: boolean) => void)(true); render();
+    (cards()[0].props.onVideoExpandedChange as (expanded: boolean) => void)(false); render();
+    expect(driver.markUsed).toHaveBeenCalledOnce(); expect(driver.markUsed).toHaveBeenCalledWith(expect.objectContaining({ assetId: 'video' }));
+  });
+});
+
+describe('资源管理弹窗拖出后收起', () => {
+  async function startModalDrag() {
+    driver.store!.getState().setAssetsPanelOpen(true, 'modal'); render(); await settle();
+    vi.useFakeTimers(); driver.monitorNativeDrag = true;
+    const event = { preventDefault: vi.fn(), currentTarget: { closest: () => ({
+      getBoundingClientRect: () => ({ left: 100, right: 400, top: 80, bottom: 300, width: 300, height: 220 }),
+    }) } };
+    (cards()[0].props.onDragStart as (event: unknown) => void)(event);
+    expect(driver.drag).toHaveBeenCalledWith(cards()[0].props.file, expect.any(Function));
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+  }
+  it('按窗口原点和缩放转换系统坐标，只有越过弹窗边界才关闭', async () => {
+    await startModalDrag();
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+    expect(driver.cursor).toHaveBeenCalledOnce();
+    expect(isExternalDropCaptured()).toBe(true);
+    driver.cursor.mockResolvedValue({ x: 1900, y: 800 });
+    await vi.advanceTimersByTimeAsync(50); render();
+    expect(driver.store!.getState().assetsPanelOpen).toBe(false);
+    expect(isExternalDropCaptured()).toBe(false);
+    const calls = driver.cursor.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(driver.cursor).toHaveBeenCalledTimes(calls);
+  });
+  it('拖拽结束或取消时停止检查，之后移出弹窗不会误关闭', async () => {
+    await startModalDrag();
+    (driver.drag.mock.calls[0][1] as () => void)();
+    driver.cursor.mockResolvedValue({ x: 1900, y: 800 });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(driver.cursor).toHaveBeenCalledOnce();
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+    expect(isExternalDropCaptured()).toBe(true);
+  });
+  it('关闭重开后忽略上一轮未完成的鼠标位置查询', async () => {
+    let finish!: (point: { x: number; y: number }) => void;
+    driver.cursor.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    await startModalDrag();
+    driver.store!.getState().setAssetsPanelOpen(false); render();
+    driver.store!.getState().setAssetsPanelOpen(true, 'modal'); render();
+    finish({ x: 1900, y: 800 });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+  });
+  it('原生坐标读取失败时保留弹窗并结束检查', async () => {
+    driver.cursor.mockRejectedValueOnce(new Error('native unavailable'));
+    await startModalDrag(); await vi.advanceTimersByTimeAsync(200);
+    expect(driver.cursor).toHaveBeenCalledOnce();
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+  });
+});
+
+describe('资产文件右键操作', () => {
+  it('抽屉与弹窗都提供文件复制和打开目录，完整路径不被改写', async () => {
+    key(); render(); await settle();
+    let menu = openFileMenu();
+    expect(menu).toMatchObject({ name: '森林', canFileActions: true, canCopyPrompt: true, x: 120, y: 180 });
+    await menu.onCopy(); expect(driver.copyClipboard).toHaveBeenCalledWith('assets/森林.png');
+    await menu.onReveal(); expect(driver.revealFile).toHaveBeenCalledWith('assets/森林.png');
+    driver.store!.getState().setAssetsPanelOpen(true); render(); await settle();
+    click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle();
+    menu = openFileMenu(); await menu.onCopy(); await menu.onReveal();
+    expect(driver.copyClipboard).toHaveBeenLastCalledWith('assets/全局参考.png');
+    expect(driver.revealFile).toHaveBeenLastCalledWith('assets/全局参考.png');
+  });
+  it('图片优先复制用户保存的提示词，清空后的编辑内容不回退到生成历史', async () => {
+    key(); render(); await settle();
+    driver.imageDetails.mockResolvedValue({ record: { prompt: '用户编辑\n完整提示词' }, history: { prompt: '原始' } });
+    await openFileMenu().onCopyPrompt();
+    expect(driver.copyText).toHaveBeenLastCalledWith('用户编辑\n完整提示词');
+    expect(driver.imageDetails).toHaveBeenCalledWith(expect.objectContaining({ path: 'assets/森林.png' }), 'project-1', expect.any(AbortSignal));
+    driver.copyText.mockClear(); driver.imageDetails.mockResolvedValue({ record: { prompt: '' }, history: { prompt: '原始' } });
+    await openFileMenu().onCopyPrompt(); render();
+    expect(driver.copyText).not.toHaveBeenCalled(); expect(find((el) => el.props.children === '此资产暂无提示词')).toBeDefined();
+  });
+  it('视频按项目与完整媒体地址读取，全局资产不限定项目', async () => {
+    const video: AssetFileEntry = { name: '视频', path: '/assets/video.mp4', category: 'video', size: 10, assetUrl: 'asset://video' };
+    driver.listProject.mockResolvedValue([video]); driver.listGlobal.mockResolvedValue([video]);
+    key(); render(); await settle(); await openFileMenu().onCopyPrompt();
+    expect(driver.videoHistory).toHaveBeenCalledWith(video.path, video.assetUrl, 'project-1', expect.any(AbortSignal));
+    expect(driver.copyText).toHaveBeenLastCalledWith('视频提示词');
+    click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle(); await openFileMenu().onCopyPrompt();
+    expect(driver.videoHistory).toHaveBeenLastCalledWith(video.path, video.assetUrl, undefined, expect.any(AbortSignal));
+  });
+  it('读取失败和剪贴板失败有反馈，不伪造成功', async () => {
+    key(); render(); await settle(); driver.copyClipboard.mockResolvedValue(false);
+    await openFileMenu().onCopy(); render(); expect(find((el) => el.props.children === '复制失败，请检查文件和系统剪贴板')).toBeDefined();
+    driver.imageDetails.mockRejectedValue(new Error('db')); await openFileMenu().onCopyPrompt(); render();
+    expect(driver.copyText).not.toHaveBeenCalled(); expect(find((el) => el.props.children === '提示词读取或复制失败，请重试')).toBeDefined();
+    driver.revealFile.mockRejectedValue(new Error('offline')); await openFileMenu().onReveal(); render();
+    expect(find((el) => el.props.children === '打开目录失败，请检查文件位置和权限')).toBeDefined();
+  });
+  it.each(['project', 'tab', 'close', 'dismiss'])('提示词读取期间 %s 会取消查询且不复制迟到结果', async (change) => {
+    key(); render(); await settle();
+    let finish!: (value: unknown) => void;
+    driver.imageDetails.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const menu = openFileMenu(); const pending = menu.onCopyPrompt();
+    const signal = driver.imageDetails.mock.calls[0][2] as AbortSignal;
+    if (change === 'project') driver.store!.setState({ currentProjectId: 'project-2' });
+    else if (change === 'tab') click(all(tree, (el) => el.props.role === 'tab')[1]);
+    else if (change === 'close') driver.store!.getState().setAssetsPanelOpen(false);
+    else menu.onClose();
+    render(); finish({ record: { prompt: '迟到提示词' }, history: null }); await pending;
+    expect(signal.aborted).toBe(true); expect(driver.copyText).not.toHaveBeenCalled();
+  });
+  it('虚拟资源、离线文件与 Web 环境禁用磁盘操作，文本不提供提示词复制', async () => {
+    driver.listProject.mockResolvedValue([
+      { ...file('虚拟'), path: 'node://image' }, { ...file('离线'), availability: 'offline' },
+      { ...file('文本'), category: 'text' }, { ...file('远程'), path: 'https://example.test/image.png' },
+    ]); key(); render(); await settle();
+    const named = (name: string) => openFileMenu(cards().findIndex((el) => (el.props.file as AssetFileEntry).name === name));
+    expect(named('虚拟').canFileActions).toBe(false); expect(named('离线').canFileActions).toBe(false);
+    expect(named('文本').canCopyPrompt).toBe(false); expect(named('远程').canFileActions).toBe(false);
+    driver.native = false; expect(named('文本').canFileActions).toBe(false);
+    await fileMenu().onDelete().catch(() => {}); expect(driver.deleteFile).not.toHaveBeenCalled();
+  });
+  it('删除失败保留卡片，成功刷新列表且不重新加入残留节点引用', async () => {
+    key(); render(); await settle(); const menu = openFileMenu();
+    expect(driver.deleteFile).not.toHaveBeenCalled(); driver.deleteFile.mockRejectedValueOnce(new Error('locked'));
+    await expect(menu.onDelete()).rejects.toThrow('删除失败'); render(); expect(cards()).toHaveLength(2);
+    driver.listProject.mockResolvedValue([file('人物')]);
+    driver.nodeFile = file('森林'); driver.store!.setState({ nodes: [canvasNode('source', 'source-image')] });
+    await menu.onDelete(); render(); expect(cards().map((el) => (el.props.file as AssetFileEntry).name)).toEqual(['人物']);
+    expect(driver.deleteFile).toHaveBeenCalledWith('assets/森林.png');
+    expect(driver.store!.getState().nodes).toHaveLength(1);
+  });
+  it('全局资产原有删除按钮也先确认；确认期间切换项目不会删除旧文件', async () => {
+    key(); render(); await settle(); click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle();
+    (cards()[0].props.onDelete as () => void)(); render();
+    const menu = fileMenu(); expect(menu.confirmDelete).toBe(true); expect(driver.deleteFile).not.toHaveBeenCalled();
+    driver.store!.setState({ currentProjectId: 'project-2' }); render(); await menu.onDelete();
+    expect(driver.deleteFile).not.toHaveBeenCalled();
+  });
+  it('键盘 ContextMenu/Shift+F10 定位菜单；标签输入保留原生菜单', async () => {
+    key(); render(); await settle();
+    const event = { key: 'F10', shiftKey: true, target: { closest: () => null }, currentTarget: { focus: vi.fn(), getBoundingClientRect: () => ({ left: 20, top: 40 }) }, preventDefault: vi.fn(), stopPropagation: vi.fn() };
+    (cards()[0].props.onMenuKeyDown as (event: unknown) => void)(event); render();
+    expect(fileMenu()).toMatchObject({ x: 32, y: 52 }); fileMenu().onClose(); render();
+    const preventDefault = vi.fn();
+    (cards()[0].props.onContextMenu as (event: unknown) => void)({ target: { closest: () => ({}) }, preventDefault });
+    expect(preventDefault).not.toHaveBeenCalled(); expect(all(tree, (el) => el.type === AssetFileContextMenu)).toHaveLength(0);
+  });
+});
+
 describe('资产库 Tab 抽屉', () => {
+  it('Tab 抽屉指定浮动视频，大弹窗改为全屏且携带查看项目', async () => {
+    key(); render(); await settle();
+    expect(cards()[0].props).toMatchObject({ videoPresentation: 'inline', videoProjectId: 'project-1' });
+    driver.store!.getState().setAssetsPanelOpen(true); render(); await settle();
+    expect(cards()[0].props).toMatchObject({ videoPresentation: 'fullscreen', videoProjectId: 'project-1' });
+    click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle();
+    expect(cards()[0].props.videoProjectId).toBeUndefined();
+    expect(cards()[0].props.videoPresentation).toBe('fullscreen');
+  });
   it('画布 Tab 打开/收起，长按不连发且不发生焦点跳转', () => {
     expect(key().defaultPrevented).toBe(true);
     expect(driver.store!.getState().assetsPanelMode).toBe('drawer');
@@ -315,6 +574,198 @@ describe('资产库 Tab 抽屉', () => {
     click(button('收起资产库')); render();
     key(); render(); await settle();
     expect(cards().map((el) => (el.props.file as AssetFileEntry).name)).toEqual(['森林', '人物']);
+  });
+
+  it('目录导航按本层筛选，子目录和空目录保留，全部资产仍汇总', async () => {
+    const folders: AssetFolderEntry[] = [
+      { rootPath: '/library', relativePath: '', parentRelativePath: null, name: '素材库', fileCount: 1, availability: 'online' },
+      { rootPath: '/library', relativePath: '人物', parentRelativePath: '', name: '人物', fileCount: 1, availability: 'online' },
+      { rootPath: '/library', relativePath: '人物/表情', parentRelativePath: '人物', name: '表情', fileCount: 1, availability: 'online' },
+      { rootPath: '/library', relativePath: '空目录', parentRelativePath: '', name: '空目录', fileCount: 0, availability: 'online' },
+    ];
+    driver.listExternal.mockResolvedValue({ folders, truncated: false, files: [
+      { ...file('根目录图片'), path: '/library/root.png', source: 'folder', tags: ['夜景'] },
+      { ...file('人物图片'), path: '/library/人物/hero.png', source: 'folder' },
+      { ...file('微笑视频'), path: '/library/人物/表情/smile.mp4', category: 'video', source: 'folder' },
+    ] });
+    key(); render(); await settle();
+    click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle();
+    expect(cards()).toHaveLength(4);
+    expect(all(tree, (el) => el.props.className === 'assets-folder-picker')).toHaveLength(1);
+    expect(button('浏览文件夹 空目录')).toBeDefined();
+    click(button('浏览文件夹 素材库')); render();
+    expect(cards().map((el) => (el.props.file as AssetFileEntry).name)).toEqual(['根目录图片']);
+    click(button('浏览文件夹 人物')); render();
+    expect(cards().map((el) => (el.props.file as AssetFileEntry).name)).toEqual(['人物图片']);
+    expect(button('浏览文件夹 表情')).toBeDefined();
+    click(button('浏览文件夹 表情')); render();
+    expect(cards().map((el) => (el.props.file as AssetFileEntry).name)).toEqual(['微笑视频']);
+    click(button('浏览文件夹 空目录')); render();
+    expect(cards()).toHaveLength(0);
+    expect(all(tree, (el) => el.props.children === '此文件夹为空')).toHaveLength(1);
+    click(button('导入文件')); render();
+    expect(cards().map((el) => (el.props.file as AssetFileEntry).name)).toEqual(['全局参考']);
+    click(button('全部资产')); render();
+    expect(cards()).toHaveLength(4);
+    expect(find((el) => el.props.className === 'assets-file-waterfall').props['data-columns']).toBe(3);
+  });
+
+  it('父目录只有子目录时给出导航提示，不混入子目录文件', async () => {
+    driver.listExternal.mockResolvedValue({ truncated: false, folders: [
+      { rootPath: '/library', relativePath: '', parentRelativePath: null, name: '素材库', fileCount: 0, availability: 'online' },
+      { rootPath: '/library', relativePath: '人物', parentRelativePath: '', name: '人物', fileCount: 1, availability: 'online' },
+    ], files: [{ ...file('人物图片'), path: '/library/人物/hero.png', source: 'folder' }] });
+    key(); render(); await settle();
+    click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle();
+    click(button('浏览文件夹 素材库')); render();
+    expect(cards()).toHaveLength(0);
+    expect(all(tree, (el) => el.props.children === '此文件夹没有本层文件，请选择子文件夹浏览')).toHaveLength(1);
+    click(button('浏览文件夹 人物')); render();
+    expect(cards()).toHaveLength(1);
+  });
+
+  it('目录切换重置类型筛选，但保留搜索并复用拖拽', async () => {
+    driver.listExternal.mockResolvedValue({ truncated: false, folders: [
+      { rootPath: '/library', relativePath: '', parentRelativePath: null, name: '素材库', fileCount: 2, availability: 'online' },
+    ], files: [
+      { ...file('人物图片'), path: '/library/hero.png', source: 'folder' },
+      { ...file('人物视频'), path: '/library/hero.mp4', source: 'folder', category: 'video' },
+    ] });
+    key(); render(); await settle();
+    click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle();
+    const search = find((el) => el.props.placeholder === '搜索名称或标签…');
+    (search.props.onChange as (event: { target: { value: string } }) => void)({ target: { value: '人物' } }); render();
+    const videoFilter = find((el) => el.type === 'button' && Array.isArray(el.props.children) && el.props.children.includes('视频'));
+    click(videoFilter); render();
+    expect(cards()).toHaveLength(1);
+    click(button('浏览文件夹 素材库')); render();
+    expect(cards()).toHaveLength(2);
+    expect(find((el) => el.props.placeholder === '搜索名称或标签…').props.value).toBe('人物');
+    (cards()[0].props.onDragStart as (event: { preventDefault: () => void }) => void)({ preventDefault: vi.fn() });
+    expect(driver.drag).toHaveBeenCalledWith(expect.objectContaining({ path: '/library/hero.png' }));
+  });
+
+  it('无法访问和未扫描目录不冒充空目录，显示扫描上限提示', async () => {
+    driver.listExternal.mockResolvedValue({ files: [], truncated: true, folders: [
+      { rootPath: '/missing', relativePath: '', parentRelativePath: null, name: '离线目录', fileCount: 0, availability: 'offline' },
+      { rootPath: '/large', relativePath: '', parentRelativePath: null, name: '未扫描目录', fileCount: 0, availability: 'unscanned' },
+    ] });
+    key(); render(); await settle();
+    click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle();
+    expect(button('浏览文件夹 未扫描目录').props.disabled).toBe(true);
+    expect(all(tree, (el) => el.props.role === 'status')).toHaveLength(1);
+    click(button('浏览文件夹 离线目录')); render();
+    expect(all(tree, (el) => el.props.children === '文件夹无法访问，请检查位置或权限')).toHaveLength(1);
+  });
+
+  it('取消目录引用后回到全部资产，并忽略迟到的旧扫描', async () => {
+    const folder: AssetFolderEntry = { rootPath: '/library', relativePath: '', parentRelativePath: null,
+      name: '素材库', fileCount: 1, availability: 'online' };
+    const entry: AssetFileEntry = { ...file('外部图片'), path: '/library/hero.png', source: 'folder' };
+    driver.store!.setState((state) => ({ config: { ...state.config, assetFolders: ['/library'] } }));
+    driver.listExternal.mockResolvedValue({ files: [entry], folders: [folder], truncated: false });
+    vi.mocked(driver.store!.getState().updateConfig).mockImplementation((patch) => {
+      driver.store!.setState((state) => ({ config: { ...state.config, ...patch } }));
+    });
+    vi.mocked(driver.store!.getState().saveConfig).mockResolvedValue(undefined);
+    key(); render(); await settle();
+    click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle();
+    click(button('浏览文件夹 素材库')); render();
+    expect(cards()).toHaveLength(1);
+    driver.listExternal.mockResolvedValue({ files: [], folders: [], truncated: false });
+    click(button('移除文件夹引用 素材库')); render(); await settle();
+    expect(driver.store!.getState().config.assetFolders).toEqual([]);
+    expect(cards().map((el) => (el.props.file as AssetFileEntry).name)).toEqual(['全局参考']);
+    expect(button('全部资产').props['aria-pressed']).toBe(true);
+
+    let finishOld!: (value: { files: AssetFileEntry[]; folders: AssetFolderEntry[]; truncated: boolean }) => void;
+    driver.listExternal.mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }));
+    driver.store!.setState((state) => ({ config: { ...state.config, assetFolders: ['/old'] } })); render();
+    driver.store!.setState((state) => ({ config: { ...state.config, assetFolders: ['/new'] } })); render(); await settle();
+    finishOld({ files: [entry], folders: [folder], truncated: false }); await settle();
+    expect(all(tree, (el) => el.props['aria-label'] === '浏览文件夹 素材库')).toHaveLength(0);
+    expect(cards().map((el) => (el.props.file as AssetFileEntry).name)).toEqual(['全局参考']);
+  });
+
+  it('文件夹右键创建真实子目录，失败保留名称并显示错误', async () => {
+    key(); render(); await settle();
+    click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle();
+    const context = button('导入文件').props.onContextMenu as (event: unknown) => void;
+    context({ preventDefault: vi.fn(), stopPropagation: vi.fn(), currentTarget: {}, clientX: 100, clientY: 120 }); render();
+    const menuItem = (label: string) => find((el) => el.props.role === 'menuitem' && (el.props.children as unknown[]).includes(label));
+    click(menuItem('新建子文件夹')); render();
+    (button('子文件夹名称').props.onChange as (event: unknown) => void)({ target: { value: '参考图' } }); render();
+    driver.createFolder.mockRejectedValueOnce(new Error('同名文件夹或文件已存在'));
+    (find((el) => el.props['aria-label'] === '新建子文件夹').props.onSubmit as (event: unknown) => void)({ preventDefault: vi.fn() });
+    render(); await settle();
+    expect(driver.createFolder).toHaveBeenCalledWith({ kind: 'global' }, [], '参考图');
+    expect(button('子文件夹名称').props.value).toBe('参考图');
+    expect(find((el) => el.props.role === 'alert').props.children).toBe('同名文件夹或文件已存在');
+    (find((el) => el.props['aria-label'] === '新建子文件夹').props.onSubmit as (event: unknown) => void)({ preventDefault: vi.fn() });
+    render(); await settle(); await settle();
+    expect(all(tree, (el) => el.props['aria-label'] === '新建子文件夹')).toHaveLength(0);
+    expect(driver.listGlobal.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it('右键系统复制与粘贴读取当前剪贴板，并把目录传给原生传输', async () => {
+    key(); render(); await settle();
+    click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle();
+    const openContext = () => {
+      (button('导入文件').props.onContextMenu as (event: unknown) => void)({ preventDefault: vi.fn(), stopPropagation: vi.fn(), currentTarget: {}, clientX: 100, clientY: 120 }); render();
+    };
+    const item = (label: string) => find((el) => el.props.role === 'menuitem' && (el.props.children as unknown[]).includes(label));
+    openContext(); click(item('复制文件夹')); render(); await settle();
+    expect(driver.copyClipboard).toHaveBeenCalledExactlyOnceWith('/global/file');
+    driver.readClipboard.mockResolvedValueOnce(['/library/新剪贴板']);
+    openContext(); click(item('粘贴')); render(); await settle(); await settle();
+    expect(driver.readClipboard).toHaveBeenCalledTimes(1);
+    expect(driver.copyFolder).toHaveBeenCalledWith('/library/新剪贴板', '/global/file', expect.objectContaining({ signal: expect.any(AbortSignal), onProgress: expect.any(Function) }));
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+  });
+
+  it('粘贴中可以取消，失败后刷新目录且不显示成功提示', async () => {
+    key(); render(); await settle();
+    click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle();
+    driver.copyFolder.mockImplementationOnce((_source: string, _target: string, options: { signal: AbortSignal }) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new Error('已取消')), { once: true });
+    }));
+    (button('导入文件').props.onContextMenu as (event: unknown) => void)({ preventDefault: vi.fn(), stopPropagation: vi.fn(), currentTarget: {}, clientX: 100, clientY: 120 }); render();
+    click(find((el) => el.props.role === 'menuitem' && (el.props.children as unknown[]).includes('粘贴'))); render(); await settle();
+    const before = driver.listGlobal.mock.calls.length;
+    click(find((el) => el.props.children === '取消复制')); render(); await settle(); await settle();
+    expect(driver.listGlobal.mock.calls.length).toBeGreaterThan(before);
+    expect(all(tree, (el) => el.props.children === '复制已取消；已复制内容保留在目标目录')).toHaveLength(1);
+    expect(button('导入文件').props.disabled).toBe(false);
+  });
+
+  it('图片点击打开预览，关闭后保留目录和文件列表；切换项目使预览失效', async () => {
+    driver.listGlobal.mockResolvedValue([{ ...file('参考图'), source: 'global', assetUrl: 'https://images.test/reference.png' }]);
+    key(); render(); await settle();
+    click(all(tree, (el) => el.props.role === 'tab')[1]); render(); await settle();
+    click(button('导入文件')); render();
+    (cards()[0].props.onImagePreview as () => void)(); render();
+    const preview = find((el) => el.type === 'asset-image-preview');
+    expect(preview.props.initialPath).toBe('assets/参考图.png');
+    expect(preview.props.projectId).toBeUndefined();
+    expect(driver.store!.getState().assetsPanelOpen).toBe(true);
+    expect(button('导入文件').props['aria-pressed']).toBe(true);
+    (preview.props.onClose as () => void)(); render();
+    expect(all(tree, (el) => el.type === 'asset-image-preview')).toHaveLength(0);
+    expect(cards().map((el) => (el.props.file as AssetFileEntry).name)).toEqual(['参考图']);
+    expect(button('导入文件').props['aria-pressed']).toBe(true);
+    (cards()[0].props.onImagePreview as () => void)(); render();
+    driver.store!.setState({ currentProjectId: 'other-project' }); render();
+    expect(all(tree, (el) => el.type === 'asset-image-preview')).toHaveLength(0);
+  });
+
+  it('项目图片预览关联当前查看项目，并不受列表增量展示上限限制', async () => {
+    driver.listProject.mockResolvedValue(Array.from({ length: 55 }, (_, i) => ({ ...file(`图片${i}`), assetUrl: `https://images.test/${i}.png` })));
+    key(); render(); await settle();
+    (cards()[0].props.onImagePreview as () => void)(); render();
+    const preview = find((el) => el.type === 'asset-image-preview');
+    expect(preview.props.projectId).toBe('project-1');
+    expect((preview.props.files as AssetFileEntry[])).toHaveLength(55);
+    expect(cards()).toHaveLength(48);
   });
 
   it('Esc 收起，确认弹窗打开时先保留抽屉', () => {

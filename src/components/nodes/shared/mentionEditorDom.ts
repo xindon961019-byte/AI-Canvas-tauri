@@ -241,6 +241,11 @@ export function buildChipEl(
     displayId.className = 'prompt-chip-id';
     displayId.textContent = `#${meta.displayId}`;
     span.appendChild(displayId);
+  } else if (label) {
+    const displayId = document.createElement('span');
+    displayId.className = 'prompt-chip-id';
+    displayId.textContent = label;
+    span.appendChild(displayId);
   }
   return span;
 }

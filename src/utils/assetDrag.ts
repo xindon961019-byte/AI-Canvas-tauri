@@ -39,9 +39,10 @@ export async function prepareDragIcon(): Promise<void> {
  * 同步发起文件拖拽（务必在 dragstart 内同步调用）。
  * 图片用自身做预览图，其它类型用预创建的占位图。
  */
-export function startAssetDrag(file: AssetFileEntry): void {
-  if (!file.path) return;
+export function startAssetDrag(file: AssetFileEntry, onEnd?: () => void): void {
+  if (!file.path) { onEnd?.(); return; }
   const icon = file.category === 'image' ? file.path : (_fallbackIconPath || file.path);
-  void startDrag({ item: [file.path], icon, mode: 'copy' })
-    .catch((err) => console.warn('[assetDrag] startDrag 失败:', err));
+  // 原生拖拽会暂停 DOM 鼠标事件；完成和取消统一通过插件回调释放监听。
+  void startDrag({ item: [file.path], icon, mode: 'copy' }, onEnd ? () => onEnd() : undefined)
+    .catch(() => { onEnd?.(); console.warn('[assetDrag] startDrag 失败'); });
 }

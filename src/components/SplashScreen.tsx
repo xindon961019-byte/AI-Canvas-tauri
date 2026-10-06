@@ -7,6 +7,8 @@ import gsap from 'gsap';
 
 interface SplashScreenProps {
   onComplete: () => void;
+  ready?: boolean;
+  label?: string;
 }
 
 /* ============================================
@@ -88,9 +90,11 @@ function CosmicParticles() {
   );
 }
 
-export default function SplashScreen({ onComplete }: SplashScreenProps) {
+export default function SplashScreen({ onComplete, ready = true, label = 'AI Canvas 正在启动' }: SplashScreenProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const onCompleteRef = useRef(onComplete);
+  const readyRef = useRef(ready);
+  const finishRef = useRef<() => void>(() => {});
   const logoWrapRef = useRef<HTMLDivElement>(null);
   const titleRef = useRef<HTMLDivElement>(null);
   const titleInnerRef = useRef<HTMLSpanElement>(null);
@@ -103,10 +107,16 @@ export default function SplashScreen({ onComplete }: SplashScreenProps) {
   }, [onComplete]);
 
   useEffect(() => {
+    readyRef.current = ready;
+    finishRef.current();
+  }, [ready]);
+
+  useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     let skip = () => {};
+    let completeAnimation = () => {};
     const ctx = gsap.context(() => {
       const sparklePath = logoWrapRef.current?.querySelector('[data-logo-sparkle]') as SVGPathElement | null;
       const squirclePath = logoWrapRef.current?.querySelector('[data-logo-squircle]') as SVGPathElement | null;
@@ -114,9 +124,10 @@ export default function SplashScreen({ onComplete }: SplashScreenProps) {
       const cosmicParticles = container.querySelectorAll('[data-cosmic-particle]');
       let timeline: gsap.core.Timeline | null = null;
       let finishing = false;
+      let animationDone = false;
 
-      const finish = (duration = 0.2) => {
-        if (finishing) return;
+      const fadeOut = (duration = 0.2) => {
+        if (!animationDone || !readyRef.current || finishing) return;
         finishing = true;
         timeline?.kill();
         gsap.to(container, {
@@ -124,11 +135,30 @@ export default function SplashScreen({ onComplete }: SplashScreenProps) {
           duration,
           ease: 'power2.inOut',
           overwrite: true,
-          onComplete: () => onCompleteRef.current(),
+          onComplete: () => {
+            if (readyRef.current) onCompleteRef.current();
+            else {
+              finishing = false;
+              gsap.set(container, { opacity: 1 });
+            }
+          },
         });
       };
+      finishRef.current = () => {
+        if (!readyRef.current && finishing) {
+          gsap.killTweensOf(container);
+          gsap.set(container, { opacity: 1 });
+          finishing = false;
+        } else fadeOut();
+      };
+      const finish = (duration = 0.2) => {
+        animationDone = true;
+        fadeOut(duration);
+      };
+      completeAnimation = () => finish();
 
-      skip = () => finish(0.1);
+      // 加载未完成时不允许跳过，避免露出尚未布局的画布。
+      skip = () => { if (readyRef.current) finish(0.1); };
 
       gsap.set([logoWrapRef.current, titleRef.current], { opacity: 0, scale: 0.88 });
       gsap.set(titleRef.current, { y: 6 });
@@ -251,7 +281,7 @@ export default function SplashScreen({ onComplete }: SplashScreenProps) {
         .to({}, { duration: 0.08 });
     }, container);
 
-    const completionTimeout = window.setTimeout(() => skip(), 1400);
+    const completionTimeout = window.setTimeout(() => completeAnimation(), 1400);
     window.addEventListener('keydown', skip);
     container.addEventListener('pointerdown', skip);
 
@@ -259,6 +289,7 @@ export default function SplashScreen({ onComplete }: SplashScreenProps) {
       window.clearTimeout(completionTimeout);
       window.removeEventListener('keydown', skip);
       container.removeEventListener('pointerdown', skip);
+      finishRef.current = () => {};
       ctx.revert();
     };
   }, []);
@@ -268,7 +299,8 @@ export default function SplashScreen({ onComplete }: SplashScreenProps) {
       data-tauri-drag-region
       ref={containerRef}
       role="status"
-      aria-label="AI Canvas 正在启动"
+      aria-label={label}
+      aria-busy={!ready}
       className="fixed inset-0 z-[9999] select-none overflow-hidden flex items-center justify-center bg-black rounded-[16px]"
     >
       {/* 宇宙微尘 */}

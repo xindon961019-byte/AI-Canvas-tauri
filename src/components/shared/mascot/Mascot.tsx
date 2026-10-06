@@ -85,6 +85,12 @@ import {
   Mesh,
   InstancedMesh,
   SphereGeometry,
+  CylinderGeometry,
+  TorusGeometry,
+  ExtrudeGeometry,
+  CanvasTexture,
+  SRGBColorSpace,
+  type BufferGeometry,
   PlaneGeometry,
   MeshBasicMaterial,
   ShapeGeometry,
@@ -347,6 +353,8 @@ void main() {
 export interface MascotHandle {
   /** 请求播放片段。返回是否真的播放 —— 优先级不够时会被当前片段挡下。 */
   playClip: (id: MascotClipId) => boolean;
+  /** 片场帽子与头部共用变换及深度缓冲，不使用浮在面前的 DOM 贴图。 */
+  setDirectorHat: (visible: boolean) => void;
 }
 
 interface MascotProps {
@@ -374,7 +382,7 @@ export default function Mascot({
 }: MascotProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   // 句柄本身保持稳定，playClip 在场景建好后填进去，避免父组件拿到半成品
-  const handle = useRef<MascotHandle>({ playClip: () => false });
+  const handle = useRef<MascotHandle>({ playClip: () => false, setDirectorHat: () => {} });
   // 把最新 loading 放进 ref，供常驻渲染循环读取（避免重建场景）
   const loadingRef = useRef(loading);
   const statusRef = useRef(status);
@@ -452,6 +460,100 @@ export default function Mascot({
     /* ── 头部组（整体可轻微转动）── */
     const head = new Group();
     scene.add(head);
+
+    // 彩蛋首次触发才创建帽子；帽冠包住绒毛，帽檐向前伸出，由真实深度决定遮挡。
+    let directorHat: Group | null = null;
+    let hatBodyMaterial: MeshPhysicalMaterial | null = null;
+    let hatTrimMaterial: MeshPhysicalMaterial | null = null;
+    let hatBadgeTexture: CanvasTexture | null = null;
+    const hatMeshes: Mesh[] = [];
+    const badgeCanvas = document.createElement('canvas');
+    const updateHatPalette = () => {
+      if (!directorHat) return;
+      const tokens = getComputedStyle(container);
+      const bodyColor = tokens.getPropertyValue('--theme-hover').trim();
+      const trimColor = tokens.getPropertyValue('--accent-amber').trim();
+      hatBodyMaterial?.color.set(bodyColor);
+      hatTrimMaterial?.color.set(trimColor);
+      const context = badgeCanvas.getContext('2d');
+      if (context && hatBadgeTexture) {
+        context.clearRect(0, 0, 128, 64);
+        context.fillStyle = tokens.getPropertyValue('--theme-surface').trim();
+        context.fillRect(0, 0, 128, 64);
+        context.strokeStyle = trimColor;
+        context.lineWidth = 4;
+        context.strokeRect(3, 3, 122, 58);
+        context.fillStyle = trimColor;
+        context.font = 'bold 34px sans-serif';
+        context.textAlign = 'center';
+        context.textBaseline = 'middle';
+        context.fillText('DIR.', 64, 34);
+        hatBadgeTexture.needsUpdate = true;
+      }
+    };
+    const ensureDirectorHat = () => {
+      if (directorHat) return directorHat;
+      const hat = new Group();
+      directorHat = hat;
+      head.add(hat);
+      hatBodyMaterial = new MeshPhysicalMaterial({ roughness: 0.85, metalness: 0.05 });
+      hatTrimMaterial = new MeshPhysicalMaterial({ roughness: 0.55, metalness: 0.25 });
+      const addMesh = (geometry: BufferGeometry, material: MeshPhysicalMaterial | MeshBasicMaterial) => {
+        const mesh = new Mesh(geometry, material);
+        hat.add(mesh);
+        hatMeshes.push(mesh);
+        return mesh;
+      };
+      addMesh(new SphereGeometry(1.255, 48, 24, 0, Math.PI * 2, 0, Math.acos(0.58 / 1.255)), hatBodyMaterial);
+      const band = addMesh(new CylinderGeometry(1.095, 1.13, 0.12, 48, 1, true), hatBodyMaterial);
+      band.position.y = 0.585;
+      const piping = addMesh(new TorusGeometry(1.13, 0.015, 6, 64), hatTrimMaterial);
+      piping.rotation.x = Math.PI / 2;
+      piping.position.y = 0.525;
+
+      const brimShape = new Shape();
+      brimShape.moveTo(-1.06, 0.45);
+      brimShape.quadraticCurveTo(0, 0.94, 1.06, 0.45);
+      brimShape.quadraticCurveTo(1.19, 1.32, 0.58, 1.68);
+      brimShape.quadraticCurveTo(0, 1.87, -0.58, 1.68);
+      brimShape.quadraticCurveTo(-1.19, 1.32, -1.06, 0.45);
+      brimShape.closePath();
+      const brim = addMesh(new ExtrudeGeometry(brimShape, {
+        depth: 0.035, bevelEnabled: true, bevelSize: 0.018, bevelThickness: 0.012, bevelSegments: 2, steps: 1,
+      }), hatBodyMaterial);
+      brim.rotation.x = Math.PI / 2;
+      brim.position.y = 0.54;
+
+      badgeCanvas.width = 128;
+      badgeCanvas.height = 64;
+      hatBadgeTexture = new CanvasTexture(badgeCanvas);
+      hatBadgeTexture.colorSpace = SRGBColorSpace;
+      const badge = addMesh(new PlaneGeometry(0.48, 0.24), new MeshBasicMaterial({ map: hatBadgeTexture }));
+      badge.position.set(0, 0.88, 0.935);
+      badge.rotation.x = -0.7;
+      const button = addMesh(new SphereGeometry(0.05, 12, 8), hatTrimMaterial);
+      button.position.y = 1.27;
+      updateHatPalette();
+      return hat;
+    };
+    const mascotApi = handle.current;
+    mascotApi.setDirectorHat = (visible) => {
+      if (!visible && !directorHat) return;
+      const hat = directorHat ?? ensureDirectorHat();
+      gsap.killTweensOf([hat.position, hat.rotation]);
+      if (visible) {
+        hat.visible = true;
+        hat.position.y = reduceMotionRef.current ? 0 : 0.95;
+        hat.rotation.z = reduceMotionRef.current ? -0.06 : -0.24;
+        gsap.to(hat.position, { y: 0, duration: reduceMotionRef.current ? 0 : 0.65, ease: 'back.out(1.2)' });
+        gsap.to(hat.rotation, { z: -0.06, duration: reduceMotionRef.current ? 0 : 0.65, ease: 'power3.out' });
+      } else {
+        gsap.to(hat.position, {
+          y: 0.35, duration: reduceMotionRef.current ? 0 : 0.18, ease: 'power2.out',
+          onComplete: () => { hat.visible = false; },
+        });
+      }
+    };
 
     /* ── 球体内核：负责实体明暗、射线命中和加载形态 ── */
     const sphereMat = new MeshPhysicalMaterial({
@@ -826,6 +928,7 @@ export default function Mascot({
       const nextTheme = themeRef.current;
       if (nextTheme !== appliedTheme) {
         appliedTheme = nextTheme;
+        updateHatPalette();
         const palette = MASCOT_PALETTE[appliedTheme];
         sphereMat.color.setHex(palette.body);
         sphereMat.emissive.setHex(palette.emissive);
@@ -1062,6 +1165,14 @@ export default function Mascot({
       for (const material of eyeMaterials) material.dispose();
       // 场景销毁后不能再接受播放请求，否则会写进已经失效的状态
       api.playClip = () => false;
+      api.setDirectorHat = () => {};
+      if (directorHat) gsap.killTweensOf([directorHat.position, directorHat.rotation]);
+      const hatMaterials = new Set(hatMeshes.flatMap((mesh) => Array.isArray(mesh.material) ? mesh.material : [mesh.material]));
+      for (const mesh of hatMeshes) {
+        mesh.geometry.dispose();
+      }
+      for (const material of hatMaterials) material.dispose();
+      hatBadgeTexture?.dispose();
       loadTween?.kill();
       if (orbitRibbons) {
         scene.remove(orbitRibbons.group);
