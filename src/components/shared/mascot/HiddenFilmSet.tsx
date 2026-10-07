@@ -41,7 +41,7 @@ export default function HiddenFilmSet({
   const takeCountRef = useRef(0);
   const previousLineRef = useRef(-1);
   const dismissClickRef = useRef(false);
-  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clickTimerRef = useRef<number | null>(null);
   const [take, setTake] = useState<Take | null>(null);
   const id = useId().replace(/:/g, '');
   const showing = Boolean(take) && available;

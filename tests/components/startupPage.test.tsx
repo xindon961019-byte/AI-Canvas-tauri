@@ -18,6 +18,7 @@ vi.mock('react', async () => ({
   useMemo: <T,>(factory: () => T) => factory(),
   useRef: <T,>(value: T) => ({ current: value }),
   useEffect: (effect: () => void | (() => void)) => { driver.effects.push(effect); },
+  useLayoutEffect: (effect: () => void | (() => void)) => { driver.effects.push(effect); },
 }));
 vi.mock('zustand/react/shallow', () => ({ useShallow: <T,>(selector: T) => selector }));
 vi.mock('react-dom', () => ({ createPortal: (children: unknown) => children }));

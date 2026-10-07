@@ -4,7 +4,7 @@
  * 浏览器原生 loading="lazy" 只推迟首次加载，不保证滚出长列表后的解码位图可回收。
  * 该组件保留 img 元素和布局，只管理资源 src 生命周期，适合资产、角色和消息列表。
  */
-import { useRef, type ImgHTMLAttributes } from 'react';
+import { useRef, useState, type ImgHTMLAttributes } from 'react';
 import { useViewportMediaSource } from '../../hooks/useViewportMediaSource';
 
 interface ViewportImageProps extends Omit<ImgHTMLAttributes<HTMLImageElement>, 'src'> {
@@ -24,16 +24,33 @@ export default function ViewportImage({
   unloadDelayMs = 2_000,
   loading = 'lazy',
   decoding = 'async',
+  onLoad,
+  style,
   ...imageProps
 }: ViewportImageProps) {
   const imageRef = useRef<HTMLImageElement>(null);
+  const [imageSize, setImageSize] = useState<{ source: string; width: number; height: number }>();
   const mountedSrc = useViewportMediaSource(src, imageRef, { eager, rootMargin, unloadDelayMs });
+  const retainedSize = imageSize?.source === src ? imageSize : undefined;
 
   return (
     <img
       {...imageProps}
       ref={imageRef}
       src={mountedSrc}
+      style={{ aspectRatio: retainedSize ? `${retainedSize.width} / ${retainedSize.height}` : undefined, ...style }}
+      onLoad={(event) => {
+        const { naturalWidth, naturalHeight } = event.currentTarget;
+        if (mountedSrc && naturalWidth > 0 && naturalHeight > 0) {
+          // 卸载 src 后仍保留图片比例，避免瀑布流卡片塌陷并改变滚动位置。
+          setImageSize((previous) => (
+            previous?.source === mountedSrc && previous.width === naturalWidth && previous.height === naturalHeight
+              ? previous
+              : { source: mountedSrc, width: naturalWidth, height: naturalHeight }
+          ));
+        }
+        onLoad?.(event);
+      }}
       loading={loading}
       decoding={decoding}
       data-viewport-image={mountedSrc ? 'loaded' : 'deferred'}

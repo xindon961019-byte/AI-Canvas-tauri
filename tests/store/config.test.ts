@@ -227,20 +227,20 @@ describe('config hydration guard', () => {
     }));
   });
 
-  it('defaults to the last project and preserves the project library startup preference', async () => {
-    expect(useAppStore.getState().config.startupView).toBe('last-project');
+  it('defaults to the project library and preserves the last-project startup preference', async () => {
+    expect(useAppStore.getState().config.startupView).toBe('project-library');
     fileMocks.loadConfig.mockResolvedValue({
       providers: {},
       theme: 'dark',
-      startupView: 'project-library',
+      startupView: 'last-project',
     });
 
     await useAppStore.getState().loadConfig();
     await useAppStore.getState().saveConfig({ silent: true });
 
-    expect(useAppStore.getState().config.startupView).toBe('project-library');
+    expect(useAppStore.getState().config.startupView).toBe('last-project');
     expect(fileMocks.saveConfig.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
-      startupView: 'project-library',
+      startupView: 'last-project',
     }));
   });
 

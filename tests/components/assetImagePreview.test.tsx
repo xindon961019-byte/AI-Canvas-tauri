@@ -265,7 +265,7 @@ describe('asset image fullscreen preview', () => {
     await settle();
 
     // 检查提示词芯片渲染
-    const chip = find((element) => element.props.className && String(element.props.className).includes('prompt-chip-node'));
+    const chip = find((element) => String(element.props.className ?? '').includes('prompt-chip-node'));
     expect(chip).toBeDefined();
     expect(chip.props['data-ref-id']).toBe('node-c90a1u5s7');
 

@@ -450,7 +450,7 @@ describe('启动页资产入口与最近使用', () => {
     driver.store!.getState().setAssetsPanelOpen(true, 'page', { tab: 'permanent', folder: { kind: 'all' } });
     render(); await settle();
     (cards()[0].props.onDragStart as (event: unknown) => void)({ preventDefault: vi.fn() });
-    expect(driver.drag).toHaveBeenCalledWith(cards()[0].props.file, expect.any(Function));
+    expect(driver.drag).toHaveBeenCalledWith(cards()[0].props.file, expect.any(Function), undefined);
     expect(driver.store!.getState()).toMatchObject({ assetsPanelOpen: true, assetsPanelMode: 'page', currentProjectId: null });
     expect(driver.cursor).not.toHaveBeenCalled();
     expect(isExternalDropCaptured()).toBe(true);
@@ -622,7 +622,7 @@ describe('资源管理弹窗拖出后收起', () => {
       getBoundingClientRect: () => ({ left: 100, right: 400, top: 80, bottom: 300, width: 300, height: 220 }),
     }) } };
     (cards()[0].props.onDragStart as (event: unknown) => void)(event);
-    expect(driver.drag).toHaveBeenCalledWith(cards()[0].props.file, expect.any(Function));
+    expect(driver.drag).toHaveBeenCalledWith(cards()[0].props.file, expect.any(Function), event.currentTarget);
     expect(driver.store!.getState().assetsPanelOpen).toBe(true);
     await vi.advanceTimersByTimeAsync(0);
   }
@@ -958,7 +958,7 @@ describe('资产库 Tab 抽屉', () => {
     expect(cards()).toHaveLength(2);
     expect(find((el) => el.props.placeholder === '搜索名称或标签…').props.value).toBe('人物');
     (cards()[0].props.onDragStart as (event: { preventDefault: () => void }) => void)({ preventDefault: vi.fn() });
-    expect(driver.drag).toHaveBeenCalledWith(expect.objectContaining({ path: '/library/hero.png' }), expect.any(Function));
+    expect(driver.drag).toHaveBeenCalledWith(expect.objectContaining({ path: '/library/hero.png' }), expect.any(Function), undefined);
   });
 
   it('无法访问和未扫描目录不冒充空目录，显示扫描上限提示', async () => {
@@ -1079,7 +1079,7 @@ describe('资产库 Tab 抽屉', () => {
     key(); render(); await settle();
     (cards()[0].props.onImagePreview as () => void)(); render();
     const preview = find((el) => el.type === 'asset-image-preview');
-    expect(preview.props.projectId).toBe('project-1');
+    expect((preview.props.projectIdForFile as (file: AssetFileEntry) => string | undefined)(cards()[0].props.file as AssetFileEntry)).toBe('project-1');
     expect((preview.props.files as AssetFileEntry[])).toHaveLength(55);
     expect(cards()).toHaveLength(48);
   });
@@ -1098,7 +1098,7 @@ describe('资产库 Tab 抽屉', () => {
     key(); render(); await settle();
     const card = cards()[0];
     (card.props.onDragStart as (event: { preventDefault: () => void }) => void)({ preventDefault: vi.fn() });
-    expect(driver.drag).toHaveBeenCalledWith(card.props.file);
+    expect(driver.drag).toHaveBeenCalledWith(card.props.file, undefined, undefined);
     expect(driver.store!.getState().assetsPanelOpen).toBe(false);
   });
 

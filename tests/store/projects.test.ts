@@ -864,6 +864,8 @@ describe('project switching', () => {
 
   it('restores the last successfully opened project instead of the newest saved project', async () => {
     stubInitializationActions();
+    // 默认启动视图已改为项目库，只有 last-project 才会在初始化时恢复上次项目。
+    useAppStore.setState({ config: { ...useAppStore.getState().config, startupView: 'last-project' } });
     metadataMocks.getLastActiveProjectId.mockResolvedValue('project-remembered');
     fileMocks.loadProjectsList.mockResolvedValue([
       {

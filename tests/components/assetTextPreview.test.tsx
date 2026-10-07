@@ -161,7 +161,7 @@ describe('AssetThumb - 文本预览 (Text Preview)', () => {
     expect((tree as Element).props.textPreview).toBe(sample);
 
     // 渲染 AssetTextPreview
-    const rendered = renderPreview((tree as Element).props as Parameters<typeof AssetTextPreview>[0]);
+    const rendered = renderPreview((tree as Element).props as unknown as Parameters<typeof AssetTextPreview>[0]);
     const wrap = findByClassName(rendered, 'assets-card-text-wrap');
     expect(wrap).toBeDefined();
     expect(findByClassName(rendered, 'assets-card-text-content')?.props.children).toBe(sample);

@@ -29,8 +29,8 @@ describe('最近使用持久化与资产解析', () => {
     const db = await import('../../src/services/indexedDbService');
     await Promise.all(Array.from({ length: 60 }, (_, i) => db.recordRecentAssetUsage(`asset-${i}`, i)));
     let entries = await db.getRecentAssetUsage();
-    expect(entries).toHaveLength(50); expect(entries[0]).toEqual({ assetId: 'asset-59', usedAt: 59 });
-    expect(entries[49].assetId).toBe('asset-10');
+    expect(entries).toHaveLength(10); expect(entries[0]).toEqual({ assetId: 'asset-59', usedAt: 59 });
+    expect(entries[9].assetId).toBe('asset-50');
     await Promise.all([db.recordRecentAssetUsage('asset-20', 100), db.recordRecentAssetUsage('asset-20', 15)]);
     entries = await db.getRecentAssetUsage();
     expect(entries[0]).toEqual({ assetId: 'asset-20', usedAt: 100 });
@@ -103,12 +103,12 @@ describe('最近使用持久化与资产解析', () => {
     for (let i = 0; i < 20; i++) { await db.putAssetIndex(index(`asset-${i}`)); await db.recordRecentAssetUsage(`asset-${i}`, i); }
     await db.putAssetIndex(index('asset-19', '/global/file/重命名.png'));
     const entries = await loadRecentAssets(scope);
-    expect(entries).toHaveLength(12); expect(entries[0].file.name).toBe('重命名.png');
-    expect(entries[0].usedAt).toBe(19); expect(driver.stat).toHaveBeenCalledTimes(12);
+    expect(entries).toHaveLength(10); expect(entries[0].file.name).toBe('重命名.png');
+    expect(entries[0].usedAt).toBe(19); expect(driver.stat).toHaveBeenCalledTimes(10);
     const controller = new AbortController();
     driver.stat.mockImplementation(async () => { controller.abort(); return { isFile: true, size: 42 }; });
     expect(await loadRecentAssets(scope, controller.signal)).toEqual([]);
-    expect(await db.getRecentAssetUsage()).toHaveLength(20);
+    expect(await db.getRecentAssetUsage()).toHaveLength(10);
   });
 
   it('Store Action 只在事务保存成功后更新刷新标识，记录失败不影响业务', async () => {

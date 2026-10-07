@@ -33,6 +33,12 @@ vi.mock('react', async () => {
       if (old && deps.length === old.deps.length && deps.every((value, i) => Object.is(value, old.deps[i]))) return;
       driver.pending[index] = () => { old?.cleanup?.(); driver.effects[index] = { deps, cleanup: effect() ?? undefined }; };
     },
+    useRef: <T,>(value: T) => ({ current: value }),
+    useLayoutEffect: (effect: () => void | (() => void), deps: readonly unknown[]) => {
+      const index = driver.effectIndex++; const old = driver.effects[index];
+      if (old && deps.length === old.deps.length && deps.every((v, i) => Object.is(v, old.deps[i]))) return;
+      driver.pending[index] = () => { old?.cleanup?.(); driver.effects[index] = { deps, cleanup: effect() ?? undefined }; };
+    },
   };
 });
 vi.mock('zustand/react/shallow', () => ({ useShallow: <T,>(selector: T) => selector }));
