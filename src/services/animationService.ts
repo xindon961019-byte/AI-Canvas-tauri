@@ -1,8 +1,9 @@
-/** 原图留在项目文件中；原生 PNG 响应仅转为调用期 Blob，不进入持久化。 */
+/** 原图保持不变；原生派生 PNG 缓存于项目 .thumbnail，响应只转为调用期 Blob。 */
 import { invoke } from '@tauri-apps/api/core';
 import type { CSSProperties } from 'react';
 import type { BaseNodeData } from '../types';
 import { ANIMATION_FRAME_GRIDS } from '../types';
+import { getProjectDataDir, isTauriEnv } from './fs/core';
 import type { AnimationFrameEdit, AnimationPreviewResult, AnimationProcessing, AnimationSheet } from '../types/animation';
 
 type AnimationSourceData = Pick<BaseNodeData, 'animationSheet' | 'animationFrames' | 'animationAction'>;
@@ -28,7 +29,7 @@ export function animationEdits(data: AnimationSourceData & Pick<BaseNodeData, 'a
   const edits = data.animationEdits;
   if (edits?.length === count && new Set(edits.map((edit) => edit.sourceIndex)).size === count
     && edits.every((edit) => Number.isInteger(edit.sourceIndex) && edit.sourceIndex >= 0 && edit.sourceIndex < count
-      && Number.isInteger(edit.offsetX) && Number.isInteger(edit.offsetY)) && edits.some((edit) => edit.enabled)) return edits;
+      && Number.isFinite(edit.offsetX) && Number.isFinite(edit.offsetY)) && edits.some((edit) => edit.enabled)) return edits;
   return Array.from({ length: count }, (_, sourceIndex) => ({ sourceIndex, enabled: true, offsetX: 0, offsetY: 0 }));
 }
 
@@ -58,9 +59,16 @@ export interface AnimationPreview extends Omit<AnimationPreviewResult, 'pngBase6
   dispose: () => void;
 }
 
-export async function prepareAnimationPreview(inputPath: string, sheet: AnimationSheet, processing: AnimationProcessing): Promise<AnimationPreview> {
+export async function prepareAnimationPreview(inputPath: string, sheet: AnimationSheet, processing: AnimationProcessing, projectId?: string | null): Promise<AnimationPreview> {
+  // 捕获调用方项目，不能在异步目录解析后改用当前项目。
+  let projectDir: string | null = null;
+  if (projectId && isTauriEnv()) {
+    try { projectDir = await getProjectDataDir(projectId); }
+    catch { /* 缓存目录不可用时仍允许本次预览。 */ }
+  }
   const result = await invoke<AnimationPreviewResult>('preview_sprite_sheet', {
     inputPath, options: { cols: sheet.cols, rows: sheet.rows, frameCount: sheet.frameCount, ...processing },
+    ...(projectDir ? { projectDir } : {}),
   });
   if (!result.pngBase64 || result.pngBase64.length > 96 * 1024 * 1024
     || result.frames.length !== sheet.frameCount || result.cellWidth < 1 || result.cellHeight < 1) {

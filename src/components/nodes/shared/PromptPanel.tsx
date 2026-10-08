@@ -2,6 +2,7 @@
  * PromptPanel 提示词面板 — AI 生成节点的核心输入面板，集成模型选择器、提示词编辑器、质量/比例/视频参数、生成按钮、/ 指令菜单
  */
 import Select from '../../shared/Select';
+import { Icon } from '@iconify/react';
 import LazyLoadBoundary from '../../shared/LazyLoadBoundary';
 import { lazy, Suspense, useState, useRef, useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import { useReducedMotion } from 'framer-motion';
@@ -13,7 +14,7 @@ function paintPolishBadge(ctx: CanvasRenderingContext2D, width: number, height: 
   ctx.fill();
 }
 // 生成中的思考球：仅在生成时按需加载
-const ThinkingOrb = lazy(() => import('thinking-orbs').then((m) => ({ default: m.ThinkingOrb })));
+const ThinkingOrb = lazy(() => import('../../../vendor/generation-effects/thinking-orbs/src').then((m) => ({ default: m.ThinkingOrb })));
 import type {
   AnimationAction,
   CameraAperture,
@@ -83,7 +84,7 @@ function getImageRatioClassName(ratio: string): string {
   return width > height ? 'img-rp-wide' : 'img-rp-tall';
 }
 
-const ANIMATION_ACTIONS: AnimationAction[] = ['idle', 'walk', 'run', 'jump', 'attack', 'hit'];
+const ANIMATION_ACTIONS: AnimationAction[] = ['idle', 'walk', 'run', 'jump', 'attack', 'hit', 'custom'];
 const IMAGE_BATCH_COUNTS = Array.from({ length: MAX_IMAGE_BATCH_COUNT - 1 }, (_, index) => index + 2);
 const BATCH_LONG_PRESS_MS = 450;
 
@@ -333,6 +334,8 @@ function AnimationPoseIcon({ action }: { action: AnimationAction }) {
   };
 
   switch (action) {
+    case 'custom':
+      return <Icon icon="mdi:pencil-outline" width={20} height={20} aria-hidden="true" />;
     case 'walk':
       return <svg {...commonProps}><circle cx="13" cy="4" r="2" /><path d="m12.5 7-1 7m.5-5-4.5 3.5m4-3 4.5 2.5m-4.5 2L7 20m4.5-6 5 5" /></svg>;
     case 'run':
@@ -509,7 +512,10 @@ export default function PromptPanel({
   const appearanceMode = useAppStore((state) => resolveAppearanceMode(
     state.config.appearance?.mode ?? state.config.theme,
   ));
-  const effectivePlaceholder = placeholder ?? t('输入提示词开始创作   (Enter 生成，Shift+Enter 换行)');
+  const customAnimation = nodeType === 'ai-animation' && animationAction === 'custom';
+  const effectivePlaceholder = customAnimation
+    ? t('描述角色和自定义动作，例如：原地转身并挥手，动作连贯、首尾循环')
+    : placeholder ?? t('输入提示词开始创作   (Enter 生成，Shift+Enter 换行)');
   const [focused, setFocused] = useState(false);
   const [slashOpen, setSlashOpen] = useState(false);
   const [skillManagerOpen, setSkillManagerOpen] = useState(false);
@@ -903,7 +909,7 @@ export default function PromptPanel({
                   key={action}
                   type="button"
                   className={`animation-pose-btn${animationAction === action ? ' active' : ''}`}
-                  data-tooltip={t(ANIMATION_ACTION_LABELS[action])}
+                  data-tooltip={action === 'custom' ? t('自定义：在提示词中描述动作') : t(ANIMATION_ACTION_LABELS[action])}
                   aria-label={t(ANIMATION_ACTION_LABELS[action])}
                   aria-pressed={animationAction === action}
                   onClick={(event) => {

@@ -37,4 +37,14 @@ export default defineConfig([
       }],
     },
   },
+  {
+    // 迁入的上游组件保留原有生命周期；项目接入层仍使用完整检查。
+    files: ['src/vendor/generation-effects/**/*.{ts,tsx}'],
+    rules: {
+      'react-hooks/set-state-in-effect': 'off',
+      'react-hooks/refs': 'off',
+      'react-hooks/exhaustive-deps': 'off',
+      'react-refresh/only-export-components': 'off',
+    },
+  },
 ])

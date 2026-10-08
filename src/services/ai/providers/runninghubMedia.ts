@@ -52,6 +52,32 @@ type RunningHubRoleAwareReferences = RunningHubReferences & {
   imageRoles?: MediaReferenceRole[];
 };
 
+/** 普通素材选择同系列已登记的参考操作，只有显式首尾帧才保留帧操作。 */
+function resolveRunningHubVideoOperation(
+  model: RunningHubModelDefinition,
+  parameters: Record<string, string>,
+  references: RunningHubRoleAwareReferences,
+): RunningHubModelDefinition {
+  if (model.kind !== 'video' || model.operation !== 'image-to-video') return model;
+  const frameFields = model.parameters.filter((field) => runningHubFrameRole(field));
+  if (!frameFields.length) return model;
+  const explicitFrame = references.image?.some((_, index) => (
+    references.imageRoles?.[index] === 'first_frame' || references.imageRoles?.[index] === 'last_frame'
+  )) || frameFields.some((field) => parameters[field.name]?.trim());
+  if (explicitFrame) return model;
+  const hasReferences = (['image', 'video', 'audio'] as const).some((kind) => references[kind]?.length)
+    || model.parameters.some((field) => field.mediaKind && parameters[field.name]?.trim());
+  const family = model.id.endsWith('/image-to-video') ? model.id.slice(0, -'/image-to-video'.length) : undefined;
+  const operations = hasReferences ? ['multimodal-video', 'reference-to-video'] : ['text-to-video'];
+  for (const operation of operations) {
+    const candidate = family ? getRunningHubModel(`${family}/${operation}`) : undefined;
+    if (candidate?.kind === 'video' && candidate.operation === (hasReferences ? 'reference-to-video' : 'text-to-video')) return candidate;
+  }
+  throw new Error(hasReferences
+    ? '当前模型不支持普通参考素材，请选择参考图或多模态视频模型；如需首尾帧，请在参数设置中明确指定'
+    : '当前模型需要显式设置首尾帧，请在参数设置中指定，或选择文生视频模型');
+}
+
 function runningHubReferenceSelection(
   model: RunningHubModelDefinition,
   field: RunningHubModelDefinition['parameters'][number],
@@ -83,6 +109,12 @@ export async function buildRunningHubModelRequest(
   for (const field of model.parameters) {
     let raw = parameters[field.name];
     if (raw === undefined && field.binding === 'prompt') raw = prompt;
+    // 参数框显式指定的帧可以来自同一条连线，不重复计为普通参考图。
+    if (model.kind === 'video' && runningHubFrameRole(field) && raw?.trim()) {
+      references.image?.forEach((url, index) => {
+        if (url.trim() === raw.trim()) consumed.image.add(index);
+      });
+    }
     if (field.binding && field.binding !== 'prompt') {
       const sources = runningHubReferenceSelection(model, field, references);
       if (field.schema.type === 'array') {
@@ -180,7 +212,7 @@ type ModelParams = AIImageGenParams | AIVideoGenParams | AIAudioGenParams;
 export async function executeRunningHubModel(params: ModelParams, kind: RunningHubMediaKind, prompt: string, references: RunningHubRoleAwareReferences, count = 1, externalSignal?: AbortSignal, connectionOverride?: RunningHubConnection): Promise<RunningHubOutput[]> {
   const store = useAppStore.getState();
   const explicitImage = getRunningHubModel(params.model, true)?.parameters.some((field) => field.binding === 'image' && params.runninghubModelParameters?.[field.name]?.trim());
-  const definition = getRunningHubModel(params.model, !!references.image?.length || explicitImage);
+  let definition = getRunningHubModel(params.model, !!references.image?.length || explicitImage);
   if (!definition || definition.kind !== kind) throw new Error('RunningHub 模型或输出类型不匹配');
   if (!Number.isInteger(count) || count < 1 || count > 16 || (kind !== 'image' && count !== 1)) throw new Error('不支持的 RunningHub 生成数量');
   const connection = connectionOverride ?? runningHubConnection(store.config.providers, 'runninghub-model');
@@ -200,6 +232,13 @@ export async function executeRunningHubModel(params: ModelParams, kind: RunningH
   try {
     if (!fresh()) throw new Error('项目或节点已变化，未提交任务');
     let parameters = params.runninghubModelParameters ?? {};
+    stage('检查参数与上传素材');
+    const operation = resolveRunningHubVideoOperation(definition, parameters, references);
+    if (operation !== definition) {
+      const unusedFrameFields = new Set(definition.parameters.filter((field) => runningHubFrameRole(field)).map((field) => field.name));
+      parameters = Object.fromEntries(Object.entries(parameters).filter(([name, value]) => !unusedFrameFields.has(name) || value.trim()));
+      definition = operation;
+    }
     // 旧组合模型继续接受既有比例/分辨率；新增操作由各自表单明确设置。
     if (isLegacyRunningHubModel(params.model) && kind === 'image') {
       const image = params as AIImageGenParams;
@@ -209,7 +248,6 @@ export async function executeRunningHubModel(params: ModelParams, kind: RunningH
         if (field && value && parameters[name] === undefined && (!field.schema.enum || field.schema.enum.includes(value))) parameters[name] = value;
       }
     }
-    stage('检查参数与上传素材');
     const body = await buildRunningHubModelRequest(connection, definition, prompt, parameters, references, signal);
     if (count > 1 && ['n', 'imageNum', 'numImages', 'maxImages'].some((key) => Number(body[key]) > 1)) throw new Error('请仅使用一处数量设置：节点批量数量或模型产物数量');
     if (!fresh()) throw new Error('画布已变化，未提交任务');
@@ -237,7 +275,7 @@ export async function executeRunningHubModel(params: ModelParams, kind: RunningH
       if ((!taskIds.length && certainRejection) || (error instanceof RunningHubTaskFailed && taskIds.length === 1)) removePendingTask(trackingId, taskIds[0] ?? '');
       else if (submitting) updatePendingTask(trackingId, { runninghubRecoveryState: 'submit_unknown', runninghubSubmissionUncertain: !certainRejection });
     }
-    if (nodeId && fresh()) stage('任务已保留，可继续查询');
+    if (nodeId && fresh()) stage(taskIds.length || submitting ? '任务已保留，可继续查询' : '任务未提交');
     if (!nodeId && context && taskIds.length) throw new Error(`RunningHub 任务 ${taskIds.join('、')} 已保留，重新打开项目时继续查询。`, { cause: error });
     throw error;
   } finally {

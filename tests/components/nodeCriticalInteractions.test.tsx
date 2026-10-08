@@ -294,6 +294,82 @@ describe('critical canvas node interactions', () => {
     (generate.props.onClick as (event: unknown) => void)({ stopPropagation });
     expect(store.openNodeDialog).toHaveBeenCalledExactlyOnceWith('animation');
   });
+  it.each(['playing', 'sheet'])('waits for the transparent preview after remount and source changes (%s)', async (mode) => {
+    const effects: Array<() => void | (() => void)> = [];
+    const setters: Array<ReturnType<typeof vi.fn>> = [];
+    let previewState: unknown;
+    await installReactHookDriver((initial, index) => index % 6 === 5 ? previewState : initial, effects, undefined, setters);
+    const node: TestNode = {
+      id: 'animation', type: 'ai-animation', position: { x: 0, y: 0 },
+      data: { type: 'ai-animation', filePath: 'sprite.png', imageUrl: 'asset://original', animationPreviewMode: mode },
+    };
+    const store = createStore([node], () => 1);
+    installStoreMock(store); installCommonNodeMocks();
+    vi.doMock('@xyflow/react', () => ({ Handle: function HandleMock() { return null; }, Position: { Left: 'left', Right: 'right' } }));
+    const request = deferred<{ url: string; cols: number; rows: number; cellWidth: number; cellHeight: number; warnings: string[]; dispose: () => void }>();
+    const prepare = vi.fn(() => request.promise);
+    vi.doMock('../../src/services/animationService', async () => ({
+      ...await vi.importActual<typeof import('../../src/services/animationService')>('../../src/services/animationService'),
+      prepareAnimationPreview: prepare,
+    }));
+    const AnimationNode = (await import('../../src/components/nodes/AnimationNode')).default as unknown as (props: { id: string; data: Record<string, unknown> }) => unknown;
+    const props = { id: node.id, data: node.data };
+    const pending = AnimationNode(props);
+    expect(() => findElement(pending, (element) => element.type === 'img')).toThrow('Element not found');
+    expect(findElement(pending, (element) => element.props.role === 'status').props.children).toBeDefined();
+    const cleanup = effects[0]();
+    const preview = { url: 'blob:transparent-cache', cols: 4, rows: 2, cellWidth: 96, cellHeight: 96, warnings: [], dispose: vi.fn() };
+    request.resolve(preview);
+    await request.promise;
+    await Promise.resolve();
+    expect(prepare).toHaveBeenCalledExactlyOnceWith('sprite.png', expect.any(Object), expect.any(Object), 'project-a');
+    previewState = setters[5].mock.calls[0][0];
+    const ready = AnimationNode(props);
+    expect(findElement(ready, (element) => element.type === 'img').props.src).toBe(preview.url);
+    // 相同路径在另一个项目，或换图/改处理参数，都不能沿用旧缓存或先闪原图。
+    store.currentProjectId = 'project-b';
+    expect(() => findElement(AnimationNode(props), (element) => element.type === 'img')).toThrow('Element not found');
+    store.currentProjectId = 'project-a';
+    for (const patch of [{ filePath: 'new-sprite.png' }, { animationProcessing: { chromaKey: 'green' } }]) {
+      expect(() => findElement(AnimationNode({ ...props, data: { ...node.data, ...patch } }), (element) => element.type === 'img')).toThrow('Element not found');
+    }
+    cleanup?.();
+    expect(preview.dispose).toHaveBeenCalledOnce();
+    previewState = undefined;
+    const remounted = AnimationNode(props);
+    expect(() => findElement(remounted, (element) => element.type === 'img')).toThrow('Element not found');
+    expect(findElement(remounted, (element) => element.props.role === 'status').props.children).toBeDefined();
+    expect(store.updateNodeDataTransient).not.toHaveBeenCalled();
+    expect(store.commitToHistory).not.toHaveBeenCalled();
+  });
+  it.each([false, true])('uses the original only without a local source or after preview failure (local: %s)', async (local) => {
+    const effects: Array<() => void | (() => void)> = [];
+    const setters: Array<ReturnType<typeof vi.fn>> = [];
+    let previewState: unknown;
+    await installReactHookDriver((initial, index) => index % 6 === 5 ? previewState : initial, effects, undefined, setters);
+    const node: TestNode = {
+      id: 'animation', type: 'ai-animation', position: { x: 0, y: 0 },
+      data: { type: 'ai-animation', imageUrl: 'asset://original', ...(local ? { filePath: 'sprite.png' } : {}) },
+    };
+    installStoreMock(createStore([node], () => 1)); installCommonNodeMocks();
+    vi.doMock('@xyflow/react', () => ({ Handle: function HandleMock() { return null; }, Position: { Left: 'left', Right: 'right' } }));
+    const prepare = vi.fn().mockRejectedValue(new Error('preview unavailable'));
+    vi.doMock('../../src/services/animationService', async () => ({
+      ...await vi.importActual<typeof import('../../src/services/animationService')>('../../src/services/animationService'),
+      prepareAnimationPreview: prepare,
+    }));
+    const AnimationNode = (await import('../../src/components/nodes/AnimationNode')).default as unknown as (props: { id: string; data: Record<string, unknown> }) => unknown;
+    const props = { id: node.id, data: node.data };
+    AnimationNode(props);
+    effects[0]();
+    if (local) {
+      await Promise.resolve(); await Promise.resolve();
+      previewState = setters[5].mock.calls[0][0];
+    } else expect(prepare).not.toHaveBeenCalled();
+    const tree = AnimationNode(props);
+    expect(findElement(tree, (element) => element.type === 'img').props.src).toBe('asset://original');
+    if (local) expect(findElement(tree, (element) => element.props.className === 'animation-processing-hint').props.children).toBe('preview unavailable');
+  });
   it('lets a custom Select type spaces and use input undo without triggering canvas shortcuts', async () => {
     const effects: Array<() => void | (() => void)> = [];
     await installReactHookDriver(undefined, effects);

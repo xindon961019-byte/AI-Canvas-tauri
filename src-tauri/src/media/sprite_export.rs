@@ -319,8 +319,8 @@ mod tests {
             .map(|source_index| FrameEdit {
                 source_index,
                 enabled: source_index > 4,
-                offset_x: 0,
-                offset_y: 0,
+                offset_x: 0.0,
+                offset_y: 0.0,
             })
             .collect();
         let frames = sprite_processing::curate(&source, Some(&edits)).unwrap();

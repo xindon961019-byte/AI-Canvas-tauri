@@ -106,8 +106,6 @@
 }
 
 .animation-editor-header,
-.animation-editor-toolbar,
-.animation-editor-status,
 .animation-editor-footer {
   display: flex;
   align-items: center;
@@ -137,7 +135,6 @@
 }
 
 .animation-editor-preview-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.animation-editor-toolbar { flex-wrap: wrap; }
 .animation-editor-check { display: inline-flex; align-items: center; gap: 6px; font-size: var(--ui-font-sm); white-space: nowrap; }
 .animation-editor-check > label { font-size: var(--ui-font-sm); }
 .animation-editor-stage {
@@ -147,7 +144,7 @@
   container-type: size;
   flex: 1;
   min-height: 100px;
-  margin: 0 var(--ui-pad) var(--ui-pad);
+  margin: var(--ui-pad);
   overflow: hidden;
   border-radius: var(--ui-radius-lg);
   background: var(--theme-bg);
@@ -163,10 +160,33 @@
   background-size: 16px 16px;
 }
 .animation-editor-preview { max-height: 100%; border: 1px solid var(--theme-border); border-radius: var(--ui-radius); }
+.animation-editor-preview-shell { display: grid; grid-template-columns: 24px minmax(0, 1fr); grid-template-rows: auto 24px; flex-shrink: 0; min-width: 0; max-height: 100%; }
+.animation-editor-preview-shell > .animation-editor-preview { grid-column: 2; grid-row: 1; width: 100%; }
+.animation-editor-ruler { position: relative; overflow: hidden; background: var(--theme-card); color: var(--theme-text-secondary); touch-action: none; user-select: none; }
+.animation-editor-ruler--x { grid-column: 1; grid-row: 1; border-right: 1px solid var(--theme-border); cursor: var(--cursor-ew-resize, ew-resize); }
+.animation-editor-ruler--y { grid-column: 2; grid-row: 2; border-top: 1px solid var(--theme-border); cursor: var(--cursor-ns-resize, ns-resize); }
+.animation-editor-ruler-corner { grid-column: 1; grid-row: 2; display: grid; place-items: center; background: var(--theme-card); color: var(--theme-text-muted); font-size: var(--ui-font-sm); }
+.animation-editor-ruler-tick { position: absolute; pointer-events: none; }
+.animation-editor-ruler--x .animation-editor-ruler-tick { right: 0; width: 5px; border-top: 1px solid var(--theme-text-muted); }
+.animation-editor-ruler--y .animation-editor-ruler-tick { top: 0; height: 5px; border-left: 1px solid var(--theme-text-muted); }
+.animation-editor-ruler--x .animation-editor-ruler-tick.is-major { width: 7px; }
+.animation-editor-ruler--y .animation-editor-ruler-tick.is-major { height: 7px; }
+.animation-editor-ruler-label { position: absolute; font-size: calc(var(--ui-font-sm) - 2px); line-height: 1; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.animation-editor-ruler--x .animation-editor-ruler-label { right: 5px; font-size: calc(var(--ui-font-sm) - 3px); transform: translateY(-50%); }
+.animation-editor-ruler--x .animation-editor-ruler-tick.is-origin .animation-editor-ruler-label { transform: translateY(-100%); }
+.animation-editor-ruler--y .animation-editor-ruler-label { top: 10px; left: 3px; }
+.animation-editor-ruler:focus-visible { outline: 1px solid var(--brand); outline-offset: -1px; }
+.animation-editor-preview .animation-editor-reference { position: absolute; z-index: 2; touch-action: none; }
+.animation-editor-reference::after { content: ''; position: absolute; pointer-events: none; }
+.animation-editor-reference--x { top: 0; bottom: 0; width: 9px; transform: translateX(-50%); cursor: var(--cursor-ew-resize, ew-resize); }
+.animation-editor-reference--x::after { top: 0; bottom: 0; left: 4px; border-left: 1px solid var(--brand-light); }
+.animation-editor-reference--y { left: 0; right: 0; height: 9px; transform: translateY(-50%); cursor: var(--cursor-ns-resize, ns-resize); }
+.animation-editor-reference--y::after { left: 0; right: 0; top: 4px; border-top: 1px solid var(--brand-light); }
+.animation-editor-reference:focus-visible { outline: 1px dashed var(--brand); outline-offset: 1px; }
 .animation-editor .animation-frame-sheet { image-rendering: pixelated; }
-.animation-editor-status { min-height: 28px; align-items: flex-start; }
+.animation-editor-status { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: var(--ui-pad-sm); flex-shrink: 0; min-height: 28px; }
 .animation-editor-status > :first-child { min-width: 0; overflow-wrap: anywhere; }
-.animation-editor-status > :last-child { flex-shrink: 0; }
+.animation-editor-status > :last-child { justify-self: end; white-space: nowrap; }
 .animation-editor-sidebar { min-height: 0; overflow-y: auto; border-left: 1px solid var(--theme-border); background: var(--white-alpha-03); }
 .animation-editor-sidebar .ui-card { flex-shrink: 0; }
 .animation-editor-field { display: flex; align-items: center; justify-content: space-between; gap: var(--ui-pad-sm); }
@@ -174,7 +194,8 @@
 .animation-editor-source > summary::-webkit-details-marker { display: none; }
 .animation-editor-source[open] > summary > svg { transform: rotate(180deg); }
 .animation-editor-timeline { flex-shrink: 0; min-width: 0; border-top: 1px solid var(--theme-border); }
-.animation-editor-frames { display: flex; gap: var(--ui-pad-sm); overflow-x: auto; padding-bottom: 4px; }
+.animation-editor-frames { min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; scroll-behavior: auto; padding-bottom: 4px; }
+.animation-editor-frames-content { position: relative; display: flex; gap: var(--ui-pad-sm); width: max-content; min-width: 100%; }
 .animation-editor-tile { width: 100px; flex-shrink: 0; cursor: var(--cursor-pointer, pointer); color: var(--theme-text-secondary); font-size: var(--ui-font-sm); }
 .animation-editor-tile:hover { background: var(--theme-hover); }
 .animation-editor-tile.is-selected { border-color: var(--brand); background: var(--brand-alpha-10); color: var(--theme-text); }
@@ -190,6 +211,8 @@
   .animation-editor-header { flex-wrap: wrap; }
   .animation-editor-workspace { display: flex; flex-direction: column; flex: none; overflow: visible; }
   .animation-editor-preview-panel { height: 360px; flex-shrink: 0; }
+  .animation-editor-status { grid-template-columns: minmax(0, 1fr) auto; }
+  .animation-editor-playback { grid-column: 1 / -1; grid-row: 1; justify-self: center; }
   .animation-editor-sidebar { overflow: visible; border-left: 0; border-top: 1px solid var(--theme-border); }
   .animation-editor-footer { flex-wrap: wrap; }
 }

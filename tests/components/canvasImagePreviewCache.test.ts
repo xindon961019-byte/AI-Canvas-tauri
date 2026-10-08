@@ -143,6 +143,31 @@ describe('canvas image preview cache', () => {
     (await b)?.release();
   });
 
+  it('waits for the project disk lookup before touching the original on every remount', async () => {
+    for (let mount = 0; mount < 2; mount++) {
+      let finish!: (result: unknown) => void;
+      disk.prepare.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+      const settled = vi.fn();
+      const pending = acquire('asset://localhost/image.png', 512, new AbortController().signal, 'project-a').then((value) => {
+        settled(value);
+        return value;
+      });
+      await flush();
+      expect(settled).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bitmapMock).not.toHaveBeenCalled();
+      finish({ cached: { blob: png(), width: 512, height: 256 }, persist: vi.fn() });
+      await flush();
+      const preview = await pending;
+      expect(preview?.src).toMatch(/^blob:/);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(bitmapMock).not.toHaveBeenCalled();
+      preview?.release();
+      await vi.advanceTimersByTimeAsync(30_001);
+    }
+    expect(disk.prepare).toHaveBeenCalledTimes(2);
+  });
+
   it('discards a late disk hit after cancellation without allocating a preview URL', async () => {
     let finish!: (result: unknown) => void;
     disk.prepare.mockReturnValue(new Promise((resolve) => { finish = resolve; }));

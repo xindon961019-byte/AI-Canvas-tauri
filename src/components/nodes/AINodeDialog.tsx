@@ -4,7 +4,7 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 // 生成中的流光边框：仅在生成时按需加载
-const BorderBeam = lazy(() => import('border-beam').then((m) => ({ default: m.BorderBeam })));
+const BorderBeam = lazy(() => import('../../vendor/generation-effects/border-beam/src').then((m) => ({ default: m.BorderBeam })));
 const PromptPolishPanel = lazy(() => import('./shared/PromptPolishPanel'));
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useShallow } from 'zustand/react/shallow';

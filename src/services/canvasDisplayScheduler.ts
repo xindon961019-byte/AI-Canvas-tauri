@@ -6,7 +6,7 @@ export interface CanvasDisplayClock {
   cancelDelay: (id: ReturnType<typeof setTimeout>) => void;
 }
 
-export const CANVAS_DISPLAY_BUDGET = { maxPerFrame: 4, workMs: 3, idleMs: 180 } as const;
+export const CANVAS_DISPLAY_BUDGET = { maxPreparing: 3, maxPerFrame: 4, workMs: 3, idleMs: 180 } as const;
 
 interface Job {
   key: object;
@@ -44,7 +44,7 @@ export function createCanvasDisplayScheduler(clock: CanvasDisplayClock = {
   function refreshDue() {
     nextDue = Infinity;
     for (const job of jobs.values()) {
-      if (!job.preparation || preparing < 2) nextDue = Math.min(nextDue, job.due);
+      if (!job.preparation || preparing < CANVAS_DISPLAY_BUDGET.maxPreparing) nextDue = Math.min(nextDue, job.due);
     }
   }
 
@@ -108,7 +108,7 @@ export function createCanvasDisplayScheduler(clock: CanvasDisplayClock = {
         if (worked && clock.now() - start >= CANVAS_DISPLAY_BUDGET.workMs) break;
         const job = ordered[cursor++];
         if (jobs.get(job.key) !== job) continue;
-        if (job.preparation && preparing >= 2) continue;
+        if (job.preparation && preparing >= CANVAS_DISPLAY_BUDGET.maxPreparing) continue;
         jobs.delete(job.key);
         // 异步准备只占并发槽位和同步时间预算，不挤占 React/DOM 的提交名额。
         if (!job.preparation) committed++;
@@ -125,7 +125,7 @@ export function createCanvasDisplayScheduler(clock: CanvasDisplayClock = {
   function enqueue(key: object, commit: () => void, priority: () => number = () => 0, delayMs = 0, preparation = false) {
     const job = { key, commit, priority, due: clock.now() + Math.max(0, delayMs), preparation };
     jobs.set(key, job);
-    if (!preparation || preparing < 2) nextDue = Math.min(nextDue, job.due);
+    if (!preparation || preparing < CANVAS_DISPLAY_BUDGET.maxPreparing) nextDue = Math.min(nextDue, job.due);
     dirty = true;
     schedule();
     return () => {

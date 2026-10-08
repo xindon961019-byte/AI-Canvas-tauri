@@ -85,8 +85,11 @@ fn validate_descendant(root: &Path, path: &Path, directory: bool) -> Result<(), 
     Ok(())
 }
 
-fn source_identity(root: &Path, source: &Path, max_edge: u32) -> Result<SourceIdentity, String> {
-    validate_edge(max_edge)?;
+pub(crate) fn derived_source_version(
+    root: &Path,
+    source: &Path,
+    max_source_bytes: u64,
+) -> Result<(String, [u8; 32]), String> {
     validate_descendant(root, source, false)?;
     let relative = source.strip_prefix(root).map_err(|_| "原图不属于该项目")?;
     if relative
@@ -102,7 +105,7 @@ fn source_identity(root: &Path, source: &Path, max_edge: u32) -> Result<SourceId
         .collect::<Result<Vec<_>, _>>()?
         .join("/");
     let metadata = fs::metadata(source).map_err(|_| "无法读取原图状态")?;
-    if metadata.len() == 0 || metadata.len() > MAX_SOURCE_BYTES {
+    if metadata.len() == 0 || metadata.len() > max_source_bytes {
         return Err("原图体积超过缩略图处理范围".into());
     }
     let modified = metadata
@@ -116,13 +119,19 @@ fn source_identity(root: &Path, source: &Path, max_edge: u32) -> Result<SourceId
     version.update([0]);
     version.update(metadata.len().to_le_bytes());
     version.update(modified.as_nanos().to_le_bytes());
+    Ok((relative_text, version.finalize().into()))
+}
+
+fn source_identity(root: &Path, source: &Path, max_edge: u32) -> Result<SourceIdentity, String> {
+    validate_edge(max_edge)?;
+    let (relative_text, version) = derived_source_version(root, source, MAX_SOURCE_BYTES)?;
     let mut name = Sha256::new();
     name.update(b"canvas-thumbnail-webp85-v1\0");
     name.update(relative_text.as_bytes());
     name.update([0]);
     name.update(max_edge.to_le_bytes());
     Ok(SourceIdentity {
-        version: version.finalize().into(),
+        version,
         cache_name: format!("v1-{}.cache", hex(&name.finalize())),
     })
 }
@@ -256,6 +265,37 @@ fn ensure_cache_directory(root: &Path) -> Result<PathBuf, String> {
     Ok(directory)
 }
 
+fn validate_cache_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.len() > 128
+        || name.starts_with('.')
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
+    {
+        return Err("派生缓存文件名无效".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn read_cache_file(root: &Path, name: &str, max_bytes: usize) -> Option<Vec<u8>> {
+    validate_cache_name(name).ok()?;
+    let path = root.join(CACHE_DIRECTORY).join(name);
+    validate_descendant(root, &path, false).ok()?;
+    #[cfg(windows)]
+    windows_files::hide(&root.join(CACHE_DIRECTORY)).ok()?;
+    let file = File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    if size == 0 || size > max_bytes as u64 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    file.take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() == size as usize).then_some(bytes)
+}
+
 fn write_cache(
     root: &Path,
     source: &Path,
@@ -268,8 +308,24 @@ fn write_cache(
         return Ok(false);
     }
     let (width, height) = validate_image(bytes, max_edge)?;
+    publish_cache_file(
+        root,
+        &identity.cache_name,
+        &encode_cache(&identity, width, height, bytes),
+        || Ok(source_identity(root, source, max_edge)?.version == identity.version),
+    )
+}
+
+/// 仅供原生派生服务调用；调用方复核源版本，目录与目标仍在这里逐层拒绝链接。
+pub(crate) fn publish_cache_file(
+    root: &Path,
+    name: &str,
+    bytes: &[u8],
+    still_current: impl FnOnce() -> Result<bool, String>,
+) -> Result<bool, String> {
+    validate_cache_name(name)?;
     let directory = ensure_cache_directory(root)?;
-    let destination = directory.join(&identity.cache_name);
+    let destination = directory.join(name);
     if destination.symlink_metadata().is_ok() {
         validate_descendant(root, &destination, false)?;
     }
@@ -278,19 +334,18 @@ fn write_cache(
         .unwrap_or_default()
         .as_nanos();
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = directory.join(format!(".{}-{nonce}-{sequence}.tmp", identity.cache_name));
+    let temporary = directory.join(format!(".{name}-{nonce}-{sequence}.tmp"));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temporary)
         .map_err(|_| "无法创建缩略图临时文件")?;
     let result = (|| {
-        file.write_all(&encode_cache(&identity, width, height, bytes))
-            .map_err(|_| "缩略图写入失败")?;
+        file.write_all(bytes).map_err(|_| "缩略图写入失败")?;
         file.sync_all().map_err(|_| "缩略图写入失败")?;
         drop(file);
         // 编码或落盘期间原图可能已被编辑，旧结果不可取代当前版本。
-        if source_identity(root, source, max_edge)?.version != identity.version {
+        if !still_current()? {
             return Ok(false);
         }
         validate_descendant(root, &directory, true)?;

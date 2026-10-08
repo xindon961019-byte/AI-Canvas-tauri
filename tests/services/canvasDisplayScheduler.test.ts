@@ -51,18 +51,35 @@ describe('shared canvas display budget', () => {
     for (let i = 0; i < 5; i++) queue.prepare({}, async () => {
       starts(); await new Promise<void>((resolve) => finish.push(resolve)); queue.enqueue({}, commits);
     });
-    await tick(); expect(starts).toHaveBeenCalledTimes(2); expect(frames.size).toBe(0);
+    await tick(); expect(starts).toHaveBeenCalledTimes(3); expect(frames.size).toBe(0);
+    await tick(1000); expect(starts).toHaveBeenCalledTimes(3); expect(frames.size).toBe(0);
     queue.interaction(true); finish.splice(0).forEach((f) => f()); await tick(1000);
-    expect(commits).not.toHaveBeenCalled(); expect(starts).toHaveBeenCalledTimes(2);
+    expect(commits).not.toHaveBeenCalled(); expect(starts).toHaveBeenCalledTimes(3);
     queue.interaction(false); await tick(180);
-    expect(starts).toHaveBeenCalledTimes(4); expect(commits).toHaveBeenCalledTimes(2);
+    expect(starts).toHaveBeenCalledTimes(5); expect(commits).toHaveBeenCalledTimes(3);
+    finish.splice(0).forEach((f) => f()); await tick(); await tick();
+    expect(commits).toHaveBeenCalledTimes(5); expect(frames.size).toBe(0);
+  });
+  it('starts exactly one waiting preparation when a failed task frees one of three slots', async () => {
+    const { queue, tick, frames } = fixture(); const starts = vi.fn();
+    const tasks: Array<{ resolve: () => void; reject: (error: Error) => void }> = [];
+    for (let i = 0; i < 5; i++) queue.prepare({}, async () => {
+      starts(); await new Promise<void>((resolve, reject) => tasks.push({ resolve, reject }));
+    });
+    await tick(); expect(starts).toHaveBeenCalledTimes(3); expect(frames.size).toBe(0);
+    tasks[0].reject(new Error('image unavailable')); await tick(); await tick();
+    expect(starts).toHaveBeenCalledTimes(4); expect(frames.size).toBe(0);
+    tasks[1].resolve(); await tick(); await tick();
+    expect(starts).toHaveBeenCalledTimes(5); expect(frames.size).toBe(0);
+    tasks.forEach((task) => task.resolve()); await tick();
+    expect(frames.size).toBe(0);
   });
   it('does not spend display slots on asynchronous preparation starts', async () => {
     const { queue, tick } = fixture(); const prepared = vi.fn(); const commits = vi.fn();
     for (let i = 0; i < 10; i++) queue.prepare({}, async () => { prepared(); await new Promise(() => {}); });
     for (let i = 0; i < 10; i++) queue.enqueue({}, commits);
     await tick();
-    expect(prepared).toHaveBeenCalledTimes(2); expect(commits).toHaveBeenCalledTimes(4);
+    expect(prepared).toHaveBeenCalledTimes(3); expect(commits).toHaveBeenCalledTimes(4);
     queue.deactivate();
   });
   it('does not let canceled, delayed or deactivated work run', async () => {

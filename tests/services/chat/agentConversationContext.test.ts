@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentTask } from '../../../src/types/agent';
-import type { ChatMessage } from '../../../src/types/chat';
+import type { AssistantStreamEvent, ChatMessage, ConversationContextSummary } from '../../../src/types/chat';
 import type { AssistantModelMessage, StreamingCallOptions } from '../../../src/services/ai/assistantStream';
 
 const { stream, loadMessages, resolveModel } = vi.hoisted(() => ({
   stream: vi.fn<(options: StreamingCallOptions) => Promise<void>>(),
   loadMessages: vi.fn(),
-  resolveModel: vi.fn(() => ({})),
+  resolveModel: vi.fn<(projectId?: string | null) => object | null>(() => ({})),
 }));
 vi.mock('../../../src/services/ai/assistantStream', () => ({
   streamAssistantReply: stream, resolveAssistantModel: resolveModel,
@@ -22,7 +22,7 @@ import { useAppStore } from '../../../src/store/useAppStore';
 import { assembleAgentContext, estimateModelMessagesTokens, resolveAssistantContextSpec } from '../../../src/services/chat/contextManager';
 import { compactAgentMessages, compressConversationContext, SUMMARY_REQUIRED_SECTIONS } from '../../../src/services/chat/contextCompressionService';
 import { findHistoryCutIndex, findModelCutPoint, serializeModelConversation } from '../../../src/services/chat/contextTranscript';
-import { runAgentLoop } from '../../../src/services/chat/agentRuntime';
+import { prepareAgentTaskResume, runAgentLoop, runAgentTask } from '../../../src/services/chat/agentRuntime';
 import { fingerprintToolInput } from '../../../src/services/chat/agentCheckpointService';
 import { clearAgentToolRegistryForTests, registerAgentTool } from '../../../src/services/chat/toolRegistry';
 
@@ -69,6 +69,7 @@ beforeEach(() => {
     }],
   });
   stream.mockReset();
+  resolveModel.mockReset().mockReturnValue({});
   loadMessages.mockReset();
   loadMessages.mockResolvedValue({ messages: [], total: 0 });
   stream.mockImplementation(async ({ onEvent }) => {
@@ -78,6 +79,227 @@ beforeEach(() => {
 });
 
 afterEach(() => { clearAgentToolRegistryForTests(); });
+
+async function configureEpisodeContext() {
+  const { resolveAssistantModel, streamAssistantReply } = await vi.importActual<typeof import('../../../src/services/ai/assistantStream')>(
+    '../../../src/services/ai/assistantStream',
+  );
+  resolveModel.mockImplementation(resolveAssistantModel);
+  useAppStore.setState((state) => ({
+    currentProjectId: 'episode-1',
+    projects: [
+      { id: 'project-1', name: '剧集', nodes: [], edges: [], createdAt: 1, updatedAt: 1 },
+      ...['episode-1', 'episode-2'].map((id) => ({
+        id, parentId: 'project-1', name: id, nodes: [], edges: [], createdAt: 1, updatedAt: 1,
+        settings: { defaultModels: { text: 'general/test-model' } },
+      })),
+    ],
+    agentTasks: [task({ projectId: 'episode-1' })],
+    config: {
+      ...state.config,
+      assistantModelId: undefined,
+      providers: { 'test-provider': { name: '测试连接', apiKey: 'fixture', baseUrl: 'https://example.com/v1' } },
+    },
+  }));
+  expect(resolveAssistantModel('episode-1')).not.toBeNull();
+  expect(resolveAssistantModel('project-1')).toBeNull();
+  return { streamAssistantReply };
+}
+
+function summarySseResponse(text: string, finishReason = 'stop'): Response {
+  const frames = [
+    ...[text.slice(0, 20), text.slice(20)].map((content) => ({ choices: [{ delta: { content } }] })),
+    { choices: [{ delta: {}, finish_reason: finishReason }] },
+  ].map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('');
+  return new Response(`${frames}data: [DONE]\n\n`, { headers: { 'Content-Type': 'text/event-stream' } });
+}
+
+describe('compression through the real assistant stream protocol', () => {
+  it.each(['stop', 'length'])('routes the selected episode model and only persists a complete SSE summary (%s)', async (finishReason) => {
+    const { streamAssistantReply } = await configureEpisodeContext();
+    stream.mockImplementation(async (options) => { await streamAssistantReply(options); });
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    const fetchMock = vi.fn().mockImplementation(async () => summarySseResponse(summary('\n#3 node:node-3'), finishReason));
+    vi.stubGlobal('fetch', fetchMock);
+    const persisted = Array.from({ length: 12 }, (_, i) => chat(i + 1, i % 2 ? 'assistant' : 'user', `历史${i}`));
+    loadMessages.mockResolvedValue({ messages: persisted, total: persisted.length });
+
+    const compression = compressConversationContext('conversation-1', { projectId: 'episode-1' });
+    if (finishReason === 'stop') {
+      await expect(compression).resolves.toMatchObject({ coveredUntilMessageId: 'message-4' });
+      expect(useAppStore.getState().conversations[0].contextSummary?.text).toContain('node:node-3');
+    } else {
+      await expect(compression).rejects.toThrow('输出上限');
+      expect(useAppStore.getState().conversations[0].contextSummary).toBeUndefined();
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://example.com/v1/chat/completions');
+    const body = JSON.parse(init.body);
+    expect(body).toMatchObject({ model: 'test', stream: true });
+    expect(body.tools).toBeUndefined();
+    expect(useAppStore.getState().activeRequestAbort).toBeNull();
+  });
+
+  it('recovers from an HTTP compression failure and completes the same task through real SSE parsing', async () => {
+    const { streamAssistantReply } = await configureEpisodeContext();
+    stream.mockImplementation(async (options) => { await streamAssistantReply(options); });
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: '临时服务不可用' } }), {
+        status: 503, headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockImplementationOnce(async () => summarySseResponse(summary('\n#3 node:node-3')))
+      .mockImplementationOnce(async () => summarySseResponse('对话已恢复，继续沿用已完成的分镜。'));
+    vi.stubGlobal('fetch', fetchMock);
+    const persisted = Array.from({ length: 12 }, (_, i) => chat(i + 1, i % 2 ? 'assistant' : 'user', '长'.repeat(650)));
+    loadMessages.mockResolvedValue({ messages: persisted, total: persisted.length });
+    const onTextDelta = vi.fn();
+
+    expect(await runAgentLoop({ taskId: 'task-1', systemPrompt: 'system', userMessage: '继续',
+      signal: new AbortController().signal })).toBe('paused');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().conversations[0].contextSummary).toBeUndefined();
+
+    prepareAgentTaskResume('task-1');
+    const resumed = await runAgentTask('task-1', (signal) => runAgentLoop({
+      taskId: 'task-1', systemPrompt: 'system', userMessage: '继续', signal, callbacks: { onTextDelta },
+    }));
+    expect(resumed.status).toBe('completed');
+    expect(resumed.errorCode).toBeUndefined();
+    expect(onTextDelta.mock.calls.map(([text]) => text).join('')).toBe('对话已恢复，继续沿用已完成的分镜。');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(init.body).model)).toEqual(['test', 'test', 'test']);
+    expect(useAppStore.getState().activeRequestAbort).toBeNull();
+  });
+});
+
+describe('episode conversation compression recovery', () => {
+  it('uses the execution project model and tool progress for a shared series conversation after switching projects', async () => {
+    await configureEpisodeContext();
+    useAppStore.setState({ currentProjectId: 'unrelated-project' });
+    const messages = Array.from({ length: 12 }, (_, i) => chat(i + 1, i % 2 ? 'assistant' : 'user',
+      `历史${i} ${'长'.repeat(650)}`, i === 1 ? { agentTaskId: 'task-1' } : {}));
+    loadMessages.mockResolvedValue({ messages, total: messages.length });
+
+    const assembled = await assembleAgentContext({
+      conversationId: 'conversation-1', projectId: 'episode-1', systemPrompt: 'system', userMessage: '继续',
+    });
+
+    expect(assembled.forcedCompression).toBe(true);
+    expect(assembled.usage.estimatedTokens).toBeLessThan(assembled.usage.inputBudget);
+    expect(stream.mock.calls[0][0]).toMatchObject({ projectId: 'episode-1', tools: [], trackAbort: false });
+    expect(stream.mock.calls[0][0].userMessage).toContain('succeeded');
+    expect(stream.mock.calls[0][0].userMessage).toContain('node-3');
+    expect(useAppStore.getState().conversations[0].projectId).toBe('project-1');
+  });
+
+  it('also routes background precompression through the execution project', async () => {
+    await configureEpisodeContext();
+    const messages = Array.from({ length: 12 }, (_, i) => chat(i + 1, i % 2 ? 'assistant' : 'user', '长'.repeat(480)));
+    loadMessages.mockResolvedValue({ messages, total: messages.length });
+
+    const assembled = await assembleAgentContext({
+      conversationId: 'conversation-1', projectId: 'episode-1', systemPrompt: 'system', userMessage: '继续',
+    });
+
+    expect(assembled.forcedCompression).toBe(false);
+    await vi.waitFor(() => expect(useAppStore.getState().conversations[0].contextSummary).toBeDefined());
+    expect(stream.mock.calls[0][0].projectId).toBe('episode-1');
+  });
+
+  it('can resume the same task after a compression request fails without replaying completed writes', async () => {
+    await configureEpisodeContext();
+    const messages = Array.from({ length: 12 }, (_, i) => chat(i + 1, i % 2 ? 'assistant' : 'user', '长'.repeat(650)));
+    loadMessages.mockResolvedValue({ messages, total: messages.length });
+    const steps = structuredClone(useAppStore.getState().agentTasks[0].steps);
+    let failCompression = true;
+    stream.mockImplementation(async (options) => {
+      if (options.messages) {
+        options.onEvent({ type: 'text.delta', delta: '已恢复对话，沿用已完成的分镜。' });
+      } else {
+        if (failCompression) throw new Error('临时网络故障');
+        options.onEvent({ type: 'text.delta', delta: summary('\n#3 node:node-3') });
+      }
+    });
+    const write = vi.fn();
+    registerAgentTool({ id: 'canvas_create_nodes', title: '创建分镜', description: '测试写入', effect: 'canvas_write',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false }, execute: write });
+
+    expect(await runAgentLoop({ taskId: 'task-1', systemPrompt: 'system', userMessage: '继续',
+      signal: new AbortController().signal })).toBe('paused');
+    expect(useAppStore.getState().agentTasks[0].pausedReason).toBe('context_compression_failed');
+    expect(useAppStore.getState().conversations[0].contextSummary).toBeUndefined();
+
+    failCompression = false;
+    prepareAgentTaskResume('task-1');
+    const resumed = await runAgentTask('task-1', (signal) => runAgentLoop({
+      taskId: 'task-1', systemPrompt: 'system', userMessage: '继续', signal,
+    }));
+    expect(resumed.status).toBe('completed');
+    expect(resumed.pausedReason).toBeUndefined();
+    expect(resumed.errorCode).toBeUndefined();
+    expect(resumed.steps.slice(0, steps.length)).toEqual(steps);
+    expect(write).not.toHaveBeenCalled();
+    expect(stream.mock.calls.filter(([options]) => !options.messages)).toHaveLength(2);
+  });
+
+  it('rejects compression through a project outside the conversation owner', async () => {
+    await configureEpisodeContext();
+    await expect(compressConversationContext('conversation-1', { projectId: 'unrelated-project' }))
+      .rejects.toThrow('不属于');
+    expect(stream).not.toHaveBeenCalled();
+    expect(loadMessages).not.toHaveBeenCalled();
+  });
+
+  it('skips model resolution when there is no older history to compress', async () => {
+    resolveModel.mockReturnValue(null);
+    await expect(compressConversationContext('conversation-1')).resolves.toBeNull();
+    expect(resolveModel).not.toHaveBeenCalled();
+    expect(stream).not.toHaveBeenCalled();
+  });
+
+  it('does not reuse another episode model request for concurrent compression', async () => {
+    await configureEpisodeContext();
+    const messages = Array.from({ length: 12 }, (_, i) => chat(i + 1, i % 2 ? 'assistant' : 'user', `历史${i}`));
+    loadMessages.mockResolvedValue({ messages, total: messages.length });
+    const first = compressConversationContext('conversation-1', { projectId: 'episode-1' });
+    const second = compressConversationContext('conversation-1', { projectId: 'episode-2' });
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    expect(stream.mock.calls.map(([options]) => options.projectId)).toEqual(['episode-1', 'episode-2']);
+    expect(useAppStore.getState().conversations[0].contextSummary?.coveredMessageCount).toBe(4);
+  });
+
+  it.each<AssistantStreamEvent>([
+    { type: 'done', finishReason: 'length' },
+    { type: 'done', finishReason: 'error' },
+    { type: 'done', finishReason: 'canceled' },
+    { type: 'error', code: 'STREAM_ERROR', message: '临时错误', retryable: true },
+    { type: 'tool.call.final', call: { callId: 'unexpected', toolId: 'canvas_create_nodes', input: {} } },
+  ])('preserves both history and checkpoints when summary generation does not complete: %j', async (event) => {
+    const previousSummary: ConversationContextSummary = {
+      text: summary(), coveredUntilMessageId: 'message-0', coveredUntilTimestamp: 0,
+      coveredMessageCount: 1, estimatedTokens: 100, updatedAt: 1, formatVersion: 2,
+    };
+    useAppStore.setState((state) => ({ conversations: state.conversations.map((conversation) => ({
+      ...conversation, contextSummary: previousSummary,
+    })) }));
+    const persisted = Array.from({ length: 12 }, (_, i) => chat(i + 1, i % 2 ? 'assistant' : 'user', `历史${i}`));
+    loadMessages.mockResolvedValue({ messages: persisted, total: persisted.length });
+    stream.mockImplementation(async ({ onEvent }) => {
+      // 即使已收到所有区段和锚点，截断或错误结束的正文也不是有效摘要。
+      onEvent({ type: 'text.delta', delta: summary('\n#3 node:node-3') });
+      onEvent(event);
+    });
+
+    await expect(compressConversationContext('conversation-1')).rejects.toThrow();
+    expect(useAppStore.getState().conversations[0].contextSummary).toEqual(previousSummary);
+    const { messages, user } = longTaskMessages();
+    const original = structuredClone(messages);
+    await expect(compactAgentMessages('task-1', messages, user, new AbortController().signal)).rejects.toThrow();
+    expect(messages).toEqual(original);
+  });
+});
 
 describe('conversation continuity', () => {
   it('carries successful tool results and real node references into a follow-up, including tool-only replies', async () => {

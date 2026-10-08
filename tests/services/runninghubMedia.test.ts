@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from '../../src/store/useAppStore';
 import { buildRunningHubModelRequest, executeRunningHubModel, parseRunningHubModelOutputs, queryRunningHubModel } from '../../src/services/ai/providers/runninghubMedia';
 import { RUNNINGHUB_MODEL_MANIFEST, getRunningHubModel } from '../../src/services/ai/providers/runninghubModelManifest';
+import { generateVideo } from '../../src/services/ai/generateVideo';
 import { cancelRunningHubNodeTask, completeRunningHubNodeTask } from '../../src/services/ai/providers/runninghubWorkflow';
 import { cancelNodePolling, getPendingTasksForProject, resumeRunningHubNodeTask, resumePendingTasks } from '../../src/services/pollManager';
 import type { RunningHubMediaKind } from '../../src/types/runninghub';
@@ -37,6 +38,99 @@ beforeEach(() => {
 afterEach(() => { cancelNodePolling('n1'); cancelNodePolling('runninghub-message-m1'); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe('RunningHub 标准媒体执行', () => {
+  it.each([1, 2])('%i 张正常连线图片及重复 @ 引用走参考图接口，保留参数和节点模型', async (count) => {
+    setup('video');
+    const model = 'runninghub/bytedance/seedance-2.0-global/image-to-video';
+    const images = Array.from({ length: count }, (_, index) => ({
+      id: `image-${index}`, type: 'ai-image', position: { x: 0, y: 0 },
+      data: { type: 'ai-image' as const, label: `图片${index}`, imageUrl: `https://input.test/${index}.png` },
+    }));
+    useAppStore.setState((store) => ({
+      nodes: [{ ...store.nodes[0], data: { ...store.nodes[0].data, model } }, ...images],
+      edges: images.map((image) => ({ id: `edge-${image.id}`, source: image.id, target: 'n1' })),
+    }));
+    await generateVideo({
+      provider: 'runninghub', model, nodeId: 'n1', prompt: '参考 @{image-0:图片0} 生成视频',
+      runninghubModelParameters: { duration: '8', ratio: '9:16', resolution: '1080p', generateAudio: 'false', seed: '0' },
+    });
+    expect(submitted()).toHaveLength(1);
+    expect(submitted()[0][0]).toBe(`${connection.baseUrl}/openapi/v2/bytedance/seedance-2.0-global/multimodal-video`);
+    const body = JSON.parse(submitted()[0][1].body as string);
+    expect(body).toMatchObject({ imageUrls: images.map((image) => image.data.imageUrl), duration: '8', ratio: '9:16', resolution: '1080p', generateAudio: false, seed: 0 });
+    expect(body).not.toHaveProperty('firstFrameUrl');
+    expect(body).not.toHaveProperty('lastFrameUrl');
+    expect(useAppStore.getState().nodes[0].data.model).toBe(model);
+    expect(pending()[0].runninghubModelId).toBe(model);
+  });
+  it.each(['bytedance/seedance-2.0-global-fast', 'bytedance/seedance-2.5-global-token', 'rhart-video/sparkvideo-2.0'])('无角色旧图片数组和空帧参数也走同系列参考接口：%s', async (family) => {
+    setup('video');
+    const parameters = { firstFrameUrl: '', lastFrameUrl: ' ', duration: '5' };
+    await executeRunningHubModel({ provider: 'runninghub', model: `${family}/image-to-video`, prompt: '参考图片生成视频', runninghubModelParameters: parameters }, 'video', '参考图片生成视频', {
+      image: ['https://input.test/one.png', 'https://input.test/two.png'],
+    });
+    expect(submitted()[0][0]).toBe(`${connection.baseUrl}/openapi/v2/${family}/multimodal-video`);
+    expect(JSON.parse(submitted()[0][1].body as string)).toMatchObject({ imageUrls: ['https://input.test/one.png', 'https://input.test/two.png'] });
+    expect(parameters).toEqual({ firstFrameUrl: '', lastFrameUrl: ' ', duration: '5' });
+  });
+  it('参数框明确指定首帧时保留首帧接口，同一张连线图片不重复作为参考图', async () => {
+    setup('video');
+    const model = 'bytedance/seedance-2.0-global/image-to-video';
+    const firstFrameUrl = 'https://input.test/first.png';
+    await executeRunningHubModel({ provider: 'runninghub', model, prompt: '首帧生成视频', runninghubModelParameters: { firstFrameUrl } }, 'video', '首帧生成视频', { image: [firstFrameUrl] });
+    expect(submitted()[0][0]).toBe(`${connection.baseUrl}/openapi/v2/${model}`);
+    expect(JSON.parse(submitted()[0][1].body as string)).toMatchObject({ firstFrameUrl });
+    expect(JSON.parse(submitted()[0][1].body as string)).not.toHaveProperty('imageUrls');
+  });
+  it('明确指定首尾帧角色时保留顺序语义，仅尾帧仍在提交前拦截', async () => {
+    setup('video');
+    const model = 'bytedance/seedance-2.0-global/image-to-video';
+    useAppStore.getState().updateNodeData('n1', { model });
+    await expect(executeRunningHubModel({ provider: 'runninghub', model, nodeId: 'n1', prompt: '首尾帧生成视频' }, 'video', '首尾帧生成视频', {
+      image: ['https://input.test/last.png'], imageRoles: ['last_frame'],
+    })).rejects.toThrow('首帧');
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(pending()).toEqual([]);
+    expect(useAppStore.getState().nodes[0].data.runninghubStage).toBe('任务未提交');
+    await executeRunningHubModel({ provider: 'runninghub', model, nodeId: 'n1', prompt: '首尾帧生成视频' }, 'video', '首尾帧生成视频', {
+      image: ['https://input.test/last.png', 'https://input.test/first.png'], imageRoles: ['last_frame', 'first_frame'],
+    });
+    expect(submitted()[0][0]).toBe(`${connection.baseUrl}/openapi/v2/${model}`);
+    expect(JSON.parse(submitted()[0][1].body as string)).toMatchObject({ firstFrameUrl: 'https://input.test/first.png', lastFrameUrl: 'https://input.test/last.png' });
+  });
+  it('无素材也未设置首尾帧时使用同系列文生视频接口', async () => {
+    setup('video');
+    await executeRunningHubModel({ provider: 'runninghub', model: 'bytedance/seedance-2.0-global/image-to-video', prompt: '纯文字生成视频' }, 'video', '纯文字生成视频', {});
+    expect(submitted()[0][0]).toBe(`${connection.baseUrl}/openapi/v2/bytedance/seedance-2.0-global/text-to-video`);
+    expect(JSON.parse(submitted()[0][1].body as string)).not.toHaveProperty('firstFrameUrl');
+  });
+  it('没有同系列参考接口时提示更换模型，不跨版本改道或上传素材', async () => {
+    setup('video');
+    await expect(executeRunningHubModel({ provider: 'runninghub', model: 'seedance-v1.5-pro/image-to-video', prompt: '参考图片生成视频' }, 'video', '参考图片生成视频', { image: ['blob:reference'] })).rejects.toThrow('不支持普通参考素材');
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(pending()).toEqual([]);
+  });
+  it('参考模式仍校验数量和未知参数，错误先于上传与付费提交', async () => {
+    setup('video');
+    const model = 'bytedance/seedance-2.0-global/image-to-video';
+    await expect(executeRunningHubModel({ provider: 'runninghub', model, prompt: '参考图片生成视频' }, 'video', '参考图片生成视频', { image: Array.from({ length: 10 }, (_, index) => `blob:ref-${index}`) })).rejects.toThrow('数量');
+    await expect(executeRunningHubModel({ provider: 'runninghub', model, prompt: '参考图片生成视频', runninghubModelParameters: { unknown: 'value' } }, 'video', '参考图片生成视频', { image: ['blob:reference'] })).rejects.toThrow('参数已变化');
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(pending()).toEqual([]);
+  });
+  it('参考模式网络中断后按原节点恢复，只查询已有任务', async () => {
+    setup('video');
+    const model = 'bytedance/seedance-2.0-global/image-to-video';
+    useAppStore.getState().updateNodeData('n1', { model });
+    const original = mocks.fetch.getMockImplementation()!;
+    mocks.fetch.mockImplementation(async (url, init) => { if (String(url).endsWith('/query')) throw new Error('offline'); return original(url, init); });
+    await expect(executeRunningHubModel({ provider: 'runninghub', model, nodeId: 'n1', prompt: '参考图片生成视频' }, 'video', '参考图片生成视频', { image: ['https://input.test/reference.png'] })).rejects.toThrow('连接中断');
+    expect(pending()[0]).toMatchObject({ taskId, runninghubModelId: model });
+    mocks.fetch.mockImplementation(original);
+    await resumeRunningHubNodeTask('n1');
+    expect(useAppStore.getState().nodes[0].data.status).toBe('success');
+    expect(pending()).toEqual([]);
+    expect(submitted()).toHaveLength(1);
+  });
   it.each(['alibaba/wan-3.0/image-to-video', 'alibaba/wan-3.0-prime/image-to-video'])('万相首帧说明提及尾帧时仍正确绑定：%s', async (id) => {
     const model = getRunningHubModel(id)!;
     const first = 'https://input.test/first.png';

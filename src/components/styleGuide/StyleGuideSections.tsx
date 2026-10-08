@@ -16,6 +16,7 @@ import MarkdownEditor from '../shared/MarkdownEditor';
 import FileUploadButton from '../shared/FileUploadButton';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import StyleGuideMascot from './StyleGuideMascot';
+import StyleGuideGenerationEffects from './StyleGuideGenerationEffects';
 
 /* ── 分区 id 约定 ──────────────────────────────────────────────────────────
    每个 <Section> 的 id 同时是左侧目录的锚点，目录列表在 StyleGuideWindow.tsx
@@ -1336,6 +1337,9 @@ export function StyleGuideContent({ theme }: { theme: 'dark' | 'light' }) {
       <CardsSection />
       <BadgesSection />
       <FeedbackSection />
+      <Section id="sg-generation-effects" title="生成特效" desc="生成思考球、对话框边框流光与金属按钮，复用画布中的真实组件。">
+        <StyleGuideGenerationEffects theme={theme} />
+      </Section>
       <VideoPlayerSection />
       <MarkdownEditorSection />
       <Section id="sg-mascot" title="吉祥物" desc="预览真实吉祥物的状态、表情与身体动作，支持循环演示和不同尺寸查看。">

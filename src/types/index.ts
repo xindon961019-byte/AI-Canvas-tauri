@@ -129,7 +129,7 @@ export type NodeType =
 // 内置图像预设可请求的生成后处理流程
 export type ImagePostProcess = 'character-8-direction-grid';
 
-export type AnimationAction = 'idle' | 'walk' | 'run' | 'jump' | 'attack' | 'hit';
+export type AnimationAction = 'idle' | 'walk' | 'run' | 'jump' | 'attack' | 'hit' | 'custom';
 export type AnimationPreviewMode = 'playing' | 'sheet';
 export type CameraLens = '15mm' | '24mm' | '35mm' | '50mm' | '85mm' | '200mm' | 'macro' | 'fisheye';
 export type CameraShutterEffect = 'freeze' | 'natural' | 'motion' | 'light-trails';
@@ -150,6 +150,7 @@ export const ANIMATION_ACTION_LABELS: Record<AnimationAction, string> = {
   jump: '跳跃',
   attack: '攻击',
   hit: '受击',
+  custom: '自定义',
 };
 
 export const ANIMATION_FRAME_GRIDS: Record<6 | 8 | 10 | 12 | 16 | 20, { cols: number; rows: number }> = {

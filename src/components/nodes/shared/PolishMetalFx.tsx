@@ -8,7 +8,7 @@ import {
   BEND_DEFAULTS,
   type MetalFxInstance,
   type MetalFxProps,
-} from 'metal-fx';
+} from '../../../vendor/generation-effects/metal-fx/src';
 
 const getSendBendConfig = () => BEND_DEFAULTS;
 

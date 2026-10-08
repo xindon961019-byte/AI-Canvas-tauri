@@ -397,6 +397,7 @@ export async function assembleAgentContext(
     // 请求前强制压缩：失败时不发送超限请求，由调用方暂停任务
     try {
       const compressed = await compressConversationContext(conversationId, {
+        projectId,
         excludeMessageIds: options.excludeMessageIds,
         signal,
       });
@@ -416,6 +417,7 @@ export async function assembleAgentContext(
   } else if (rawRatio >= PRECOMPRESS_RATIO) {
     // 后台预压缩，不阻塞本次请求
     void compressConversationContext(conversationId, {
+      projectId,
       excludeMessageIds: options.excludeMessageIds,
     }).catch(() => { /* 预压缩失败不影响本次请求，下次达到 90% 时再强制压缩 */ });
   }

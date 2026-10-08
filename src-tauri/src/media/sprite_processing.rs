@@ -5,15 +5,17 @@ use std::collections::VecDeque;
 use std::io::{BufReader, Cursor};
 use std::path::Path;
 
+use crate::thumbnail_cache::{derived_source_version, publish_cache_file, read_cache_file};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use image::{ImageReader, Rgba, RgbaImage};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const MAX_PIXELS: u64 = 16_777_216;
 const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 static PROCESSING_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
-#[derive(Clone, Copy, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ChromaKey {
     Auto,
@@ -21,21 +23,21 @@ pub enum ChromaKey {
     Green,
     None,
 }
-#[derive(Clone, Copy, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Alignment {
     Foot,
     Alpha,
     None,
 }
-#[derive(Clone, Copy, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Segmentation {
     Grid,
     Projection,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SpriteOptions {
     pub cols: u32,
@@ -54,18 +56,18 @@ pub struct SpriteOptions {
 pub struct FrameEdit {
     pub source_index: usize,
     pub enabled: bool,
-    pub offset_x: i32,
-    pub offset_y: i32,
+    pub offset_x: f64,
+    pub offset_y: f64,
 }
 
-#[derive(Clone, Copy, Serialize, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
 pub struct Rect {
     pub x: u32,
     pub y: u32,
     pub w: u32,
     pub h: u32,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrameAnalysis {
     source_index: usize,
@@ -80,7 +82,7 @@ pub struct PreparedSprite {
     pub analyses: Vec<FrameAnalysis>,
     pub warnings: Vec<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpritePreview {
     png_base64: String,
@@ -92,6 +94,13 @@ pub struct SpritePreview {
     rows: u32,
     frames: Vec<FrameAnalysis>,
     warnings: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedSpritePreview {
+    source_version: [u8; 32],
+    png_digest: [u8; 32],
+    preview: SpritePreview,
 }
 
 impl SpriteOptions {
@@ -472,6 +481,53 @@ pub fn prepare(mut sheet: RgbaImage, options: &SpriteOptions) -> Result<Prepared
     })
 }
 
+fn translate_frame(source: &RgbaImage, offset_x: f64, offset_y: f64) -> RgbaImage {
+    let mut frame = RgbaImage::new(source.width(), source.height());
+    if offset_x.fract() == 0.0 && offset_y.fract() == 0.0 {
+        image::imageops::overlay(&mut frame, source, offset_x as i64, offset_y as i64);
+        return frame;
+    }
+    // 对预乘 Alpha 做双线性采样，透明像素中的底色不参与边缘混色。
+    for (x, y, pixel) in frame.enumerate_pixels_mut() {
+        let sx = f64::from(x) - offset_x;
+        let sy = f64::from(y) - offset_y;
+        let left = sx.floor() as i64;
+        let top = sy.floor() as i64;
+        let fx = sx - sx.floor();
+        let fy = sy - sy.floor();
+        let mut alpha = 0.0;
+        let mut color = [0.0; 3];
+        for (dx, wx) in [(0, 1.0 - fx), (1, fx)] {
+            for (dy, wy) in [(0, 1.0 - fy), (1, fy)] {
+                let px = left + dx;
+                let py = top + dy;
+                if px < 0
+                    || py < 0
+                    || px >= i64::from(source.width())
+                    || py >= i64::from(source.height())
+                {
+                    continue;
+                }
+                let sample = source.get_pixel(px as u32, py as u32);
+                let weight = f64::from(sample[3]) * wx * wy;
+                alpha += weight;
+                for channel in 0..3 {
+                    color[channel] += f64::from(sample[channel]) * weight;
+                }
+            }
+        }
+        if alpha > 0.0 {
+            *pixel = Rgba([
+                (color[0] / alpha).round() as u8,
+                (color[1] / alpha).round() as u8,
+                (color[2] / alpha).round() as u8,
+                alpha.round() as u8,
+            ]);
+        }
+    }
+    frame
+}
+
 pub fn curate(frames: &[RgbaImage], edits: Option<&[FrameEdit]>) -> Result<Vec<RgbaImage>, String> {
     let Some(edits) = edits else {
         return Ok(frames.to_vec());
@@ -487,22 +543,17 @@ pub fn curate(frames: &[RgbaImage], edits: Option<&[FrameEdit]>) -> Result<Vec<R
         }
         used[edit.source_index] = true;
         let source = &frames[edit.source_index];
-        if edit.offset_x.unsigned_abs() > source.width()
-            || edit.offset_y.unsigned_abs() > source.height()
+        if !edit.offset_x.is_finite()
+            || !edit.offset_y.is_finite()
+            || edit.offset_x.abs() > f64::from(source.width())
+            || edit.offset_y.abs() > f64::from(source.height())
         {
             return Err("帧偏移超出画布范围".into());
         }
         if !edit.enabled {
             continue;
         }
-        let mut frame = RgbaImage::new(source.width(), source.height());
-        image::imageops::overlay(
-            &mut frame,
-            source,
-            i64::from(edit.offset_x),
-            i64::from(edit.offset_y),
-        );
-        output.push(frame);
+        output.push(translate_frame(source, edit.offset_x, edit.offset_y));
     }
     if output.is_empty() {
         return Err("请至少保留一帧".into());
@@ -541,36 +592,153 @@ pub fn png_bytes(image: RgbaImage) -> Result<Vec<u8>, String> {
     Ok(bytes.into_inner())
 }
 
+fn preview_cache_identity(
+    root: &Path,
+    input: &Path,
+    options: &SpriteOptions,
+) -> Result<([u8; 32], String), String> {
+    let (relative, version) = derived_source_version(root, input, MAX_FILE_BYTES)?;
+    let mut hash = Sha256::new();
+    // 算法变化时提升此版本，避免旧的去底色/切帧/对齐结果继续命中。
+    hash.update(b"sprite-preview-v1\0");
+    hash.update(relative.as_bytes());
+    hash.update([0]);
+    hash.update(serde_json::to_vec(options).map_err(|_| "动画缓存参数无效")?);
+    let digest: String = hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok((version, format!("sprite-v1-{digest}")))
+}
+
+fn read_preview_cache(
+    root: &Path,
+    name: &str,
+    version: [u8; 32],
+    options: &SpriteOptions,
+) -> Option<SpritePreview> {
+    let metadata = read_cache_file(root, &format!("{name}.json"), 256 * 1024)?;
+    let mut cached: CachedSpritePreview = serde_json::from_slice(&metadata).ok()?;
+    let preview = &cached.preview;
+    let cols = options.cols.min(options.frame_count);
+    let rows = options.frame_count.div_ceil(options.cols);
+    if cached.source_version != version
+        || !preview.png_base64.is_empty()
+        || preview.cols != cols
+        || preview.rows != rows
+        || preview.cell_width == 0
+        || preview.cell_height == 0
+        || preview.cell_width.checked_mul(cols) != Some(preview.width)
+        || preview.cell_height.checked_mul(rows) != Some(preview.height)
+        || u64::from(preview.width) * u64::from(preview.height) > MAX_PIXELS
+        || preview.frames.len() != options.frame_count as usize
+        || preview
+            .frames
+            .iter()
+            .enumerate()
+            .any(|(index, frame)| frame.source_index != index || !frame.anchor_x.is_finite())
+    {
+        return None;
+    }
+    let png = read_cache_file(root, &format!("{name}.png"), MAX_FILE_BYTES as usize)?;
+    if !png.starts_with(b"\x89PNG\r\n\x1a\n") || Sha256::digest(&png)[..] != cached.png_digest {
+        return None;
+    }
+    // 只检查 PNG header 与摘要；命中时不解码原图、不重复去背景或对齐。
+    let dimensions = ImageReader::with_format(Cursor::new(&png), image::ImageFormat::Png)
+        .into_dimensions()
+        .ok()?;
+    if dimensions != (preview.width, preview.height) {
+        return None;
+    }
+    cached.preview.png_base64 = STANDARD.encode(png);
+    Some(cached.preview)
+}
+
+fn prepare_preview(
+    input: &Path,
+    options: &SpriteOptions,
+    cache_root: Option<&Path>,
+    process: impl FnOnce(RgbaImage, &SpriteOptions) -> Result<PreparedSprite, String>,
+) -> Result<SpritePreview, String> {
+    options.validate()?;
+    let cache = cache_root.and_then(|root| {
+        preview_cache_identity(root, input, options)
+            .ok()
+            .map(|identity| (root, identity))
+    });
+    if let Some((root, (version, name))) = &cache {
+        if let Some(preview) = read_preview_cache(root, name, *version, options) {
+            if preview_cache_identity(root, input, options)?.0 == *version {
+                return Ok(preview);
+            }
+            return Err("动画原图已变化，请重试".into());
+        }
+    }
+    let prepared = process(read_sheet(input)?, options)?;
+    let image = atlas(&prepared.frames, options.cols)?;
+    let (width, height) = image.dimensions();
+    let png = png_bytes(image)?;
+    let mut preview = SpritePreview {
+        png_base64: String::new(),
+        width,
+        height,
+        cell_width: prepared.frames[0].width(),
+        cell_height: prepared.frames[0].height(),
+        cols: options.cols.min(options.frame_count),
+        rows: options.frame_count.div_ceil(options.cols),
+        frames: prepared.analyses,
+        warnings: prepared.warnings,
+    };
+    if let Some((root, (version, name))) = cache {
+        let current = || Ok(preview_cache_identity(root, input, options)?.0 == version);
+        if !current()? {
+            return Err("动画原图已变化，请重试".into());
+        }
+        let cached = CachedSpritePreview {
+            source_version: version,
+            png_digest: Sha256::digest(&png).into(),
+            preview,
+        };
+        // 缓存失败仍可使用本次结果；两个文件各自原子替换，摘要保证不会读到不匹配的一对。
+        if png.len() <= MAX_FILE_BYTES as usize {
+            if let Ok(metadata) = serde_json::to_vec(&cached) {
+                if metadata.len() <= 256 * 1024
+                    && publish_cache_file(root, &format!("{name}.png"), &png, current)
+                        .unwrap_or(false)
+                {
+                    let _ = publish_cache_file(root, &format!("{name}.json"), &metadata, current);
+                }
+            }
+        }
+        preview = cached.preview;
+    }
+    preview.png_base64 = STANDARD.encode(png);
+    Ok(preview)
+}
+
 #[tauri::command]
 pub async fn preview_sprite_sheet(
     app: tauri::AppHandle,
     webview: tauri::Webview,
     input_path: String,
     options: SpriteOptions,
+    project_dir: Option<String>,
 ) -> Result<SpritePreview, String> {
     crate::path_policy::ensure_trusted_caller(&webview)?;
     options.validate()?;
-    let input = crate::path_policy::authorize_path(
-        &app,
-        &input_path,
-        crate::path_policy::PathAccess::Read,
-    )?;
+    let input = crate::path_policy::authorize_existing_plain_file(&app, &input_path)?;
+    if project_dir.is_some() && webview.label() != "main" {
+        return Err("动画缓存仅允许主窗口调用".into());
+    }
+    let root = project_dir
+        .as_deref()
+        .map(|path| crate::path_policy::authorize_existing_plain_directory(&app, path))
+        .transpose()?;
     let _slot = processing_slot().await?;
     tauri::async_runtime::spawn_blocking(move || {
-        let prepared = prepare(read_sheet(&input)?, &options)?;
-        let image = atlas(&prepared.frames, options.cols)?;
-        let (width, height) = image.dimensions();
-        Ok(SpritePreview {
-            png_base64: STANDARD.encode(png_bytes(image)?),
-            width,
-            height,
-            cell_width: prepared.frames[0].width(),
-            cell_height: prepared.frames[0].height(),
-            cols: options.cols.min(options.frame_count),
-            rows: options.frame_count.div_ceil(options.cols),
-            frames: prepared.analyses,
-            warnings: prepared.warnings,
-        })
+        prepare_preview(&input, &options, root.as_deref(), prepare)
     })
     .await
     .map_err(|_| "动画处理任务异常退出".to_string())?
@@ -579,6 +747,64 @@ pub async fn preview_sprite_sheet(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    struct CacheFixture(PathBuf);
+    impl CacheFixture {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "ai-canvas-sprite-cache-test-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).unwrap();
+            let fixture = Self(root);
+            fs::write(fixture.source(), png_bytes(sample()).unwrap()).unwrap();
+            fixture
+        }
+        fn source(&self) -> PathBuf {
+            self.0.join("source.png")
+        }
+        fn cache_path(&self, options: &SpriteOptions, extension: &str) -> PathBuf {
+            let (_, name) = preview_cache_identity(&self.0, &self.source(), options).unwrap();
+            self.0
+                .join(".thumbnail")
+                .join(format!("{name}.{extension}"))
+        }
+        fn update_source(&self) {
+            let modified = fs::metadata(self.source()).unwrap().modified().unwrap();
+            let mut image = sample();
+            image.put_pixel(12, 20, Rgba([200, 100, 50, 255]));
+            fs::write(self.source(), png_bytes(image).unwrap()).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(self.source())
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new().set_modified(modified + std::time::Duration::from_secs(1)),
+                )
+                .unwrap();
+        }
+    }
+    impl Drop for CacheFixture {
+        fn drop(&mut self) {
+            let root = self.0.canonicalize().unwrap();
+            assert!(root.starts_with(std::env::temp_dir().canonicalize().unwrap()));
+            assert!(root
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("ai-canvas-sprite-cache-test-"));
+            let _ = fs::remove_dir_all(root);
+        }
+    }
     fn options() -> SpriteOptions {
         SpriteOptions {
             chroma_key: ChromaKey::Magenta,
@@ -597,6 +823,158 @@ mod tests {
                 [255, 0, 255, 255]
             })
         })
+    }
+    #[test]
+    fn preview_cache_saves_transparent_png_and_reopens_without_processing() {
+        let fixture = CacheFixture::new();
+        let opts = options();
+        let first = prepare_preview(&fixture.source(), &opts, Some(&fixture.0), prepare).unwrap();
+        let png = fs::read(fixture.cache_path(&opts, "png")).unwrap();
+        let image = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(image.dimensions(), (first.width, first.height));
+        assert!(image.pixels().any(|pixel| pixel[3] == 0));
+        assert!(image.pixels().any(|pixel| pixel[3] == 255));
+        let hit = prepare_preview(&fixture.source(), &opts, Some(&fixture.0), |_, _| {
+            panic!("cache hit must skip processing")
+        })
+        .unwrap();
+        assert_eq!(first.png_base64, hit.png_base64);
+        assert_eq!(
+            fs::read_dir(fixture.0.join(".thumbnail")).unwrap().count(),
+            2
+        );
+        let moved = fixture.0.join("moved");
+        fs::create_dir(&moved).unwrap();
+        fs::rename(fixture.source(), moved.join("source.png")).unwrap();
+        fs::rename(fixture.0.join(".thumbnail"), moved.join(".thumbnail")).unwrap();
+        let hit = prepare_preview(&moved.join("source.png"), &opts, Some(&moved), |_, _| {
+            panic!("moved project must reuse cache")
+        })
+        .unwrap();
+        assert_eq!(first.png_base64, hit.png_base64);
+    }
+    #[test]
+    fn preview_cache_invalidates_source_and_all_processing_parameters() {
+        let fixture = CacheFixture::new();
+        let opts = options();
+        let first = prepare_preview(&fixture.source(), &opts, Some(&fixture.0), prepare).unwrap();
+        let original = preview_cache_identity(&fixture.0, &fixture.source(), &opts).unwrap();
+        for changed in [
+            SpriteOptions {
+                cols: 1,
+                rows: 2,
+                ..opts.clone()
+            },
+            SpriteOptions {
+                rows: 2,
+                ..opts.clone()
+            },
+            SpriteOptions {
+                frame_count: 1,
+                ..opts.clone()
+            },
+            SpriteOptions {
+                chroma_key: ChromaKey::None,
+                ..opts.clone()
+            },
+            SpriteOptions {
+                key_threshold: 30.0,
+                ..opts.clone()
+            },
+            SpriteOptions {
+                segmentation: Segmentation::Projection,
+                ..opts.clone()
+            },
+            SpriteOptions {
+                alignment: Alignment::Alpha,
+                ..opts.clone()
+            },
+            SpriteOptions {
+                ground: false,
+                ..opts.clone()
+            },
+            SpriteOptions {
+                margin: 0.2,
+                ..opts.clone()
+            },
+        ] {
+            assert_ne!(
+                preview_cache_identity(&fixture.0, &fixture.source(), &changed)
+                    .unwrap()
+                    .1,
+                original.1
+            );
+        }
+        fixture.update_source();
+        let current = preview_cache_identity(&fixture.0, &fixture.source(), &opts).unwrap();
+        assert_ne!(original.0, current.0);
+        assert_eq!(original.1, current.1);
+        let next = prepare_preview(&fixture.source(), &opts, Some(&fixture.0), prepare).unwrap();
+        assert_ne!(first.png_base64, next.png_base64);
+        prepare_preview(&fixture.source(), &opts, Some(&fixture.0), |_, _| {
+            panic!("updated cache must be reused")
+        })
+        .unwrap();
+    }
+    #[test]
+    fn preview_cache_rebuilds_deleted_or_corrupt_files() {
+        let fixture = CacheFixture::new();
+        let opts = options();
+        prepare_preview(&fixture.source(), &opts, Some(&fixture.0), prepare).unwrap();
+        for extension in ["png", "json"] {
+            let path = fixture.cache_path(&opts, extension);
+            fs::write(&path, b"corrupt").unwrap();
+            let called = std::cell::Cell::new(false);
+            prepare_preview(
+                &fixture.source(),
+                &opts,
+                Some(&fixture.0),
+                |image, options| {
+                    called.set(true);
+                    prepare(image, options)
+                },
+            )
+            .unwrap();
+            assert!(called.get());
+            fs::remove_file(path).unwrap();
+            let called = std::cell::Cell::new(false);
+            prepare_preview(
+                &fixture.source(),
+                &opts,
+                Some(&fixture.0),
+                |image, options| {
+                    called.set(true);
+                    prepare(image, options)
+                },
+            )
+            .unwrap();
+            assert!(called.get());
+        }
+    }
+    #[test]
+    fn preview_cache_rejects_stale_results_and_preserves_preview_when_unavailable() {
+        let fixture = CacheFixture::new();
+        let opts = options();
+        let stale = prepare_preview(
+            &fixture.source(),
+            &opts,
+            Some(&fixture.0),
+            |image, options| {
+                fixture.update_source();
+                prepare(image, options)
+            },
+        );
+        assert!(stale.is_err());
+        assert!(!fixture.0.join(".thumbnail").exists());
+        let unrelated = CacheFixture::new();
+        prepare_preview(&fixture.source(), &opts, Some(&unrelated.0), prepare).unwrap();
+        assert!(!unrelated.0.join(".thumbnail").exists());
+        fs::write(fixture.0.join(".thumbnail"), b"user-file").unwrap();
+        prepare_preview(&fixture.source(), &opts, Some(&fixture.0), prepare).unwrap();
+        assert_eq!(
+            fs::read(fixture.0.join(".thumbnail")).unwrap(),
+            b"user-file"
+        );
     }
     #[test]
     fn foot_centres_and_baselines_are_stable() {
@@ -683,13 +1061,44 @@ mod tests {
             FrameEdit {
                 source_index: 0,
                 enabled: false,
-                offset_x: 0,
-                offset_y: 0
+                offset_x: 0.0,
+                offset_y: 0.0
             };
             2
         ];
         assert!(curate(&frames, Some(&edits)).is_err());
     }
+    #[test]
+    fn fractional_offsets_preserve_alpha_edges_and_accept_json_numbers() {
+        let mut source = RgbaImage::from_pixel(3, 3, Rgba([0, 255, 0, 0]));
+        source.put_pixel(1, 1, Rgba([240, 20, 10, 255]));
+        for (x, y, expected) in [(0.5, 0.0, 128), (0.0, -0.5, 128), (0.5, -0.5, 64)] {
+            let edits: Vec<FrameEdit> = serde_json::from_value(serde_json::json!([
+                { "sourceIndex": 0, "enabled": true, "offsetX": x, "offsetY": y }
+            ]))
+            .unwrap();
+            let output = curate(&[source.clone()], Some(&edits)).unwrap();
+            assert_eq!(*output[0].get_pixel(1, 1), Rgba([240, 20, 10, expected]));
+            assert_eq!(output[0].dimensions(), (3, 3));
+        }
+        let integer: FrameEdit = serde_json::from_value(serde_json::json!(
+            { "sourceIndex": 0, "enabled": true, "offsetX": 1, "offsetY": 0 }
+        ))
+        .unwrap();
+        assert_eq!(integer.offset_x, 1.0);
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 3.5, -3.5] {
+            for (offset_x, offset_y) in [(invalid, 0.0), (0.0, invalid)] {
+                let edits = [FrameEdit {
+                    source_index: 0,
+                    enabled: true,
+                    offset_x,
+                    offset_y,
+                }];
+                assert!(curate(&[source.clone()], Some(&edits)).is_err());
+            }
+        }
+    }
+
     #[test]
     fn applies_order_disabled_frames_and_offsets() {
         let frames = vec![
@@ -700,14 +1109,14 @@ mod tests {
             FrameEdit {
                 source_index: 1,
                 enabled: true,
-                offset_x: 1,
-                offset_y: 0,
+                offset_x: 1.0,
+                offset_y: 0.0,
             },
             FrameEdit {
                 source_index: 0,
                 enabled: false,
-                offset_x: 0,
-                offset_y: 0,
+                offset_x: 0.0,
+                offset_y: 0.0,
             },
         ];
         let output = curate(&frames, Some(&edits)).unwrap();

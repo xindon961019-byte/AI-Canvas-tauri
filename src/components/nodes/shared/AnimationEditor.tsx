@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Icon } from '@iconify/react';
+import { animate, useReducedMotion } from 'framer-motion';
+import { springGentle } from '../../../utils/motion';
 import { ANIMATION_ACTION_LABELS, type AnimationAction, type BaseNodeData } from '../../../types';
 import type { AnimationFrameEdit, AnimationProcessing, AnimationSheet } from '../../../types/animation';
 import { useAppStore } from '../../../store/useAppStore';
@@ -12,6 +14,18 @@ import Select from '../../shared/Select';
 import NumberStepper from '../../shared/NumberStepper';
 import PopupCloseButton from '../../shared/PopupCloseButton';
 
+const MAX_PREVIOUS_FRAMES = 5;
+const RULER_SIZE = 24;
+type ReferenceLine = { id: number; axis: 'x' | 'y'; position: number };
+
+function rulerTicks(length: number) {
+  const ideal = Math.max(1, length / 6);
+  const power = 10 ** Math.floor(Math.log10(ideal));
+  const major = [1, 2, 5, 10].map((value) => value * power).find((value) => value >= ideal)!;
+  const minor = Math.max(1, Math.round(major / 5));
+  return Array.from({ length: Math.floor(length / minor) + 1 }, (_, index) => ({ value: index * minor, major: (index * minor) % major === 0 }));
+}
+
 export default function AnimationEditor({ nodeId, onClose }: { nodeId: string; onClose: () => void }) {
   const data = useAppStore((state) => state.nodes.find((node) => node.id === nodeId)?.data);
   const projectId = useAppStore((state) => state.currentProjectId);
@@ -21,6 +35,7 @@ export default function AnimationEditor({ nodeId, onClose }: { nodeId: string; o
 
 function Editor({ nodeId, data, projectId, onClose }: { nodeId: string; data: BaseNodeData; projectId: string | null; onClose: () => void }) {
   const t = useT();
+  const reduceMotion = useReducedMotion();
   const [baseRevision] = useState(() => useAppStore.getState().getCurrentRevision());
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -35,12 +50,27 @@ function Editor({ nodeId, data, projectId, onClose }: { nodeId: string; data: Ba
   const [busy, setBusy] = useState(false);
   const [previewState, setPreviewState] = useState<{ key: string; value?: AnimationPreview; error?: string }>();
   const [guides, setGuides] = useState(true);
+  const [showPreviousFrames, setShowPreviousFrames] = useState(false);
+  const [previousFrameCount, setPreviousFrameCount] = useState(1);
+  const [referenceLines, setReferenceLines] = useState<ReferenceLine[]>([]);
+  const previewElement = useRef<HTMLDivElement>(null);
+  const nextReferenceId = useRef(0);
+  const referenceDrag = useRef<{ pointerId: number; line: ReferenceLine; original?: ReferenceLine } | null>(null);
+  const framesList = useRef<HTMLDivElement>(null);
+  const framesContent = useRef<HTMLDivElement>(null);
+  const revealSelectedFrame = useRef<(() => void) | null>(null);
+  const frameOrder = edits.map((edit) => edit.sourceIndex).join(',');
   const requestKey = JSON.stringify([data.filePath, sheet, processing]);
   const preview = previewState?.key === requestKey ? previewState.value : undefined;
   const error = previewState?.key === requestKey ? previewState.error : undefined;
   const enabled = useMemo(() => edits.filter((edit) => edit.enabled), [edits]);
   const selectedEdit = edits.find((edit) => edit.sourceIndex === selected) ?? edits[0];
   const current = playing ? enabled[Math.min(playhead, enabled.length - 1)] : selectedEdit;
+  const previousFrameLimit = Math.max(1, Math.min(MAX_PREVIOUS_FRAMES, enabled.length - 1));
+  const shownPreviousFrameCount = Math.min(previousFrameCount, previousFrameLimit);
+  const previousFrames = showPreviousFrames
+    ? edits.slice(0, edits.indexOf(current)).filter((edit) => edit.enabled).slice(-shownPreviousFrameCount)
+    : [];
   const endedOnce = !loop && playhead >= enabled.length - 1;
   const stopped = !playing || endedOnce;
   const layout = preview ?? { cols: sheet.cols, rows: sheet.rows, cellWidth: (data.imageWidth ?? sheet.cols) / sheet.cols, cellHeight: (data.imageHeight ?? sheet.rows) / sheet.rows };
@@ -54,12 +84,111 @@ function Editor({ nodeId, data, projectId, onClose }: { nodeId: string; data: Ba
     setPlaying(false);
   };
 
+  const linePosition = (axis: ReferenceLine['axis'], event: ReactPointerEvent) => {
+    const rect = previewElement.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+    const dimension = axis === 'x' ? layout.cellWidth : layout.cellHeight;
+    const fraction = axis === 'x' ? (event.clientX - rect.left) / rect.width : (event.clientY - rect.top) / rect.height;
+    return { position: Math.round(Math.max(0, Math.min(1, fraction)) * dimension) / dimension,
+      inside: event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom };
+  };
+  const startReferenceDrag = (event: ReactPointerEvent<HTMLElement>, axis: ReferenceLine['axis'], original?: ReferenceLine) => {
+    if (event.button !== 0 || referenceDrag.current) return;
+    const point = linePosition(axis, event);
+    if (!point) return;
+    event.preventDefault(); event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const line = original ?? { id: nextReferenceId.current++, axis, position: point.position };
+    referenceDrag.current = { pointerId: event.pointerId, line, original };
+    if (!original) setReferenceLines((values) => [...values, line]);
+    setSelected(current.sourceIndex); setPlaying(false); setGuides(true);
+  };
+  const moveReferenceDrag = (event: ReactPointerEvent) => {
+    const drag = referenceDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault(); event.stopPropagation();
+    const point = linePosition(drag.line.axis, event);
+    if (point) setReferenceLines((values) => values.map((line) => line.id === drag.line.id ? { ...line, position: point.position } : line));
+  };
+  const finishReferenceDrag = (event: ReactPointerEvent, cancelled = false) => {
+    const drag = referenceDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault(); event.stopPropagation(); referenceDrag.current = null;
+    const point = linePosition(drag.line.axis, event);
+    setReferenceLines((values) => values.flatMap((line) => line.id !== drag.line.id ? [line]
+      : cancelled ? drag.original ? [drag.original] : []
+        : point?.inside ? [{ ...line, position: point.position }] : []));
+  };
+  const referenceKeyDown = (event: ReactKeyboardEvent, line: ReferenceLine) => {
+    const delta = line.axis === 'x' ? { ArrowLeft: -1, ArrowRight: 1 } : { ArrowUp: -1, ArrowDown: 1 };
+    const step = delta[event.key as keyof typeof delta];
+    if (step === undefined && !['Delete', 'Backspace', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation();
+    if (event.key === 'Delete' || event.key === 'Backspace') { setReferenceLines((values) => values.filter((value) => value.id !== line.id)); return; }
+    const dimension = line.axis === 'x' ? layout.cellWidth : layout.cellHeight;
+    const position = event.key === 'Home' ? (line.axis === 'x' ? 0 : 1) : event.key === 'End' ? (line.axis === 'x' ? 1 : 0) : Math.max(0, Math.min(1, line.position + step! * (event.shiftKey ? 10 : 1) / dimension));
+    setReferenceLines((values) => values.map((value) => value.id === line.id ? { ...value, position } : value));
+  };
+  const rulerKeyDown = (event: ReactKeyboardEvent, axis: ReferenceLine['axis']) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault(); event.stopPropagation();
+    const id = nextReferenceId.current++;
+    setReferenceLines((values) => [...values, { id, axis, position: 0.5 }]);
+    setSelected(current.sourceIndex); setPlaying(false); setGuides(true);
+  };
+
+  useEffect(() => {
+    const list = framesList.current;
+    const content = framesContent.current;
+    if (!list || !content) return;
+    let stopAnimation = () => {};
+    const reveal = () => {
+      stopAnimation();
+      const tile = content.querySelector<HTMLButtonElement>('[aria-pressed="true"]');
+      if (!tile) return;
+      const maxScrollLeft = Math.max(0, content.offsetWidth - list.clientWidth);
+      const target = tile === content.lastElementChild ? maxScrollLeft
+        : tile.offsetLeft + tile.offsetWidth / 2 - list.clientWidth / 2;
+      const left = Math.min(maxScrollLeft, Math.max(0, target));
+      if (Math.abs(left - list.scrollLeft) <= 1) return;
+      if (reduceMotion) { list.scrollTo({ left, behavior: 'instant' }); return; }
+      // 与 UI Kit Tabs 保持同一弹簧及边界回弹。
+      const animation = animate(list.scrollLeft, left, {
+        ...springGentle, bounce: 0.35,
+        onUpdate: (position) => {
+          const bounded = Math.min(maxScrollLeft, Math.max(0, position));
+          list.scrollLeft = bounded;
+          const overscroll = Math.min(12, Math.max(-12, bounded - position));
+          content.style.transform = `translate3d(${overscroll}px, 0, 0)`;
+        },
+        onComplete: () => { list.scrollLeft = left; content.style.removeProperty('transform'); },
+      });
+      stopAnimation = () => { animation.stop(); content.style.removeProperty('transform'); };
+    };
+    revealSelectedFrame.current = reveal;
+    reveal();
+    let listWidth = list.clientWidth;
+    let contentWidth = content.offsetWidth;
+    const observer = new ResizeObserver(() => {
+      if (listWidth === list.clientWidth && contentWidth === content.offsetWidth) return;
+      listWidth = list.clientWidth; contentWidth = content.offsetWidth; reveal();
+    });
+    observer.observe(list); observer.observe(content);
+    const interrupt = () => stopAnimation();
+    list.addEventListener('wheel', interrupt, { passive: true });
+    list.addEventListener('pointerdown', interrupt);
+    return () => {
+      stopAnimation(); observer.disconnect(); revealSelectedFrame.current = null;
+      list.removeEventListener('wheel', interrupt); list.removeEventListener('pointerdown', interrupt);
+    };
+  }, [frameOrder, reduceMotion, selected]);
+
   useEffect(() => {
     if (!data.filePath) return;
     let active = true;
     let prepared: AnimationPreview | undefined;
     const timer = window.setTimeout(() => {
-      void prepareAnimationPreview(data.filePath!, sheet, processing).then((value) => {
+      void prepareAnimationPreview(data.filePath!, sheet, processing, projectId).then((value) => {
         if (!active) { value.dispose(); return; }
         prepared = value;
         setPreviewState({ key: requestKey, value });
@@ -68,7 +197,7 @@ function Editor({ nodeId, data, projectId, onClose }: { nodeId: string; data: Ba
       });
     }, 180);
     return () => { active = false; window.clearTimeout(timer); prepared?.dispose(); };
-  }, [data.filePath, processing, requestKey, sheet]);
+  }, [data.filePath, processing, projectId, requestKey, sheet]);
 
   useEffect(() => {
     if (stopped || !src) return;
@@ -117,7 +246,7 @@ function Editor({ nodeId, data, projectId, onClose }: { nodeId: string; data: Ba
       const result = await uploadSourceFileToProject('.png,.webp,.jpg,.jpeg', projectId);
       if (!result || !mounted.current || !isCanvasDerivationFresh(guard, useAppStore.getState())) return;
       if (!result.filePath) throw new Error(t('动画原图未保存到项目目录'));
-      const checked = await prepareAnimationPreview(result.filePath, sheet, processing);
+      const checked = await prepareAnimationPreview(result.filePath, sheet, processing, projectId);
       try {
         if (!mounted.current || !isCanvasDerivationFresh(guard, useAppStore.getState())) return;
         useAppStore.getState().updateNodeData(nodeId, {
@@ -146,30 +275,42 @@ function Editor({ nodeId, data, projectId, onClose }: { nodeId: string; data: Ba
     </div>
     <div className="animation-editor-workspace">
       <section className="animation-editor-preview-panel" aria-label={t('动画预览')}>
-        <div className="animation-editor-toolbar p-3">
-          <div className="flex items-center gap-1">
+        <div className="animation-editor-stage">
+          {src ? <div className="animation-editor-preview-shell" style={{ width: `min(100cqw, calc((100cqh - ${RULER_SIZE}px) * ${layout.cellWidth / layout.cellHeight} + ${RULER_SIZE}px))` }}
+            onPointerMove={moveReferenceDrag} onPointerUp={(event) => finishReferenceDrag(event)} onPointerCancel={(event) => finishReferenceDrag(event, true)} onLostPointerCapture={(event) => finishReferenceDrag(event, true)}>
+            <div ref={previewElement} className="animation-editor-preview animation-cell" style={{ aspectRatio: `${layout.cellWidth} / ${layout.cellHeight}` }}>
+            {previousFrames.map((edit) => <div key={edit.sourceIndex} className="animation-editor-onion-frame absolute inset-0 pointer-events-none opacity-30" aria-hidden="true">
+              <img src={src} alt="" aria-hidden="true" className="animation-frame-sheet" style={animationFrameStyle(layout, edit)} draggable={false} />
+            </div>)}
+            <img src={src} alt={t('动画预览')} className="animation-frame-sheet" style={animationFrameStyle(layout, current)} draggable={false} />
+            {guides && <><span className="animation-anchor-axis" />{processing.ground && <span className="animation-anchor-baseline" style={{ bottom: `${processing.margin * 100}%` }} />}</>}
+            {guides && referenceLines.map((line) => <div key={line.id} role="slider" tabIndex={0} aria-label={t(line.axis === 'x' ? '竖向参考线' : '横向参考线')} aria-orientation={line.axis === 'x' ? 'horizontal' : 'vertical'} aria-valuemin={0} aria-valuemax={Math.round(line.axis === 'x' ? layout.cellWidth : layout.cellHeight)} aria-valuenow={Math.round(line.axis === 'x' ? line.position * layout.cellWidth : (1 - line.position) * layout.cellHeight)}
+              className={`animation-editor-reference animation-editor-reference--${line.axis}`} style={line.axis === 'x' ? { left: `${line.position * 100}%` } : { top: `${line.position * 100}%` }}
+              onPointerDown={(event) => startReferenceDrag(event, line.axis, line)} onKeyDown={(event) => referenceKeyDown(event, line)} data-tooltip={t('拖动调整位置，拖出预览区或按 Delete 删除')} />)}
+            </div>
+            {(['y', 'x'] as const).map((axis) => <div key={axis} role="button" tabIndex={0} aria-label={t(axis === 'x' ? '左侧像素刻度尺' : '底部像素刻度尺')} className={`animation-editor-ruler animation-editor-ruler--${axis}`}
+              onPointerDown={(event) => startReferenceDrag(event, axis)} onKeyDown={(event) => rulerKeyDown(event, axis)} data-tooltip={t(axis === 'x' ? '向右拖出竖向参考线' : '向上拖出横向参考线')}>
+              {rulerTicks(axis === 'x' ? layout.cellHeight : layout.cellWidth).map((tick) => {
+                const length = axis === 'x' ? layout.cellHeight : layout.cellWidth;
+                return <span key={tick.value} aria-hidden="true" className={`animation-editor-ruler-tick${tick.major ? ' is-major' : ''}${tick.value === 0 ? ' is-origin' : ''}`} style={axis === 'x' ? { bottom: `${tick.value / length * 100}%` } : { left: `${tick.value / length * 100}%` }}>
+                  {tick.major && tick.value < length * 0.95 && <span className="animation-editor-ruler-label">{tick.value}</span>}
+                </span>;
+              })}
+            </div>)}
+            <span className="animation-editor-ruler-corner" aria-hidden="true">px</span>
+          </div> : <div className="ui-empty"><Icon icon="mdi:animation-play-outline" width="40" /><span className="text-sm">{t('开始制作帧动画')}</span><span className="ui-hint">{t('导入精灵图，或选择模型生成角色动作')}</span></div>}
+        </div>
+        <div className="animation-editor-status px-3 pb-3">
+          <div aria-live="polite">{error ? <span className="ui-error" role="alert">{error}</span>
+            : data.filePath && !preview ? <span className="ui-hint">{t('正在处理动画预览')}</span>
+              : preview?.warnings.length ? <span className="ui-hint">{preview.warnings.join('；')}</span>
+                : <span className="ui-hint">{t('点击下方帧卡片，暂停并编辑此帧')}</span>}</div>
+          <div className="animation-editor-playback flex items-center gap-1">
             <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" aria-label={t('上一帧')} disabled={!src} onClick={() => stepFrame(-1)}><Icon icon="mdi:skip-previous" width="16" /></button>
             <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" disabled={!src} onClick={() => { setPlaying(stopped); if (stopped) setPlayhead(0); }}><Icon icon={stopped ? 'mdi:play' : 'mdi:pause'} width="16" />{stopped ? t('播放') : t('暂停')}</button>
             <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" aria-label={t('下一帧')} disabled={!src} onClick={() => stepFrame(1)}><Icon icon="mdi:skip-next" width="16" /></button>
             <span className="ui-hint tabular-nums ml-1">{edits.indexOf(current) + 1} / {edits.length}</span>
           </div>
-          <div className="flex items-center gap-3">
-            <NumberStepper value={fps} min={1} max={24} unit="fps" aria-label={t('播放帧率')} onChange={setFps} size="sm" />
-            <div className="animation-editor-check"><input id={`${nodeId}-loop`} className="ui-checkbox" type="checkbox" checked={loop} onChange={(event) => { setLoop(event.target.checked); setPlayhead(0); }} /><label htmlFor={`${nodeId}-loop`}>{t('循环播放')}</label></div>
-            <button type="button" className={`ui-btn ui-btn--ghost ui-btn--sm${guides ? ' is-active' : ''}`} aria-label={t('显示对齐辅助线')} aria-pressed={guides} onClick={() => setGuides((value) => !value)}><Icon icon="mdi:vector-line" width="16" /></button>
-          </div>
-        </div>
-        <div className="animation-editor-stage">
-          {src ? <div className="animation-editor-preview animation-cell" style={{ aspectRatio: `${layout.cellWidth} / ${layout.cellHeight}`, width: `min(100cqw, ${100 * layout.cellWidth / layout.cellHeight}cqh)` }}>
-            <img src={src} alt={t('动画预览')} className="animation-frame-sheet" style={animationFrameStyle(layout, current)} draggable={false} />
-            {guides && <><span className="animation-anchor-axis" />{processing.ground && <span className="animation-anchor-baseline" style={{ bottom: `${processing.margin * 100}%` }} />}</>}
-          </div> : <div className="ui-empty"><Icon icon="mdi:animation-play-outline" width="40" /><span className="text-sm">{t('开始制作帧动画')}</span><span className="ui-hint">{t('导入精灵图，或选择模型生成角色动作')}</span></div>}
-        </div>
-        <div className="animation-editor-status px-3 pb-3" aria-live="polite">
-          {error ? <span className="ui-error" role="alert">{error}</span>
-            : data.filePath && !preview ? <span className="ui-hint">{t('正在处理动画预览')}</span>
-              : preview?.warnings.length ? <span className="ui-hint">{preview.warnings.join('；')}</span>
-                : <span className="ui-hint">{t('点击下方帧卡片，暂停并编辑此帧')}</span>}
           <span className="ui-hint tabular-nums">{Math.round(layout.cellWidth)} × {Math.round(layout.cellHeight)} px</span>
         </div>
       </section>
@@ -178,8 +319,8 @@ function Editor({ nodeId, data, projectId, onClose }: { nodeId: string; data: Ba
           <div className="ui-card__header flex items-center justify-between"><span>{t('选中帧')}</span><span className="ui-badge ui-badge--primary">{String(selectedPosition + 1).padStart(2, '0')}</span></div>
           <div className="ui-card__body ui-stack">
             <div className="flex items-center justify-between gap-2"><div className="animation-editor-check"><input id={`${nodeId}-enabled`} className="ui-checkbox" type="checkbox" checked={selectedEdit.enabled} disabled={selectedEdit.enabled && enabled.length === 1} onChange={(event) => patchFrame({ enabled: event.target.checked })} /><label htmlFor={`${nodeId}-enabled`}>{t('保留此帧')}</label></div><span className="ui-hint">{t('原帧')} {selectedEdit.sourceIndex + 1}</span></div>
-            <label className="animation-editor-field"><span className="ui-label">{t('横向偏移')}</span><NumberStepper value={selectedEdit.offsetX} min={-layout.cellWidth} max={layout.cellWidth} unit="px" aria-label={t('帧横向偏移')} onChange={(offsetX) => patchFrame({ offsetX })} size="sm" /></label>
-            <label className="animation-editor-field"><span className="ui-label">{t('纵向偏移')}</span><NumberStepper value={selectedEdit.offsetY} min={-layout.cellHeight} max={layout.cellHeight} unit="px" aria-label={t('帧纵向偏移')} onChange={(offsetY) => patchFrame({ offsetY })} size="sm" /></label>
+            <label className="animation-editor-field"><span className="ui-label">{t('横向偏移')}</span><NumberStepper value={selectedEdit.offsetX} min={-layout.cellWidth} max={layout.cellWidth} step={0.5} unit="px" aria-label={t('帧横向偏移')} onChange={(offsetX) => patchFrame({ offsetX })} size="sm" /></label>
+            <label className="animation-editor-field"><span className="ui-label">{t('纵向偏移')}</span><NumberStepper value={selectedEdit.offsetY} min={-layout.cellHeight} max={layout.cellHeight} step={0.5} unit="px" aria-label={t('帧纵向偏移')} onChange={(offsetY) => patchFrame({ offsetY })} size="sm" /></label>
             <div className="flex items-center gap-1"><button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" disabled={selectedPosition === 0} onClick={() => move(-1)}><Icon icon="mdi:arrow-left" width="13" />{t('前移')}</button><button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" disabled={selectedPosition === edits.length - 1} onClick={() => move(1)}>{t('后移')}<Icon icon="mdi:arrow-right" width="13" /></button><button type="button" className="ui-btn ui-btn--ghost ui-btn--sm ml-auto" onClick={() => patchFrame({ offsetX: 0, offsetY: 0 })}>{t('重置偏移')}</button></div>
           </div>
         </section>
@@ -213,12 +354,29 @@ function Editor({ nodeId, data, projectId, onClose }: { nodeId: string; data: Ba
       </aside>
     </div>
     <section className="animation-editor-timeline p-3" aria-label={t('帧序列')}>
-      <div className="flex items-center justify-between gap-2 mb-2"><span className="ui-label">{t('帧序列')} <span className="ui-hint ml-1">{enabled.length} / {edits.length}</span></span><span className="ui-hint">{t('选择帧后可调整顺序、偏移或停用')}</span></div>
-      <div className="animation-editor-frames" role="group" aria-label={t('帧列表')}>
-        {edits.map((edit, index) => <button type="button" key={edit.sourceIndex} className={`ui-card p-2 animation-editor-tile${selected === edit.sourceIndex ? ' is-selected' : ''}${edit.enabled ? '' : ' is-disabled'}`} aria-pressed={selected === edit.sourceIndex} onClick={() => { setSelected(edit.sourceIndex); setPlaying(false); }}>
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="ui-label">{t('帧序列')} <span className="ui-hint ml-1">{enabled.length} / {edits.length}</span></span>
+          <div className="flex flex-wrap items-center gap-3">
+            <NumberStepper value={fps} min={1} max={24} unit="fps" aria-label={t('播放帧率')} onChange={setFps} size="sm" />
+            <div className="animation-editor-check"><input id={`${nodeId}-loop`} className="ui-checkbox" type="checkbox" checked={loop} onChange={(event) => { setLoop(event.target.checked); setPlayhead(0); }} /><label htmlFor={`${nodeId}-loop`}>{t('循环播放')}</label></div>
+            <div className="animation-editor-check"><input id={`${nodeId}-guides`} className="ui-checkbox" type="checkbox" checked={guides} aria-label={t('显示对齐辅助线')} onChange={(event) => setGuides(event.target.checked)} /><label htmlFor={`${nodeId}-guides`}>{t('显示对齐辅助线')}</label></div>
+            <div className="flex items-center gap-2">
+              <div className="animation-editor-check"><input id={`${nodeId}-previous-frames`} className="ui-checkbox" type="checkbox" checked={showPreviousFrames} disabled={!src || enabled.length < 2} aria-label={t('显示上一帧图片')} onChange={(event) => setShowPreviousFrames(event.target.checked)} /><label htmlFor={`${nodeId}-previous-frames`}>{t('显示上一帧图片')}</label></div>
+              <NumberStepper id={`${nodeId}-previous-count`} value={shownPreviousFrameCount} min={1} max={previousFrameLimit} unit={t('帧')} aria-label={t('前帧显示数量')} disabled={!showPreviousFrames || enabled.length < 2} onChange={(count) => setPreviousFrameCount(Math.max(1, Math.min(previousFrameLimit, Math.round(count))))} size="sm" />
+              <span className="ui-hint whitespace-nowrap">{t('最多 {count} 帧', { count: MAX_PREVIOUS_FRAMES })}</span>
+            </div>
+          </div>
+        </div>
+        <span className="ui-hint">{t('选择帧后可调整顺序、偏移或停用')}</span>
+      </div>
+      <div ref={framesList} className="animation-editor-frames" role="group" aria-label={t('帧列表')}>
+        <div ref={framesContent} className="animation-editor-frames-content">
+        {edits.map((edit, index) => <button type="button" key={edit.sourceIndex} className={`ui-card p-2 animation-editor-tile${selected === edit.sourceIndex ? ' is-selected' : ''}${edit.enabled ? '' : ' is-disabled'}`} aria-pressed={selected === edit.sourceIndex} onClick={() => { setSelected(edit.sourceIndex); setPlaying(false); if (selected === edit.sourceIndex) revealSelectedFrame.current?.(); }}>
           <div className="animation-editor-tile-image animation-cell">{src && <div className="animation-editor-tile-crop animation-cell" style={{ aspectRatio: `${layout.cellWidth} / ${layout.cellHeight}`, width: `min(100cqw, ${100 * layout.cellWidth / layout.cellHeight}cqh)` }}><img src={src} alt="" className="animation-frame-sheet" style={animationFrameStyle(layout, edit)} draggable={false} /></div>}</div>
           <span className="animation-editor-tile-label"><span>{String(index + 1).padStart(2, '0')}</span><span>{t('原帧')} {edit.sourceIndex + 1}{edit.enabled ? '' : ` · ${t('已停用')}`}</span></span>
         </button>)}
+        </div>
       </div>
     </section>
     <div className="ui-card__footer animation-editor-footer p-3">
