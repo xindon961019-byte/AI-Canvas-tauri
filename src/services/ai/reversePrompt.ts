@@ -75,6 +75,8 @@ export interface ReversePromptOptions {
   provider: string;
   /** 用户在弹窗里补充的额外要求 */
   extraPrompt?: string;
+  signal?: AbortSignal;
+  outputFormat?: 'text' | 'prompt-tags';
 }
 
 /** 跑一次反推，只返回文本；出错抛给调用方在弹窗里显示 */
@@ -83,9 +85,18 @@ export async function reversePrompt(options: ReversePromptOptions): Promise<stri
     throw new Error(`没有可反推的${REVERSE_PROMPT_SOURCE_LABELS[options.kind]}`);
   }
   const extra = options.extraPrompt?.trim();
-  const prompt = extra
-    ? `${INSTRUCTIONS[options.kind]}\n【额外要求】${extra}`
+  const instruction = options.outputFormat === 'prompt-tags'
+    ? [
+      '你是图片提示词专家。观察图片，生成可用于复现画面的中文提示词，并提取用于资产分类的中文标签。',
+      '提示词覆盖主体、外观、姿态、构图、场景、视角、光线、色彩、材质和画风，不超过 30000 字符。',
+      SHARED_RULES[0],
+      '只输出 JSON 对象：{"prompt":"提示词正文","tags":["标签"]}，不要 Markdown 或说明。',
+      'tags 为 5–10 个简短标签，最多 16 个，每个不超过 40 字符，涵盖主体、风格和场景，不加 #。',
+    ].join('\n')
     : INSTRUCTIONS[options.kind];
+  const prompt = extra
+    ? `${instruction}\n【额外要求】${extra}`
+    : instruction;
 
   try {
     const result = await generateText({
@@ -93,9 +104,11 @@ export async function reversePrompt(options: ReversePromptOptions): Promise<stri
       model: options.model,
       provider: options.provider,
       imageUrls: options.imageUrls,
+      signal: options.signal,
     });
     return result.trim();
   } catch (error) {
+    options.signal?.throwIfAborted();
     const message = error instanceof Error ? error.message : '提示词反推失败';
     throw new Error(
       isImageInputRejected(message)
@@ -104,6 +117,22 @@ export async function reversePrompt(options: ReversePromptOptions): Promise<stri
       { cause: error },
     );
   }
+}
+
+/** 资产预览只取得草稿数据，不写入画布、标签或图片记录。 */
+export async function reversePromptAndTags(options: Omit<ReversePromptOptions, 'kind' | 'outputFormat'>): Promise<{ prompt: string; tags: string[] }> {
+  const text = await reversePrompt({ ...options, kind: 'image', outputFormat: 'prompt-tags' });
+  options.signal?.throwIfAborted();
+  let result: unknown;
+  try { result = JSON.parse(text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()); }
+  catch { throw new Error('模型未返回有效的提示词与标签，请重新反推或更换模型'); }
+  if (!result || typeof result !== 'object' || !('prompt' in result) || !('tags' in result)
+    || typeof result.prompt !== 'string' || !result.prompt.trim() || result.prompt.length > 30_000
+    || !Array.isArray(result.tags) || result.tags.length > 16
+    || result.tags.some((tag: unknown) => typeof tag !== 'string' || !tag.trim() || tag.length > 40)) {
+    throw new Error('模型返回的提示词或标签格式不符合要求，请重试');
+  }
+  return { prompt: result.prompt.trim(), tags: [...new Set((result.tags as string[]).map((tag) => tag.trim().replace(/^#+/, '')).filter(Boolean))] };
 }
 
 /** 把反推结果挂成源节点右侧的文本节点，返回新节点 id */

@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   fetchProviderModelCatalog,
   getProviderDefinition,
+  createConnectionId,
 } from '../../src/services/ai/providerCatalogService';
 import { SORA2U_MODEL_MANIFEST } from '../../src/services/ai/providers/sora2uModelManifest';
+import { defaultModelGroups } from '../../src/components/nodes/shared/defaultModels';
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -13,6 +15,87 @@ function jsonResponse(body: unknown): Response {
 }
 
 describe('providerCatalogService 模型分类推断', () => {
+  it('creates independent CCC connection identities and resolves their shared definition', () => {
+    const first = createConnectionId('cccapi');
+    const second = createConnectionId('cccapi');
+    expect(first).toMatch(/^cccapi-/);
+    expect(second).not.toBe(first);
+    expect(getProviderDefinition(first, { catalogId: 'cccapi' })?.id).toBe('cccapi');
+    expect(getProviderDefinition('cccapi')?.id).toBe('cccapi');
+  });
+
+  it('uses only the chosen CCC Key remote directory and enriches matching models', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ data: [{ id: 'gpt-image-2' }] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await fetchProviderModelCatalog({ providerId: 'cccapi-stable',
+      config: { name: 'CCC', apiKey: 'stable-fixture', catalogId: 'cccapi', cccGroup: 'CCC生图稳定', baseUrl: 'https://cccapi.cn/v1' },
+      fallbackModels: [
+        { id: 'gpt-image-2', name: 'GPT Image 2', category: 'image', provider: 'cccapi' },
+        { id: 'claude-sonnet-4-6', name: 'Claude', category: 'text', provider: 'cccapi' },
+      ] });
+    expect(result.models.map((model) => model.id)).toEqual(['gpt-image-2']);
+    expect(result.models[0]).toMatchObject({ category: 'image', provider: 'cccapi-stable' });
+    expect(fetchMock).toHaveBeenCalledWith('https://cccapi.cn/v1/models', expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: 'Bearer stable-fixture' }),
+    }));
+  });
+
+  it('fails a CCC group catalog explicitly instead of offering models from other groups', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}', { status: 403 })));
+    const options = { providerId: 'cccapi',
+      config: { name: 'CCC', apiKey: 'fixture', catalogId: 'cccapi', baseUrl: 'https://cccapi.cn/v1', cccGroup: 'CC-MAX满血' },
+      fallbackModels: [{ id: 'gpt-image-2', name: 'Image', category: 'image' as const, provider: 'cccapi' }] };
+    await expect(fetchProviderModelCatalog(options)).rejects.toThrow();
+    const legacy = await fetchProviderModelCatalog({ ...options, config: { ...options.config, cccGroup: undefined } });
+    expect(legacy.source).toBe('local-fallback');
+  });
+
+  it.each([
+    ['🍌香蕉（官k）', ['nano-banana-pro', 'gemini-4-image-preview']],
+    ['gpt-image-2/2.5（官k）', ['gpt-image-2.5']],
+    ['CCC生图白嫖', ['gpt-image-2.5', 'gpt-image-1']],
+    ['CCC生图稳定', ['gpt-image-2.5', 'gpt-image-1']],
+    ['国模-稳定2折', ['DeepSeek-V4.1-Flash', 'mI MiMo-V2.5']],
+    ['GPT-Pro分组', ['gpt-5.6', 'o3']],
+    ['GPT-特价Pro', ['gpt-5.6', 'o3']],
+    ['CC-MAX满血', ['claude-sonnet-4-6']],
+  ])('limits a mixed remote directory to the %s model family without adding unavailable presets', async (cccGroup, expected) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ data: [
+      { id: 'nano-banana-pro' }, { id: 'gemini-4-image-preview' }, { id: 'gemini-3.5-pro' },
+      { id: 'gpt-image-2.5' }, { id: 'gpt-image-1' }, { id: 'gpt-5.6' }, { id: 'o3' },
+      { id: 'DeepSeek-V4.1-Flash' }, { id: 'mI MiMo-V2.5' }, { id: 'claude-sonnet-4-6' },
+    ] })));
+    const result = await fetchProviderModelCatalog({ providerId: 'cccapi-group',
+      config: { name: 'CCC', catalogId: 'cccapi', apiKey: 'fixture', cccGroup },
+      fallbackModels: [...getProviderDefinition('cccapi')!.models!],
+    });
+    expect(result.source).toBe('remote');
+    expect(result.models.map((model) => model.id).sort()).toEqual([...expected].sort());
+  });
+
+  it('preserves the Key directory for a group not yet in the built-in list', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ data: [{ id: 'new-model' }] })));
+    const result = await fetchProviderModelCatalog({ providerId: 'cccapi-new',
+      config: { name: 'CCC', catalogId: 'cccapi', apiKey: 'fixture', cccGroup: '新分组' },
+      fallbackModels: [...getProviderDefinition('cccapi')!.models!],
+    });
+    expect(result.models.map((model) => model.id)).toEqual(['new-model']);
+  });
+  it('GRSAI 的本地目录保留新文本协议及独立 H3 能力，不请求 Key 页面', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock);
+    const fallbackModels = defaultModelGroups.find((group) => group.id === 'grsai')!.models
+      .map((model) => ({ id: model.value.slice('grsai/'.length), name: model.label,
+        category: model.nodeTypes.includes('ai-video') ? 'video' as const : model.nodeTypes.includes('ai-image') ? 'image' as const : 'text' as const,
+        provider: 'grsai' }));
+    const result = await fetchProviderModelCatalog({ providerId: 'grsai',
+      config: { name: 'GRSAI', apiKey: 'test-key' }, fallbackModels });
+    expect(result.source).toBe('local-manifest');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result.models.find((model) => model.id === 'gpt-6-astra')?.executionProfile).toEqual({ preset: 'openai-chat' });
+    expect(result.models.find((model) => model.id === 'minimax-h3')?.videoCapability).toMatchObject({ resolutions: ['480p', '768p', '1080p'], maxVideoReferences: 0 });
+    expect(result.models.find((model) => model.id === 'gpt-image-2.5-flare')?.description).toContain('维护中');
+    expect(result.models.some((model) => model.id === 'gpt-5.4')).toBe(false);
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -79,6 +162,54 @@ describe('providerCatalogService 模型分类推断', () => {
     expect(result.models.map((model) => model.id)).toEqual(['MiniMax-H3']);
   });
 
+  it.each([
+    [['flowmusic', 'suno'], ['flowmusic-lyria-3.5', 'suno-v6', 'suno-v6-wild', 'suno-v6-mini']],
+    [['flowmusic'], ['flowmusic-lyria-3.5']],
+    [['suno'], ['suno-v6', 'suno-v6-wild', 'suno-v6-mini']],
+    [['gpt-4o'], []],
+  ])('音乐版本只随当前 Key 可用的主模型 %j 展开', async (availableIds, versionIds) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse({
+      data: availableIds.map((id) => ({ id, object: 'model' })),
+    })));
+    const fallbackModels = defaultModelGroups.find((group) => group.id === 'apimart')!.models
+      .filter((model) => model.nodeTypes?.includes('ai-audio'))
+      .map((model) => ({ id: model.value.slice('apimart/'.length), name: model.label, category: 'audio' as const, provider: 'apimart' }));
+    const result = await fetchProviderModelCatalog({
+      providerId: 'apimart',
+      config: { name: 'APIMart', apiKey: 'test-key', baseUrl: 'https://api.apimart.ai', catalogId: 'apimart' },
+      fallbackModels,
+    });
+    expect(result.source).toBe('remote');
+    const musicIds = new Set(['flowmusic-lyria-3.5', 'suno-v6', 'suno-v6-wild', 'suno-v6-mini']);
+    expect(result.models.filter((model) => musicIds.has(model.id)).map((model) => model.id).sort())
+      .toEqual([...versionIds].sort());
+    expect(result.models.filter((model) => musicIds.has(model.id) || model.id === 'suno')
+      .every((model) => model.category === 'audio')).toBe(true);
+    expect(result.models.every((model) => availableIds.includes(model.id) || musicIds.has(model.id))).toBe(true);
+  });
+
+  it('新视频型号在远端目录中保持视频分类，不补入 Key 未开放的型号', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse({
+      data: ['happyhorse-1.0', 'happyhorse-1.1', 'wan3.0-video', 'flux-3-video'].map((id) => ({ id })),
+    })));
+    const result = await fetchProviderModelCatalog({
+      providerId: 'apimart',
+      config: { name: 'APIMart', apiKey: 'test-key', baseUrl: 'https://api.apimart.ai' },
+    });
+    expect(result.models).toHaveLength(4);
+    expect(result.models.every((model) => model.category === 'video')).toBe(true);
+  });
+
+  it('自定义连接不展开 APIMart 专用音乐版本', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{ id: 'flowmusic' }] })));
+    const result = await fetchProviderModelCatalog({
+      providerId: 'custom-openai',
+      config: { name: '自定义', apiKey: 'test-key', baseUrl: 'https://relay.example.com/v1' },
+      fallbackModels: [{ id: 'flowmusic-lyria-3.5', name: 'Lyria 3.5', category: 'audio', provider: 'custom-openai' }],
+    });
+    expect(result.models.map((model) => model.id)).toEqual(['flowmusic']);
+  });
+
   it('自定义接口拉取 minimax-h3 同样归类为视频模型', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse([
       { id: 'MiniMax-H3', object: 'model' },
@@ -141,7 +272,7 @@ describe('CCC API 内置厂商目录', () => {
       defaultBaseUrl: 'https://cccapi.cn/v1',
       modelsPath: '/models',
       allowCustomBaseUrl: false,
-      externalUrl: 'https://cccapi.cn',
+      externalUrl: 'https://cccapi.cn/keys',
     });
 
     const models = definition?.models ?? [];

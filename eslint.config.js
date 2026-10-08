@@ -13,6 +13,8 @@ export default defineConfig([
     'src-tauri/target',
     'src-tauri/gen',
     'src-tauri/vendor',
+    // 独立宣传视频项目有自己的依赖和解析器，不属于主应用质量门禁。
+    'promo-video',
   ]),
   {
     files: ['**/*.{ts,tsx}'],

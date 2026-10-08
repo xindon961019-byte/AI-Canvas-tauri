@@ -289,3 +289,23 @@ export async function readVerifiedProjectFileByHash(input: {
     reference,
   };
 }
+
+/** 读取已绑定的项目素材，先检查目录和大小，再把字节交给调用方。 */
+export async function readBoundedProjectFile(input: {
+  projectId: string;
+  relativePath: string;
+  maxBytes: number;
+}): Promise<Uint8Array> {
+  const relativePath = assertSafeProjectRelativePath(input.relativePath);
+  if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes <= 0) fail('项目文件大小上限无效');
+  const root = await getCheckedProjectRoot(input.projectId);
+  await checkExistingParents(root, relativePath);
+  const target = joinPath(root, relativePath);
+  const info = await checkedInfo(target, relativePath, 'file');
+  if (!Number.isSafeInteger(info.size) || info.size <= 0 || info.size > input.maxBytes) {
+    fail('项目素材超过读取上限');
+  }
+  const data = await readFile(target);
+  if (data.byteLength !== info.size || data.byteLength > input.maxBytes) fail('项目素材在读取期间发生变化');
+  return data;
+}

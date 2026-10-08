@@ -35,6 +35,7 @@ vi.mock('../../src/services/fs/core', () => ({ isTauriEnv: () => true, getBaseDi
 vi.mock('../../src/services/fs/assetIndex', () => ({ identifyAsset: async () => ({ assetId: 'asset' }) }));
 
 import { findSavedAssetImage, fingerprintAssetImage, resolveAssetImageReferences, saveAssetImageMetadata } from '../../src/services/fs/assetImageMetadata';
+import { loadAssetImageDetails } from '../../src/services/assetImageDetails';
 
 const image = { name: 'hero.png', path: '/original.png', category: 'image' as const, size: 4, assetId: 'asset' };
 const record = (assetId: string, digest: string): AssetImageRecord => ({ id: `asset-image:${assetId}`, assetId, contentDigest: digest,
@@ -102,7 +103,6 @@ describe('content-bound asset image information', () => {
     const old = (await input()).identity;
     driver.records = [record('asset', old.digest)];
     driver.files.set(image.path, new Uint8Array([8, 2, 3, 4]));
-    const { loadAssetImageDetails } = await import('../../src/services/assetImageDetails');
     const loaded = await loadAssetImageDetails(image);
     expect(loaded).toMatchObject({ record: null, history: null, contentChanged: true });
     expect(loaded.warning).toContain('旧提示词');
@@ -116,7 +116,7 @@ describe('content-bound asset image information', () => {
     expect(saved.references[0].relativePath).toMatch(/^asset-image-references\/.*\.png$/);
     expect(JSON.stringify(saved)).not.toContain('/selected.png');
     expect(JSON.stringify(saved)).not.toContain('/managed');
-    expect(driver.put).toHaveBeenCalledWith(saved, 0);
+    expect(driver.put).toHaveBeenCalledWith(saved, 0, { signal: undefined, tagReplacement: undefined });
     const again = await saveAssetImageMetadata(image, { ...draft, newReferencePaths: [] });
     expect(again.id).toBe(saved.id);
     expect((await resolveAssetImageReferences(saved.references))[0].url).toContain('/managed/asset-image-references/');
@@ -148,6 +148,6 @@ describe('content-bound asset image information', () => {
     const copiedPath = `/managed/${first.references[0].relativePath}`;
     const updated = await saveAssetImageMetadata(image, { ...draft, record: first, references: [], newReferencePaths: [] });
     expect(updated.references).toEqual([]); expect(driver.files.has(copiedPath)).toBe(true);
-    expect(driver.put).toHaveBeenLastCalledWith(updated, 1);
+    expect(driver.put).toHaveBeenLastCalledWith(updated, 1, { signal: undefined, tagReplacement: undefined });
   });
 });

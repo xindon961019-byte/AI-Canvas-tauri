@@ -7,6 +7,7 @@ import { describe, it, expect } from 'vitest';
 import { initPlugin, buildPlugin, checkPlugin } from '../../scripts/plugin-dev.mjs';
 
 describe('plugin developer CLI', () => {
+  // 这条集成用例会多次检查类型和打包，给 CI 冷启动留足时间。
   it('generates a portable typed plugin, bundles imports, updates hashes and rejects invalid packages without executing code', async () => {
     const temporary = await mkdtemp(join(tmpdir(), 'ai-canvas-plugin-sdk-'));
     const root = join(temporary, 'plugin');
@@ -48,7 +49,7 @@ describe('plugin developer CLI', () => {
       await writeFile(join(root, 'manifest.json'), JSON.stringify({ ...raw, ui: { ...raw.ui, entry: '../outside.js' } }), 'utf8');
       await expect(checkPlugin(root)).rejects.toThrow();
     } finally { await rm(temporary, { recursive: true, force: true }); }
-  });
+  }, 25000);
 
   it('keeps watching after startup errors and rebuilds when an unchanged manifest follows a source edit', async () => {
     const temporary = await mkdtemp(join(tmpdir(), 'ai-canvas-plugin-watch-'));
@@ -97,7 +98,14 @@ describe('plugin developer CLI', () => {
       await waitOutput('构建完成', offset);
       expect(await readFile(join(root, 'main.js'), 'utf8')).toContain('WATCH_RECOVERED');
       child.kill('SIGINT');
-      expect(await exited).toBe(0);
+      const code = await exited;
+      // Windows 的 kill 不会向 Node 派发可捕获的 POSIX SIGINT，而是终止进程。
+      if (process.platform === 'win32') {
+        expect(code).toBeNull();
+        expect(child.signalCode).toBe('SIGINT');
+      } else {
+        expect(code).toBe(0);
+      }
     } finally {
       if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited; }
       await rm(temporary, { recursive: true, force: true });

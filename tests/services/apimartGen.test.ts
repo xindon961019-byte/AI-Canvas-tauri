@@ -40,7 +40,7 @@ import {
 } from '../../src/services/ai/apimartGen';
 import { buildApimartSeedanceRequest, isApimartSeedanceModel } from '../../src/services/ai/apimartVideoModels';
 import { apimartMediaProviderAdapter } from '../../src/services/ai/providers/apimartMedia';
-import { APIMART_OMNI_MODELS, getApimartSeedanceCapability } from '../../src/services/ai/apimartVideoModels';
+import { APIMART_OMNI_MODELS, APIMART_UPDATED_VIDEO_MODELS, getApimartSeedanceCapability } from '../../src/services/ai/apimartVideoModels';
 import { fetchProviderModelCatalog } from '../../src/services/ai/providerCatalogService';
 import { assertVideoInputConstraints } from '../../src/services/ai/videoInputValidation';
 import { buildImageCapabilityRequest } from '../../src/services/ai/mediaModelCapabilities';
@@ -185,6 +185,16 @@ function jsonResponse(body: unknown): Response {
 }
 
 describe('APIMart image polling', () => {
+  it('Grok 官方 2.0 使用稳定响应版本和独立幂等键，保持多图参考顺序', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: [{ task_id: 'grok-image' }] }))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { status: 'completed', result: { images: [{ url: ['https://cdn.example/result.png'] }] } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const refs = ['https://cdn.example/a.png', 'https://cdn.example/b.png'];
+    await generateApimartImagesBatch('key', 'https://api.example/v1', 'grok-imagine-image-2.0', 'edit', '2K', '16:9', { width: 100, height: 100 }, refs);
+    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({ 'X-APIMart-Response-Version': '2026-07-27', 'Idempotency-Key': expect.any(String) });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ model: 'grok-imagine-image-2.0', image_urls: refs, aspect_ratio: '16:9', resolution: '2k' });
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllGlobals();
@@ -580,7 +590,7 @@ describe('APIMart video polling', () => {
 });
 
 describe('APIMart Seedance 2.5 video', () => {
-  it('clamps duration to 30s and keeps resolution within 480p/720p', () => {
+  it('supports the updated 1080p tier and 30 second duration', () => {
     expect(buildApimartSeedanceRequest(
       'doubao-seedance-2.5',
       'prompt',
@@ -588,7 +598,7 @@ describe('APIMart Seedance 2.5 video', () => {
     )).toMatchObject({
       model: 'doubao-seedance-2.5',
       duration: 30,
-      resolution: '720p',
+      resolution: '1080p',
       watermark: false,
     });
   });
@@ -685,6 +695,96 @@ describe('APIMart Seedance 2.5 video', () => {
       'prompt',
       {},
     )).toMatchObject({ size: 'adaptive' });
+  });
+});
+
+describe('APIMart 新视频模型', () => {
+  beforeEach(() => { vi.clearAllMocks(); vi.unstubAllGlobals(); });
+
+  it.each(APIMART_UPDATED_VIDEO_MODELS.map((model) => model.id))('%s 通过 Adapter 提交视频端点并轮询', async (model) => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: [{ task_id: 'new-video', status: 'submitted' }] }))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { status: 'completed', result: { videos: [{ url: ['https://cdn.example/result.mp4'] }] } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(apimartMediaProviderAdapter.generateVideo?.({
+      params: { provider: 'apimart', model: `apimart/${model}`, prompt: 'prompt' }, prompt: 'prompt',
+      resolveReferenceInput: async () => ({ prompt: 'prompt', imageUrls: [], videoUrls: [], audioUrls: [], operation: 'text-to-video' }),
+    })).resolves.toEqual({ url: 'https://cdn.example/result.mp4' });
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual(['https://api.example.com/videos/generations', 'https://api.example.com/tasks/new-video?language=zh']);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ model });
+  });
+
+  it('FLUX 3 映射分辨率与单个续写视频，不发送错误的 video_urls 字段', () => {
+    const request = buildApimartSeedanceRequest('flux-3-video', 'continue', { resolution: '1080p', duration: 20, videoUrls: ['https://cdn.example/source.mp4'], generateAudio: false });
+    expect(request).toMatchObject({ resolution: 'fhd', duration: 20, video_url: 'https://cdn.example/source.mp4', audio: false });
+    expect(request).not.toHaveProperty('video_urls');
+    expect(() => buildApimartSeedanceRequest('flux-3-video', 'prompt', { duration: 21 })).toThrow('时长');
+  });
+
+  it('HappyHorse 编辑省略时长与比例，1.1 拒绝视频输入', () => {
+    const request = buildApimartSeedanceRequest('happyhorse-1.0', 'edit', { videoUrls: ['https://cdn.example/source.mp4'] });
+    expect(request).toMatchObject({ video_url: 'https://cdn.example/source.mp4' });
+    expect(request).not.toHaveProperty('duration');
+    expect(request).not.toHaveProperty('aspect_ratio');
+    expect(() => buildApimartSeedanceRequest('happyhorse-1.1', 'edit', { videoUrls: ['https://cdn.example/source.mp4'] })).toThrow('参考视频');
+  });
+
+  it('Wan 3 保留普通图片参考语义与显式帧角色，拒绝混用', () => {
+    expect(buildApimartSeedanceRequest('wan3.0-video', 'prompt', { imageUrls: ['https://cdn.example/ref.png'], duration: -1 }))
+      .toMatchObject({ generation_type: 'reference', duration: -1, image_urls: ['https://cdn.example/ref.png'] });
+    expect(buildApimartSeedanceRequest('wan3.0-video-prime', 'prompt', { imageWithRoles: [{ url: 'https://cdn.example/first.png', role: 'first_frame' }] }))
+      .toMatchObject({ image_with_roles: [{ url: 'https://cdn.example/first.png', role: 'first_frame' }] });
+    expect(() => buildApimartSeedanceRequest('wan3.0-video', 'prompt', { firstFrameUrl: 'https://cdn.example/first.png', imageUrls: ['https://cdn.example/ref.png'] })).toThrow('不能同时使用');
+  });
+
+  it('Kling Turbo 只接受显式首帧，Pixverse 首尾帧只接受 5/8 秒', () => {
+    expect(() => buildApimartSeedanceRequest('kling-3.0-turbo', 'prompt', { imageUrls: ['https://cdn.example/ref.png'] })).toThrow('设置为首帧');
+    expect(buildApimartSeedanceRequest('kling-3.0-turbo', '', { firstFrameUrl: 'https://cdn.example/first.png' }))
+      .toMatchObject({ first_frame_image: 'https://cdn.example/first.png' });
+    const frames = { firstFrameUrl: 'https://cdn.example/first.png', lastFrameUrl: 'https://cdn.example/last.png' };
+    expect(() => buildApimartSeedanceRequest('pixverse-v6', 'prompt', { ...frames, duration: 6 })).toThrow('5 或 8');
+    expect(buildApimartSeedanceRequest('pixverse-v6', 'prompt', { imageUrls: ['https://cdn.example/ref.png'] }))
+      .toHaveProperty('img_references', ['https://cdn.example/ref.png']);
+  });
+
+  it('Seedance 新 ID 支持自动时长，旧 ID 保持可用', () => {
+    expect(buildApimartSeedanceRequest('seedance-2.5', 'prompt', { duration: -1, resolution: '1080p' }))
+      .toMatchObject({ model: 'seedance-2.5', duration: -1, resolution: '1080p' });
+    expect(isApimartSeedanceModel('apimart/doubao-seedance-2.5')).toBe(true);
+  });
+
+  it('新视频模型失败不重提，保留服务端错误', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: [{ task_id: 'failed-task' }] }))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { status: 'failed', error: { message: '素材不合法' } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateApimartVideo('key', 'https://api.example/v1', 'wan3.0-video', 'prompt')).rejects.toThrow('素材不合法');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('通过 Adapter 保留 Wan 3 首尾帧角色和普通图片的参考语义', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: [{ task_id: 'wan-frame' }] }))
+      .mockResolvedValueOnce(jsonResponse({ code: 200, data: { status: 'completed', result: { videos: [{ url: ['https://cdn.example/result.mp4'] }] } } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const referenceMedia = [
+      { kind: 'image' as const, role: 'first_frame' as const, url: 'https://cdn.example/first.png', origin: 'prompt' as const },
+      { kind: 'image' as const, role: 'last_frame' as const, url: 'https://cdn.example/last.png', origin: 'prompt' as const },
+    ];
+    await apimartMediaProviderAdapter.generateVideo?.({ params: { provider: 'apimart', model: 'apimart/wan3.0-video', prompt: 'prompt', referenceMedia }, prompt: 'prompt',
+      resolveReferenceInput: async () => ({ prompt: 'prompt', imageUrls: referenceMedia.map((ref) => ref.url), videoUrls: [], audioUrls: [], operation: 'image-to-video', references: referenceMedia }),
+    });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).image_with_roles).toEqual([
+      { url: referenceMedia[0].url, role: 'first_frame' }, { url: referenceMedia[1].url, role: 'last_frame' },
+    ]);
+  });
+
+  it('取消新视频任务后停止轮询，不再次付费提交', async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn().mockImplementationOnce(() => { controller.abort(); return Promise.resolve(jsonResponse({ code: 200, data: [{ task_id: 'new-video' }] })); });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(generateApimartVideo('key', 'https://api.example/v1', 'flux-3-video', 'prompt', undefined, {}, controller.signal)).rejects.toThrow('取消');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

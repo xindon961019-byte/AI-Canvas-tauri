@@ -88,6 +88,7 @@ async function installReactHookDriver(
   stateValue?: (initialValue: unknown, index: number) => unknown,
   effects?: Array<() => void | (() => void)>,
   layoutEffects?: Array<() => void | (() => void)>,
+  setters?: Array<ReturnType<typeof vi.fn>>,
 ) {
   vi.doMock('react', async () => {
     const actual = await vi.importActual<typeof import('react')>('react');
@@ -111,7 +112,9 @@ async function installReactHookDriver(
           ? (initialValue as () => T)()
           : initialValue;
         const value = stateValue?.(resolved, stateIndex++) ?? resolved;
-        return [value as T, vi.fn()] as const;
+        const setter = vi.fn();
+        setters?.push(setter);
+        return [value as T, setter] as const;
       },
     };
   });
@@ -240,6 +243,57 @@ function visibleShotRatio(store: TestStore, column: string) {
 }
 
 describe('critical canvas node interactions', () => {
+  it('keeps frame editor keyboard input from opening generation or modifying the canvas', async () => {
+    const effects: Array<() => void | (() => void)> = [];
+    await installReactHookDriver(undefined, effects);
+    const store = createStore([{ id: 'animation', type: 'ai-animation', position: { x: 0, y: 0 }, data: { type: 'ai-animation' } }], () => 1);
+    store.selectedNodeIds = ['animation'];
+    installStoreMock(store);
+    const listeners = new Map<string, (event: unknown) => Promise<void>>();
+    vi.stubGlobal('document', { addEventListener: (name: string, listener: (event: unknown) => Promise<void>) => listeners.set(name, listener), removeEventListener: vi.fn() });
+    vi.doMock('../../src/utils/assetSearchWindow', () => ({ openAssetSearchWindow: vi.fn() }));
+    vi.doMock('../../src/utils/nodeAnimations', () => ({ playNodeExit: vi.fn() }));
+    vi.doMock('../../src/services/pollManager', () => ({ cancelNodePolling: vi.fn() }));
+    vi.doMock('@tauri-apps/plugin-global-shortcut', () => ({ unregisterAll: vi.fn() }));
+    vi.doMock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => { throw new Error('Web test'); } }));
+    const { useKeyboardShortcuts } = await import('../../src/hooks/useKeyboardShortcuts');
+    useKeyboardShortcuts();
+    const cleanup = effects[0]();
+    const target = { tagName: 'BUTTON', closest: (selector: string) => selector === '.animation-editor' ? {} : null };
+    for (const key of [' ', 'Delete', 'Backspace', 'z', '6']) {
+      const event = { target, key, code: key === '6' ? 'Digit6' : key === ' ' ? 'Space' : '', ctrlKey: key === 'z', preventDefault: vi.fn(), stopPropagation: vi.fn() };
+      await listeners.get('keydown')!(event);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+    }
+    expect(store.openNodeDialog).not.toHaveBeenCalled(); expect(store.addNode).not.toHaveBeenCalled();
+    expect(store.nodes).toHaveLength(1); expect(store.commitToHistory).not.toHaveBeenCalled();
+    cleanup?.();
+  });
+  it.each(['生成动画', '动画', '角色待机'])('opens the frame editor on a node double click and preserves custom labels (%s)', async (label) => {
+    const setters: Array<ReturnType<typeof vi.fn>> = [];
+    await installReactHookDriver(undefined, undefined, undefined, setters);
+    const node: TestNode = { id: 'animation', type: 'ai-animation', position: { x: 0, y: 0 }, data: { type: 'ai-animation', label } };
+    const store = createStore([node], () => 1);
+    installStoreMock(store); installCommonNodeMocks();
+    vi.doMock('@xyflow/react', () => ({ Handle: function HandleMock() { return null; }, Position: { Left: 'left', Right: 'right' } }));
+    const AnimationNode = (await import('../../src/components/nodes/AnimationNode')).default as unknown as (props: { id: string; data: Record<string, unknown>; selected: boolean }) => unknown;
+    const tree = AnimationNode({ id: node.id, data: node.data, selected: true });
+    const title = findElement(tree, (element) => element.props.kind === 'ai-animation');
+    expect(title.props.label).toBe(label === '角色待机' ? label : '帧动画');
+    const body = findElement(tree, (element) => typeof element.props.onDoubleClick === 'function');
+    const doubleClick = body.props.onDoubleClick as (event: unknown) => void;
+    const stopPropagation = vi.fn();
+    doubleClick({ target: { closest: () => ({}) }, stopPropagation });
+    expect(setters.every((setter) => setter.mock.calls.length === 0)).toBe(true);
+    doubleClick({ target: { closest: () => null }, stopPropagation });
+    expect(setters.filter((setter) => setter.mock.calls.length > 0)).toHaveLength(1);
+    expect(setters.some((setter) => setter.mock.calls[0]?.[0] === true)).toBe(true);
+    expect(store.closeNodeDialog).toHaveBeenCalledOnce();
+    expect(store.openNodeDialog).not.toHaveBeenCalled();
+    const generate = findElement(tree, (element) => element.props['aria-label'] === '生成帧动画');
+    (generate.props.onClick as (event: unknown) => void)({ stopPropagation });
+    expect(store.openNodeDialog).toHaveBeenCalledExactlyOnceWith('animation');
+  });
   it('lets a custom Select type spaces and use input undo without triggering canvas shortcuts', async () => {
     const effects: Array<() => void | (() => void)> = [];
     await installReactHookDriver(undefined, effects);

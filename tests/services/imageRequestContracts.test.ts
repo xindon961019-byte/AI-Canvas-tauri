@@ -10,6 +10,20 @@ function contractFor(model: string, size = '2K', ratio = '16:9') {
 }
 
 describe('built-in image request contracts', () => {
+  it.each(['nano-banana-2.1', 'nano-banana-2-lite'])('uses the native generation contract for %s', (model) => {
+    const { protocol } = contractFor(model);
+    expect(protocol.submit.path).toBe('/api/generate');
+    expect(protocol.submit.body).toMatchObject({ imageSize: model.endsWith('lite') ? '1K' : '2K', aspectRatio: '16:9', images: '{{imageUrls}}' });
+    expect(validateModelExecutionProtocol(protocol)).toEqual([]);
+  });
+
+  it.each([
+    ['nano-banana-2-cl', '4K', '1K'], ['nano-banana-pro-cl', '2K', '1K'],
+    ['nano-banana-2-2k-cl', '1K', '2K'], ['nano-banana-2-4k-cl', '2K', '4K'],
+    ['nano-banana-pro-4k-vip', '1K', '4K'], ['nano-banana-pro-vip', '4K', '1K'],
+  ])('normalizes %s to its documented resolution', (model, requested, expected) => {
+    expect(contractFor(model, requested).protocol.submit.body).toMatchObject({ imageSize: expected });
+  });
   it('reuses the CCC catalog contract without guessing from a GPT model name', () => {
     expect(resolveBuiltInImageRequestContract(getProviderDefinition('cccapi'), 'gpt-image-2.5-sunburst', '2K', '16:9'))
       .toEqual({ kind: 'standard', imageReferenceRequestMode: 'edits-multipart' });

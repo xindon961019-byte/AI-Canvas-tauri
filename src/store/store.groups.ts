@@ -19,6 +19,7 @@ import {
   finishProjectFileRelocation,
   removeEmptyProjectGroupFolder,
   sanitizeFolderName,
+  stripVerbatimPrefix,
 } from '../services/fileService';
 
 export interface GroupSlice {
@@ -57,8 +58,10 @@ async function moveFile(
   projectDir: string,
   folder: string | null,
   forceCopy = false,
+  isFresh = () => true,
 ): Promise<MovedFile | null> {
   const moved = await moveProjectFileToFolder(filePath, projectDir, folder, { preserveSource: true, forceCopy });
+  if (!isFresh()) return null;
   return moved ? describeFile(moved, folder) : null;
 }
 
@@ -67,61 +70,125 @@ export const COLLAPSED_GROUP_SIZE = { width: 220, height: 152 };
 
 // 自动保存每 2 秒可能触发一次，重入会让同一个文件被搬两次
 let syncingGroupFiles = false;
+let queuedGroupSync: (() => Promise<void>) | null = null;
 const retiredFolders = new Map<string, Set<string>>();
 function retireFolders(projectId: string | null, names: string[]) {
   if (projectId) retiredFolders.set(projectId, new Set([...(retiredFolders.get(projectId) ?? []), ...names]));
 }
 
+/** 正文、参数和画布位置不影响归档；只记录实际参与搬运和共享判断的字段。 */
+function groupFilesSignature(state: Pick<AppState, 'nodes' | 'groups'>): string {
+  return JSON.stringify([
+    state.groups.map((group) => [group.id, sanitizeFolderName(group.name)]),
+    state.nodes.map((node) => [node.id, node.type, node.parentId, node.data.filePath,
+      node.data.storyboardOverrides?.map((cell) => cell?.filePath), node.data.directorCaptureFilePaths]),
+  ]);
+}
+
 async function relocateGroupedFiles(projectId: string, projectDir: string, guard: CanvasDerivationGuard,
-  set: Parameters<StateCreator<AppState>>[0], get: () => AppState): Promise<void> {
+  set: Parameters<StateCreator<AppState>>[0], get: () => AppState,
+  pending: MediaRelocation[], scanFiles: boolean): Promise<boolean> {
   const fresh = () => isCanvasDerivationFresh(guard, get());
-  const finish = async (move: MediaRelocation) => {
-    if (!fresh() || isNodeMediaCopySource(move.oldPath)) return false;
-    if (!move.ownerId) await finishProjectFileRelocation(move.oldPath, move.newPath, projectDir);
-    await completeMediaRelocation(move);
-    return true;
+  let expectedSignature = groupFilesSignature(get());
+  const inputsFresh = () => {
+    if (get().currentProjectId !== projectId) return false;
+    if (groupFilesSignature(get()) !== expectedSignature) {
+      queuedGroupSync = get().syncGroupFiles;
+      return false;
+    }
+    return fresh();
   };
-  const pending = await pendingMediaRelocations(projectId);
-  if (!fresh()) return;
+  const key = (value: string) => value.replace(/\\/g, '/');
+  let indexedNodes: AppState['nodes'] | undefined;
+  let indexedGroups: AppState['groups'] | undefined;
+  let nodeById = new Map<string, AppState['nodes'][number]>();
+  let folderByGroupId = new Map<string, string>();
+  let ownersByPath = new Map<string, Set<string>>();
+  const index = () => {
+    const state = get();
+    if (indexedNodes === state.nodes && indexedGroups === state.groups) return;
+    indexedNodes = state.nodes;
+    indexedGroups = state.groups;
+    nodeById = new Map(state.nodes.map((node) => [node.id, node]));
+    folderByGroupId = new Map(state.groups.map((group) => [group.id, sanitizeFolderName(group.name)]));
+    ownersByPath = new Map();
+    for (const node of state.nodes) {
+      for (const path of [node.data.filePath, ...(node.data.storyboardOverrides ?? []).map((cell) => cell?.filePath),
+        ...(node.data.directorCaptureFilePaths ?? [])]) {
+        if (!path) continue;
+        const normalized = key(path);
+        let owners = ownersByPath.get(normalized);
+        if (!owners) { owners = new Set(); ownersByPath.set(normalized, owners); }
+        owners.add(node.id);
+      }
+    }
+  };
+  const finish = async (move: MediaRelocation) => {
+    if (!inputsFresh() || isNodeMediaCopySource(move.oldPath)) return false;
+    if (!move.ownerId) {
+      index();
+      if (ownersByPath.has(key(move.oldPath))) return false;
+      await finishProjectFileRelocation(move.oldPath, move.newPath, projectDir);
+      if (!inputsFresh()) return false;
+    }
+    await completeMediaRelocation(move);
+    return inputsFresh();
+  };
+  if (!inputsFresh()) return false;
   if (pending.length) {
     set((state) => pending.reduce((current, move) => move.ownerId
       ? relocateOwnedMediaReferences(current, move, move.ownerId) : relocateMediaReferences(current, [move]), state));
-    if (await get().saveCurrentProjectSilent() !== projectId || !fresh()) return;
-    for (const move of pending) if (!await finish(move)) return;
+    expectedSignature = groupFilesSignature(get());
+    if (await get().saveCurrentProjectSilent() !== projectId || !inputsFresh()) return false;
+    for (const move of pending) if (!await finish(move)) return false;
   }
-  const nodeIds = get().nodes.filter((node) => node.type !== 'group').map((node) => node.id);
+  if (!scanFiles) return inputsFresh();
+  index();
+  const nodeIds = [...nodeById.values()].filter((node) => node.type !== 'group').map((node) => node.id);
+  const root = projectDir.replace(/\\/g, '/').replace(/\/+$/, '');
+  let complete = true;
   for (const nodeId of nodeIds) {
-    const initial = get().nodes.find((node) => node.id === nodeId);
-    if (!initial || !fresh()) continue;
+    index();
+    const initial = nodeById.get(nodeId);
+    if (!initial || !fresh()) return false;
     const slots = [null, ...(initial.data.storyboardOverrides ?? []).map((_, index) => index)];
     for (const slot of slots) {
-      if (!fresh()) return;
-      const node = get().nodes.find((item) => item.id === nodeId);
+      if (!fresh()) return false;
+      index();
+      const node = nodeById.get(nodeId);
       if (!node) break;
       const path = slot === null ? node.data.filePath : node.data.storyboardOverrides?.[slot]?.filePath;
-      if (!path || isNodeMediaCopySource(path)) continue;
-      const key = (value: string) => value.replace(/\\/g, '/');
+      if (!path) continue;
+      if (isNodeMediaCopySource(path)) { complete = false; continue; }
       // Shared legacy nodes split first. The last owner performs the actual relocation.
-      const owners = get().nodes.filter(({ data }) => [data.filePath,
-        ...(data.storyboardOverrides ?? []).map((cell) => cell?.filePath),
-        ...(data.directorCaptureFilePaths ?? [])].some((candidate) => candidate && key(candidate) === key(path)));
-      const shared = owners.length > 1;
-      const group = get().groups.find((item) => item.id === node.parentId);
-      const folder = group ? sanitizeFolderName(group.name) : null;
-      const moved = await moveFile(path, projectDir, folder, shared);
-      if (!moved || !fresh()) continue;
+      const shared = (ownersByPath.get(key(path))?.size ?? 0) > 1;
+      const folder = node.parentId ? folderByGroupId.get(node.parentId) ?? null : null;
+      const normalized = key(stripVerbatimPrefix(path));
+      if (!normalized.startsWith(`${root}/`)) continue;
+      const segments = normalized.slice(root.length + 1).split('/');
+      const currentFolder = segments.length === 2 ? segments[0] : null;
+      if (segments.length > 2 || currentFolder === '.trash' || currentFolder === 'AppData'
+        || (currentFolder === folder && !shared)) continue;
+      const moved = await moveFile(path, projectDir, folder, shared, inputsFresh);
+      if (!inputsFresh()) return false;
+      if (!moved) { complete = false; continue; }
+      const oldAssetUrl = await getAssetUrlFromPath(path);
+      if (!inputsFresh()) return false;
       const move: MediaRelocation = { oldPath: path, newPath: moved.filePath, assetUrl: moved.assetUrl,
-        relativePath: moved.relativePath, projectId, ownerId: shared ? nodeId : undefined, oldAssetUrl: await getAssetUrlFromPath(path) };
+        relativePath: moved.relativePath, projectId, ownerId: shared ? nodeId : undefined, oldAssetUrl };
       await persistMediaRelocation(move, shared ? nodeId : undefined);
-      if (!fresh()) return; // Durable pending cleanup resumes when this project is reopened.
+      if (!inputsFresh()) return false; // 已落盘的迁移留待下次打开项目恢复。
       set((state) => shared ? relocateOwnedMediaReferences(state, move, nodeId) : relocateMediaReferences(state, [move]));
-      if (await get().saveCurrentProjectSilent() !== projectId || !fresh()) return;
-      if (!await finish(move)) return;
+      expectedSignature = groupFilesSignature(get());
+      if (await get().saveCurrentProjectSilent() !== projectId || !inputsFresh()) return false;
+      if (!await finish(move)) return false;
     }
   }
+  return complete && inputsFresh();
 }
 
 export const createGroupSlice: StateCreator<AppState, [], [], GroupSlice> = (set, get) => {
+  let syncedSignature: { projectId: string; signature: string } | undefined;
   return {
   groups: [],
 
@@ -421,30 +488,64 @@ export const createGroupSlice: StateCreator<AppState, [], [], GroupSlice> = (set
   },
 
   syncGroupFiles: async () => {
-    if (syncingGroupFiles) return;
+    if (syncingGroupFiles) {
+      queuedGroupSync = get().syncGroupFiles;
+      return;
+    }
     const projectId = get().currentProjectId;
     if (!projectId) return;
     const guard = registerCanvasImport(get());
     if (!guard) return;
+    const initialSignature = groupFilesSignature(get());
+    const fresh = () => {
+      if (get().currentProjectId !== projectId) return false;
+      if (groupFilesSignature(get()) !== initialSignature) {
+        queuedGroupSync = get().syncGroupFiles;
+        return false;
+      }
+      return isCanvasDerivationFresh(guard, get());
+    };
     syncingGroupFiles = true;
     try {
+      // pending 始终优先读取，不能因为媒体签名没变而跳过重启或保存失败后的恢复。
+      const pending = await pendingMediaRelocations(projectId);
+      if (!fresh()) return;
+      const scanFiles = syncedSignature?.projectId !== projectId || syncedSignature.signature !== groupFilesSignature(get());
+      if (!scanFiles && !pending.length && !retiredFolders.get(projectId)?.size) return;
       const projectDir = await getProjectDataDir(projectId);
-      if (!projectDir || !isCanvasDerivationFresh(guard, get())) return;
-      await relocateGroupedFiles(projectId, projectDir, guard, set, get);
+      if (!projectDir || !fresh()) return;
+      if (!await relocateGroupedFiles(projectId, projectDir, guard, set, get, pending, scanFiles || pending.length > 0)) return;
       if (!isCanvasDerivationFresh(guard, get())) return;
-      if (await get().saveCurrentProjectSilent() !== projectId) return;
+      const completedSignature = groupFilesSignature(get());
+      const inputsFresh = () => {
+        if (get().currentProjectId !== projectId) return false;
+        if (groupFilesSignature(get()) !== completedSignature) {
+          queuedGroupSync = get().syncGroupFiles;
+          return false;
+        }
+        return isCanvasDerivationFresh(guard, get());
+      };
+      if (retiredFolders.get(projectId)?.size
+        && (await get().saveCurrentProjectSilent() !== projectId || !inputsFresh())) return;
       for (const name of retiredFolders.get(projectId) ?? []) {
-        if (!isCanvasDerivationFresh(guard, get())) return;
+        if (!inputsFresh()) return;
         if (!get().groups.some((group) => sanitizeFolderName(group.name) === sanitizeFolderName(name))) {
           await removeEmptyProjectGroupFolder(projectDir, name);
+          if (!inputsFresh()) return;
         }
         retiredFolders.get(projectId)?.delete(name);
       }
+      if (inputsFresh()) syncedSignature = { projectId, signature: completedSignature };
     } catch {
       if (get().currentProjectId === projectId) get().showToast('分组文件归档未完成，原文件已保留，请重试', 'error');
     } finally {
+      if (get().currentProjectId && get().currentProjectId !== projectId) queuedGroupSync = get().syncGroupFiles;
       completeCanvasDerivation(guard);
       syncingGroupFiles = false;
+      // 归档期间的新请求合并成一轮，项目切换和异步改源都不会被忙碌标记吞掉。
+      const queued = queuedGroupSync;
+      queuedGroupSync = null;
+      if (queued) await queued();
     }
   },
   };

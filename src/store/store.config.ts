@@ -11,6 +11,7 @@ import type {
   ProjectSettings,
 } from '../types';
 import {
+  CCCAPI_BASE_URL,
   GRSAI_BASE_URL,
   GRSAI_GLOBAL_BASE_URL,
   GRSAI_LEGACY_BASE_URL,
@@ -166,11 +167,14 @@ function collectRemovedModelReferences(
     providerIds.add('runninghub');
     providerPrefixes.add('runninghub/');
   }
-  if (!isWorkflowOnlyProvider && provider?.catalogId && provider.catalogId !== 'custom-openai') {
+  if (!isWorkflowOnlyProvider && provider?.catalogId
+    && provider.catalogId !== 'custom-openai' && provider.catalogId !== 'cccapi') {
     providerIds.add(provider.catalogId);
     providerPrefixes.add(`${provider.catalogId}/`);
   }
   for (const model of isWorkflowOnlyProvider ? [] : (provider?.selectedModels ?? [])) {
+    // CCC 目录中的 provider 可能来自旧缓存；删除只影响当前连接的模型身份。
+    if (provider?.catalogId === 'cccapi') continue;
     providerIds.add(model.provider);
     providerPrefixes.add(`${model.provider}/`);
   }
@@ -287,6 +291,11 @@ function migrateLegacyGeneralModels(config: AppConfig): AppConfig {
   const normalizedProviders = Object.fromEntries(
     Object.entries(config.providers).map(([providerId, provider]) => {
       const normalizedBaseUrl = provider.baseUrl?.trim().replace(/\/+$/, '');
+      const isCcc = provider.catalogId === 'cccapi' || (!provider.catalogId && providerId === 'cccapi');
+      if (isCcc && !normalizedBaseUrl) {
+        providerUrlsChanged = true;
+        return [providerId, { ...provider, baseUrl: CCCAPI_BASE_URL }];
+      }
       const isGrsai = providerId === 'grsai' || provider.catalogId === 'grsai';
       const isLegacyGrsaiUrl = normalizedBaseUrl === GRSAI_LEGACY_BASE_URL
         || normalizedBaseUrl === `${GRSAI_LEGACY_BASE_URL}/v1`

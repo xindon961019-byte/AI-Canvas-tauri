@@ -7,7 +7,10 @@
  * 供参数面板与生成入口消费。
  */
 import type { AudioModelCapability, ImageModelCapability } from '../../types/aiTypes';
+import type { AppConfig } from '../../types';
 import { getRunningHubModel } from './providers/runninghubModelManifest';
+import { getGrsaiImageCapability } from './grsaiModels';
+import { getProviderDefinition } from './providerCatalogService';
 
 /* ── 生图能力表 ── */
 
@@ -44,6 +47,10 @@ export interface ImageCapability extends ImageModelCapability {
   resolutionStyle: ImageResolutionStyle;
   /** 厂商公布的实际像素映射；未声明时沿用短边换算。 */
   dimensionPresets?: Record<string, Record<string, readonly [number, number]>>;
+  ratioField?: 'size' | 'aspect_ratio';
+  staticFields?: Record<string, unknown>;
+  requestHeaders?: Record<string, string>;
+  supportsIdempotency?: boolean;
 }
 
 // https://docs.apimart.ai/cn/api-reference/images/gpt-image-2.5/generation
@@ -428,6 +435,56 @@ const IMAGE_CAPABILITIES: Record<string, ImageCapability> = {
 /**
  * 历史旧 ID → 文档新 ID 的归一化别名，兼容 defaultModels 中已保存的旧配置。
  */
+// APIMart 的同名中转模型合同独立于火山等直连能力，避免覆盖其像素表。
+const APIMART_IMAGE_CAPABILITIES: Record<string, ImageCapability> = {
+  ...Object.fromEntries(['gemini-3.1-flash-lite-image', 'gemini-3.1-flash-lite-image-ext'].map((modelId) => [modelId, {
+    ...IMAGE_CAPABILITIES['gemini-3.1-flash-image-preview'], modelId,
+    ratios: ['auto', ...COMMON_RATIOS, '4:5', '5:4', '21:9'],
+  }])),
+  ...Object.fromEntries(['gemini-3.1-flash-image-preview', 'gemini-3.1-flash-image-preview-official'].map((modelId) => [modelId, {
+    ...IMAGE_CAPABILITIES['gemini-3.1-flash-image-preview'], modelId,
+    resolutions: ['0.5K', '1K', '2K', '4K'],
+    ratios: ['auto', ...COMMON_RATIOS, '4:5', '5:4', '21:9', '1:4', '4:1', '1:8', '8:1'],
+  }])),
+  ...Object.fromEntries(['gemini-3-pro-image-preview', 'gemini-3-pro-image-preview-official'].map((modelId) => [modelId, {
+    ...IMAGE_CAPABILITIES['gemini-3-pro-image-preview'], modelId,
+    resolutions: ['1K', '2K', '4K'], ratios: ['auto', ...COMMON_RATIOS, '4:5', '5:4', '21:9'],
+  }])),
+  'gpt-image-2-official': { ...GPT_IMAGE_25_CAPABILITY, modelId: 'gpt-image-2-official', supportsDataUrlReference: true, dimensionPresets: undefined },
+  'gpt-image-2.5-ext': {
+    ...GPT_IMAGE_25_CAPABILITY, modelId: 'gpt-image-2.5-ext',
+    resolutions: ['1K', '2K', '4K'], defaultResolution: '1K',
+    ratios: ['auto', ...COMMON_RATIOS, '5:4', '4:5', '21:9'],
+    dimensionPresets: undefined, supportsDataUrlReference: true,
+    staticFields: { version: 'flare' },
+  },
+  ...Object.fromEntries(['seedream-5-0-pro', 'seedream-5-0-flash'].map((modelId) => [modelId, {
+    ...IMAGE_CAPABILITIES['doubao-seedream-5.0-pro'], modelId, defaultResolution: '1K',
+    ratios: ['auto', ...COMMON_RATIOS, '2:1', '1:2', '21:9'],
+    dimensionPresets: {
+      '1K': { '1:1': [1024, 1024], '4:3': [1152, 864], '3:4': [864, 1152], '16:9': [1312, 736], '9:16': [736, 1312], '3:2': [1248, 832], '2:3': [832, 1248], '2:1': [1440, 720], '1:2': [720, 1440], '21:9': [1568, 672] },
+      '1.5K': { '1:1': [1536, 1536], '4:3': [1792, 1344], '3:4': [1344, 1792], '16:9': [2048, 1152], '9:16': [1152, 2048], '3:2': [1872, 1248], '2:3': [1248, 1872], '2:1': [2176, 1088], '1:2': [1088, 2176], '21:9': [2352, 1008] },
+      '2K': { '1:1': [2048, 2048], '4:3': [2304, 1728], '3:4': [1728, 2304], '16:9': [2560, 1440], '9:16': [1440, 2560], '3:2': [2496, 1664], '2:3': [1664, 2496], '2:1': [2880, 1440], '1:2': [1440, 2880], '21:9': [3024, 1296] },
+    },
+  }])),
+  'grok-imagine-1.5-apimart': {
+    ...IMAGE_CAPABILITIES['grok-imagine-1.5-apimart'], maxImageReferences: 5, supportsDataUrlReference: false,
+  },
+  'grok-imagine-2.0-ext': {
+    ...IMAGE_CAPABILITIES['grok-imagine-2.0-ext'],
+    ratios: [...COMMON_RATIOS], maxBatchCount: 12,
+    supportsImageReference: false, maxImageReferences: 0, supportsDataUrlReference: false,
+  },
+  'grok-imagine-image-2.0': {
+    modelId: 'grok-imagine-image-2.0', resolutions: ['1k', '2k'], defaultResolution: '1k',
+    ratios: ['auto', ...COMMON_RATIOS, '9:19.5', '19.5:9', '9:20', '20:9', '1:2', '2:1'],
+    defaultRatio: '1:1', resolutionStyle: 'K', ratioField: 'aspect_ratio',
+    supportsBatch: true, maxBatchCount: 10, supportsImageReference: true,
+    maxImageReferences: 3, supportsDataUrlReference: false,
+    requestHeaders: { 'X-APIMart-Response-Version': '2026-07-27' }, supportsIdempotency: true,
+  },
+};
+
 const IMAGE_MODEL_ID_ALIASES: Record<string, string> = {
   'seedream-4.0': 'doubao-seedream-4.0',
   'seedream-4.5': 'doubao-seedream-4.5',
@@ -451,6 +508,15 @@ function normalizeImageModelId(model: string): string {
 }
 
 export function getImageCapability(model?: string): ImageCapability | undefined {
+  if (model?.startsWith('grsai/')) {
+    const capability = getGrsaiImageCapability(model);
+    if (capability) return { ...capability, modelId: model.slice('grsai/'.length), resolutionStyle: 'none' };
+  }
+  if (model && (!model.includes('/') || model.startsWith('apimart/'))) {
+    const key = model.replace(/^apimart\//, '').toLowerCase();
+    const override = APIMART_IMAGE_CAPABILITIES[key];
+    if (override) return override;
+  }
   if (model && /^runninghub(?:-model)?\//.test(model)) {
     const definition = getRunningHubModel(model, true);
     if (!definition || definition.kind !== 'image') return undefined;
@@ -473,11 +539,31 @@ export function getImageCapability(model?: string): ImageCapability | undefined 
   return versionedKey ? IMAGE_CAPABILITIES[versionedKey] : undefined;
 }
 
+/** 参数面板按生成入口相同的连接身份解析，兼容旧节点的原始 ID 和通用模型引用。 */
+export function resolveImageParameterCapability(
+  model: string | undefined,
+  provider: string | undefined,
+  config: Pick<AppConfig, 'providers' | 'generalModels'>,
+): ImageCapability | undefined {
+  if (!model) return undefined;
+  const generalModel = provider === 'general'
+    ? config.generalModels?.find((item) => item.id === model.replace(/^general\//, ''))
+    : undefined;
+  const connectionId = generalModel?.providerConfigId ?? provider;
+  if (connectionId && getProviderDefinition(connectionId, config.providers[connectionId])?.id === 'grsai') {
+    const modelId = generalModel?.modelId
+      ?? (model.startsWith(`${connectionId}/`) ? model.slice(connectionId.length + 1) : model);
+    return getImageCapability(modelId.startsWith('grsai/') ? modelId : `grsai/${modelId}`);
+  }
+  return getImageCapability(model);
+}
+
 /** 将分辨率档位换算为像素短边，用于结果回填的尺寸。 */
 function shortSideFromResolution(resolution: string | undefined): number {
   if (!resolution) return 1024;
   const normalized = resolution.toLowerCase().trim();
   const map: Record<string, number> = {
+    '0.5k': 512,
     '1k': 1024, '1mp': 1024, '720p': 720, '720': 720,
     '2k': 2048, '2mp': 1536, '3k': 3072, '3mp': 2048,
     '4k': 4096, '4mp': 2560, '1.5k': 1536,
@@ -531,10 +617,11 @@ export function buildImageCapabilityRequest(
     : (capability.defaultRatio ?? '1:1');
 
   const body: Record<string, unknown> = {
+    ...capability.staticFields,
     model: capability.modelId,
     prompt,
     n: requestedCount,
-    size: ratio,
+    [capability.ratioField ?? 'size']: ratio,
   };
   // 仅当能力表声明了分辨率字段风格才写 resolution（K / MP）；none 表示模型无此字段。
   if (capability.resolutionStyle !== 'none' && resolution) {
@@ -569,6 +656,11 @@ const AUDIO_CAPABILITIES: Record<string, AudioModelCapability> = {
     kind: 'music',
     supportsVoiceReference: false,
   },
+  'flowmusic-lyria-3.5': { kind: 'music', supportsVoiceReference: false },
+  suno: { kind: 'music', supportsVoiceReference: false },
+  'suno-v6': { kind: 'music', supportsVoiceReference: false },
+  'suno-v6-wild': { kind: 'music', supportsVoiceReference: false },
+  'suno-v6-mini': { kind: 'music', supportsVoiceReference: false },
 };
 
 /** 结构化音频能力表（含音色列表 / 是否支持音色参考），供参数面板与生成入口消费。 */

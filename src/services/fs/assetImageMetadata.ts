@@ -163,6 +163,6 @@ export async function saveAssetImageMetadata(file: AssetFileEntry, input: AssetI
     prompt: input.prompt, references, revision: (input.record?.revision ?? 0) + 1, updatedAt: Date.now(),
   };
   checkAbort(signal);
-  await putAssetImageRecord(record, input.record?.revision ?? 0);
+  await putAssetImageRecord(record, input.record?.revision ?? 0, { tagReplacement: input.tagReplacement, signal });
   return record;
 }

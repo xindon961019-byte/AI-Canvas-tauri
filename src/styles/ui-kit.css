@@ -40,6 +40,66 @@
   --ui-pad: 12px;
 }
 
+/* MarkdownEditor / 受控文档编辑器（资源与节点共用） */
+.ui-markdown-editor {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--theme-bg);
+  color: var(--theme-text);
+  border-radius: var(--ui-radius-lg);
+}
+.ui-markdown-editor__toolbar {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: var(--ui-pad-sm);
+  border-bottom: 1px solid var(--theme-border);
+  background: var(--theme-surface);
+}
+.ui-markdown-editor__toolbar .ui-btn { padding-inline: 8px; }
+.ui-markdown-editor__toolbar .ui-btn.is-active { color: var(--brand-light); background: var(--brand-alpha-15); }
+.ui-markdown-editor__toolbar svg { width: 14px; height: 14px; }
+.ui-markdown-editor__body { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.ui-markdown-editor__body.is-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.ui-markdown-editor__source, .ui-markdown-editor__preview {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  min-width: 0;
+  margin: 0;
+  padding: var(--ui-pad);
+  overflow: auto;
+  background: transparent;
+  color: var(--theme-text);
+  font-size: var(--ui-font-lg);
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+.ui-markdown-editor__source { border: none; resize: none; font-family: ui-monospace, monospace; tab-size: 2; }
+.ui-markdown-editor__source:focus-visible, .ui-markdown-editor__preview:focus-visible { outline: 1px solid var(--brand); outline-offset: -1px; }
+.ui-markdown-editor__body.is-split > :first-child { border-right: 1px solid var(--theme-border); }
+.ui-markdown-editor pre.ui-markdown-editor__preview { white-space: pre-wrap; }
+.ui-markdown-editor__status { display: flex; flex: none; justify-content: space-between; gap: 8px; padding: 4px var(--ui-pad-sm); border-top: 1px solid var(--theme-border); color: var(--theme-text-secondary); font-size: var(--ui-font-sm); }
+.ui-markdown-editor__preview table { width: 100%; border-collapse: collapse; margin-block: 12px; }
+.ui-markdown-editor__preview th, .ui-markdown-editor__preview td { padding: 6px 8px; border: 1px solid var(--theme-border); }
+.ui-markdown-editor__preview th { background: var(--theme-surface); }
+.markdown-rendered .md-align-left { text-align: left; }
+.markdown-rendered .md-align-center { text-align: center; }
+.markdown-rendered .md-align-right { text-align: right; }
+.markdown-rendered .md-task { list-style: none; }
+@media (max-width: 720px) {
+  .ui-markdown-editor__body.is-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+  .ui-markdown-editor__body.is-split > :first-child { border-right: none; border-bottom: 1px solid var(--theme-border); }
+}
+
 /* ==========================================================================
    Button / 按钮
    基础结构：<button class="ui-btn ui-btn--primary">文字</button>

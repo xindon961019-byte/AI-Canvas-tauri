@@ -12,6 +12,7 @@ import { deletePermanentFile, isTauriEnv, revealFileInFolder } from '../../servi
 import { loadAssetImageDetails } from '../../services/assetImageDetails';
 import { loadAssetVideoHistory } from '../../services/assetVideoDetails';
 
+const AssetTextPreview = lazy(() => import('./AssetTextPreview'));
 const AssetImagePreview = lazy(() => import('./AssetImagePreview'));
 
 /** 启动页的轻量资源入口；不扫描整个目录，不挂载画布或生成业务。 */
@@ -25,6 +26,7 @@ export default function RecentAssetsSection() {
   const scopeKey = JSON.stringify(scope);
   const [refresh, setRefresh] = useState(0);
   const [result, setResult] = useState<{ scope: string; entries: RecentAssetEntry[]; error: boolean }>();
+  const [textId, setTextId] = useState<string | null>(null);
   const [imageId, setImageId] = useState<string | null>(null);
   const [fileMenu, setFileMenu] = useState<{ entry: RecentAssetEntry; scope: string; x: number; y: number } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -32,6 +34,8 @@ export default function RecentAssetsSection() {
   const activeScopeRef = useRef<string | null>(scopeKey);
   if (fileMenu && (panelOpen || fileMenu.scope !== scopeKey)) setFileMenu(null);
   const entries = result?.scope === scopeKey ? result.entries : [];
+  const text = entries.find((entry) => entry.file.assetId === textId);
+  if (textId && !text) setTextId(null);
   const image = entries.find((entry) => entry.file.assetId === imageId);
   if (imageId && !image) setImageId(null);
   const video = useResourceVideoPreview(scopeKey, entries.map((entry) => entry.file.assetId!));
@@ -140,12 +144,15 @@ export default function RecentAssetsSection() {
                   videoPresentation="fullscreen" videoProjectId={projectId} videoExpanded={video.expandedId === file.assetId}
                   onVideoExpandedChange={(expanded) => {
                     video.setExpanded(expanded ? file.assetId! : null);
-                    if (expanded) { setImageId(null); void markUsed(file); }
+                    if (expanded) { setTextId(null); setImageId(null); void markUsed(file); }
                   }}
                   onImagePreview={file.category === 'image' ? () => {
-                    video.setExpanded(null); setImageId(file.assetId!); void markUsed(file);
+                    video.setExpanded(null); setTextId(null); setImageId(file.assetId!); void markUsed(file);
+                  } : undefined}
+                  onTextPreview={file.category === 'text' ? () => {
+                    video.setExpanded(null); setImageId(null); setTextId(file.assetId!); void markUsed(file);
                   } : undefined} />
-                {file.category !== 'image' && file.category !== 'video' && (
+                {file.category !== 'image' && file.category !== 'video' && file.category !== 'text' && (
                   <button type="button" className="absolute inset-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-400"
                     aria-label={`在资源库查看 ${file.name}`} onClick={() => openLibrary(true, 'page', projectId
                       ? { tab: 'project', projectId } : { tab: 'permanent', folder: file.source === 'folder' && file.folderRoot
@@ -186,6 +193,10 @@ export default function RecentAssetsSection() {
           canCopyPrompt={fileMenu.entry.file.category === 'image' || fileMenu.entry.file.category === 'video'}
           onCopy={() => performFileAction('copy')} onCopyPrompt={() => performFileAction('prompt')}
           onReveal={() => performFileAction('reveal')} onDelete={() => performFileAction('delete')} onClose={closeFileMenu} />}
+      {!panelOpen && text && <Suspense fallback={<p role="status">正在打开文档…</p>}>
+        <AssetTextPreview key={text.file.assetId} file={text.file} projectId={text.projectId} onClose={() => setTextId(null)}
+          onSaved={() => setRefresh((value) => value + 1)} />
+      </Suspense>}
       {image && <Suspense fallback={<p role="status" className="mt-2 text-xs text-canvas-text-muted">正在打开图片预览…</p>}>
         <AssetImagePreview key={image.file.assetId} files={[image.file]} initialPath={image.file.path}
           projectId={image.projectId} onClose={() => setImageId(null)} />

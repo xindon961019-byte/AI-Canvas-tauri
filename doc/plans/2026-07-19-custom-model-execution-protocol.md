@@ -218,3 +218,36 @@
 - `ResolvedModelProtocolPoll` 与 IndexedDB schema 未调整，既有异步任务恢复格式保持兼容。
 - 已通过 39 项协议/传输定向测试、76 项全量测试、前端/测试类型检查、定向 ESLint 和生产构建。
 - 已复现 Agnes JSON 配置场景，确认表单/JSON 往返不丢失响应字段，1280px 与 480px 无横向溢出且控制台无警告。
+
+## 2026-10-07：试跑一致性、JSON 预览与任务结果下载
+
+状态：本批实现与本地验证完成；范围已由用户确认。属于模型平台能力完善，沿用声明式协议，不引入脚本执行、依赖或原生权限变更。真实厂商付费调用与原生打包验收未进行。
+
+### 实施顺序与文件
+
+1. 修复试跑一致性：`src/components/settings/ModelProtocolEditor.tsx`、`src/components/settings/modelProtocolTestRun.ts`；回归放在 `tests/components/modelProtocolEditor.test.tsx`、`modelProtocolTestRun.test.ts` 与 `modelProtocolEditorInteractions.test.tsx`。当前 JSON 草稿或子表单无效时禁止试跑，执行前重新解析当前草稿。
+2. 开放 JSON 预览：仍修改同一编辑器和组件测试。表单与 JSON 共用示例变量、脱敏请求预览和响应路径预览，将已有 AI 配置说明复制入口放到公共操作区；复用 UI Kit 与现有主题样式。
+3. 增加异步结果下载：`src/types/aiTypes.ts`、`src/services/ai/modelProtocolValidation.ts`、`modelProtocolPoll.ts`、`modelProtocolHttp.ts`；回归放在 `tests/services/modelProtocolDownload.test.ts` 与 `pollManager.test.ts`，并复查既有协议测试。`poll.response.result.download` 声明同源 GET 路径、Query 与受控 Header，必须引用本次提交任务 ID；轮询完成后下载二进制，鉴权沿用连接并只在运行时注入。
+4. 同步本计划与 `doc/模型与生成模块.md`，运行前端/测试类型、定向 ESLint、协议/导入/生成/恢复测试、差异和严格 UTF-8 检查。界面验收覆盖深浅主题与窄窗口；真实付费调用须单独标明是否验证。
+
+### 边界与验收
+
+- 下载配置和 URL/Base64/文本结果映射互斥，只用于异步轮询成功后的读取；不增加新的提交或自动重提生成。
+- 解析后的下载地址和受控 Header 随既有轮询描述保存，恢复时复核同源与 Header；不保存 API Key 或完整提交响应，不提升 IndexedDB 版本。
+- 旧协议与没有下载配置的任务维持现有行为。下载失败或取消明确报错，不将远端任务完成当作产物已保存。
+- 回滚时撤销本阶段代码；使用新下载字段的配置须先恢复为原结果映射或停用，避免旧版本不能执行。其他配置、项目历史和已有用户改动不迁移。
+
+### 实际验证
+
+- 当前无效 JSON、未修复的子表单不会回退试跑旧配置；修正后按当前草稿和示例变量执行。表单与 JSON 均可复制脱敏的 AI 配置说明，并查看请求和响应预览。
+- 视频/音频高级表单提供“完成后同源下载”，JSON 可配置 `poll.response.result.download`。下载与结果字段映射互斥，GET 路径或 Query 必须引用本次提交任务 ID；恢复时先校验来源、Header 形状、名称和值，再查询。鉴权按恢复时的连接注入。
+- 协议、编辑器、生成、传输、导入、工作流、厂商配置和任务恢复共 19 个测试文件、419 项测试通过。覆盖一次提交、成功后下载、恢复后素材保存、鉴权轮换、跨源/鉴权覆盖拒绝、失败不重提及下载前/读取中取消。
+- 前端与测试 TypeScript、改动文件 ESLint、生产构建、差异与严格 UTF-8 检查通过。构建输出放在临时目录，未修改仓库构建产物。
+- 浏览器验证覆盖深浅主题、1280px 桌面与 480px 窄窗口，无页面横向溢出；检查了无效草稿禁用试跑、修正恢复、公共复制入口和下载表单。Web 环境有既有 Tauri 窗口 API 不可用提示，不能据此确认原生网络与打包行为。未发起真实付费请求。
+
+### 2026-10-07：JSON 变量插入与左右布局
+
+- JSON 编辑改为左侧变量、右侧编辑区；窗口宽度不超过 700px 时上下排列，变量列表独立滚动。变量按钮复用 UI Kit，保留悬浮说明与当前任务 ID 路径。
+- 点击或用 Enter 激活变量按钮，在最后光标处插入完整模板；有选区时替换选区，随后恢复编辑焦点并将光标置于模板末尾。尚未定位光标时插入草稿末尾；不推测 JSON 字段或补写引号。插入仍经过原有校验，无效草稿禁止保存和试跑。
+- 修改仅涉及 `ModelProtocolEditor.tsx`、`modelProtocolEditorInteractions.test.tsx` 与本计划；无协议格式、模型请求或持久化变更。回滚本次编辑器补丁即可恢复上下布局与只读变量标签。
+- 本批 3 个组件测试文件、18 项测试通过；前端/测试 TypeScript、定向 ESLint、UTF-8 和差异检查通过。浏览器验证了光标插入、选区替换、连续插入、Enter 操作，以及深浅主题的桌面/480px 窄窗口布局；临时草稿未保存，未调用模型。

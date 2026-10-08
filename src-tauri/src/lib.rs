@@ -158,6 +158,8 @@ mod provider_docs;
 mod secret_store;
 #[path = "media/sprite_export.rs"]
 mod sprite_export;
+#[path = "media/sprite_processing.rs"]
+mod sprite_processing;
 
 static CHAT_WINDOW_LOCKED: AtomicBool = AtomicBool::new(false);
 static CHAT_WINDOW_LOCK_OFFSET: Mutex<(i32, i32)> = Mutex::new((0, 0));
@@ -1237,6 +1239,7 @@ pub fn run() {
             onnx::speech_to_text,
             onnx::character_direction_grid,
             sprite_export::export_sprite_frames,
+            sprite_processing::preview_sprite_sheet,
             onnx::download_onnx_model,
             onnx::get_onnx_gpu_status,
             mcp_bridge::mcp_bridge_start,

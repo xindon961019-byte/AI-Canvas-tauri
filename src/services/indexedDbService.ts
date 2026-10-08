@@ -34,6 +34,7 @@ import {
 
 import { withRelocatedMedia } from './indexedDb/mediaRelocations';
 import { localMediaUrlToPath } from '../utils/mediaUrl';
+import { stripVerbatimPrefix } from './fs/core';
 
 const LAST_ACTIVE_PROJECT_KEY = 'last-active-project';
 const RECENT_ASSET_USAGE_KEY = 'recent-asset-usage';
@@ -349,7 +350,7 @@ export interface HistoryPage {
 /** 图片身份比较仅使用完整路径/地址；不按文件名猜测来源。 */
 export function imageHistoryReferenceKey(reference: string | undefined): string | undefined {
   if (!reference || reference.startsWith('data:') || reference.startsWith('blob:')) return undefined;
-  const path = localMediaUrlToPath(reference) ?? reference;
+  const path = stripVerbatimPrefix(localMediaUrlToPath(reference) ?? reference);
   if (/^[a-z]:[/\\]/i.test(path) || path.startsWith('/') || path.startsWith('\\\\')) {
     const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
     return /^[a-z]:\//i.test(normalized) || normalized.startsWith('//') ? normalized.toLowerCase() : normalized;
@@ -397,7 +398,7 @@ async function findMediaHistoryByReferences(references: string[], nodeType: 'ai-
         abort(); return;
       }
       const record = cursor.value as HistoryRecord;
-      if (record.nodeType === nodeType && record.status === 'success'
+      if ((record.nodeType === nodeType || nodeType === 'ai-image' && record.nodeType === 'ai-animation') && record.status === 'success'
         && [record.filePath, record.mediaUrl, record.output].some((reference) => {
           const key = imageHistoryReferenceKey(reference); return !!key && keys.has(key);
         }) && (!latest || record.timestamp > latest.timestamp || record.timestamp === latest.timestamp && record.id > latest.id)) {
@@ -754,15 +755,23 @@ export async function getAssetImageRecords(signal?: AbortSignal): Promise<import
   });
 }
 
-/** 事务内比较 revision，失败时保留原记录；不向历史或标签写入。 */
-export async function putAssetImageRecord(record: import('../types/assetImage').AssetImageRecord, expectedRevision: number): Promise<void> {
+/** 事务内比较 revision；批量反推可同时比较标签基线并原子替换，失败保留原信息。 */
+export async function putAssetImageRecord(record: import('../types/assetImage').AssetImageRecord, expectedRevision: number,
+  options?: { tagReplacement?: import('../types/assetImage').AssetImageTagReplacement; signal?: AbortSignal }): Promise<void> {
   if (!record.id.startsWith(ASSET_IMAGE_PREFIX) || !/^[a-f0-9]{64}$/.test(record.contentDigest)
     || record.revision !== expectedRevision + 1) throw new Error('图片信息无效');
+  const replacement = options?.tagReplacement;
+  if (replacement && (replacement.tags.length > 16 || replacement.tags.some((tag) => !tag.trim() || tag.length > 40))) throw new Error('标签信息无效');
+  options?.signal?.throwIfAborted();
   const db = await openDB();
+  options?.signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_METADATA, 'readwrite');
+    const tx = db.transaction(replacement ? [STORE_METADATA, STORE_ASSET_META_V2] : STORE_METADATA, 'readwrite');
     const store = tx.objectStore(STORE_METADATA);
     let conflict = false;
+    const abort = () => { try { tx.abort(); } catch { /* 事务已完成 */ } };
+    const cleanup = () => options?.signal?.removeEventListener('abort', abort);
+    options?.signal?.addEventListener('abort', abort, { once: true });
     const request = store.get(record.id);
     request.onsuccess = () => {
       const current = request.result as import('../types/assetImage').AssetImageRecord | undefined;
@@ -771,8 +780,24 @@ export async function putAssetImageRecord(record: import('../types/assetImage').
       }
       store.put(record);
     };
-    tx.oncomplete = () => resolve();
-    tx.onabort = tx.onerror = () => reject(new Error(conflict ? '图片信息已被其他操作修改，请重新读取后保存' : '图片信息保存失败'));
+    if (replacement) {
+      const tags = tx.objectStore(STORE_ASSET_META_V2);
+      const baseline = tags.get(record.assetId);
+      baseline.onsuccess = () => {
+        const current = baseline.result as AssetMetaRecord | undefined;
+        if (replacement.expected ? !current || current.updatedAt !== replacement.expected.updatedAt
+          || JSON.stringify(current.tags) !== JSON.stringify(replacement.expected.tags) : !!current) {
+          conflict = true; abort(); return;
+        }
+        tags.put({ assetId: record.assetId, tags: [...replacement.tags], taggedBy: 'vision', updatedAt: Date.now() } satisfies AssetMetaRecord);
+      };
+    }
+    tx.oncomplete = () => { cleanup(); resolve(); };
+    tx.onabort = tx.onerror = () => {
+      cleanup(); reject(options?.signal?.aborted ? new DOMException('Cancelled', 'AbortError')
+        : new Error(conflict ? '提示词或标签已被其他操作修改，请重新读取后重试' : '图片信息保存失败'));
+    };
+    if (options?.signal?.aborted) abort();
   });
 }
 
@@ -784,6 +809,16 @@ export async function getAllAssetMeta(): Promise<AssetMetaRecord[]> {
     const store = tx.objectStore(STORE_ASSET_META_V2);
     const request = store.getAll();
     request.onsuccess = () => resolve(request.result as AssetMetaRecord[]);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+/** 批量任务逐项捕获当前标签基线，避免为每张图片读取整个标签目录。 */
+export async function getAssetMetaById(assetId: string): Promise<AssetMetaRecord | undefined> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(STORE_ASSET_META_V2, 'readonly').objectStore(STORE_ASSET_META_V2).get(assetId);
+    request.onsuccess = () => resolve(request.result as AssetMetaRecord | undefined);
     request.onerror = () => reject(request.error);
   });
 }

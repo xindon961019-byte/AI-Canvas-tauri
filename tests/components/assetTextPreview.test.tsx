@@ -1,5 +1,5 @@
 import type { ReactElement } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 interface Harness {
   states: unknown[];
@@ -55,6 +55,11 @@ type Element = ReactElement<Record<string, unknown> & { children?: unknown }>;
 
 let scope: Harness;
 
+afterEach(() => {
+  scope.effects.forEach((effect) => effect?.cleanup?.());
+  vi.unstubAllGlobals();
+});
+
 function renderPreview(props: Parameters<typeof AssetTextPreview>[0]) {
   driver.current = scope;
   scope.stateIndex = scope.refIndex = scope.effectIndex = 0;
@@ -80,6 +85,7 @@ function findByClassName(root: unknown, className: string): Element | undefined 
 describe('AssetThumb - 文本预览 (Text Preview)', () => {
   beforeEach(() => {
     clearTextPreviewCache();
+    vi.stubGlobal('window', new EventTarget());
     scope = { states: [], refs: [], effects: [], pending: [], stateIndex: 0, refIndex: 0, effectIndex: 0 };
   });
 

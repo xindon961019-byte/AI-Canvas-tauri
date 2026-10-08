@@ -291,8 +291,9 @@ function MultiSelectToolbar() {
 
   // ── Copy selected nodes to internal clipboard ──
   const handleCopyNodes = useCallback(() => {
-    copySelectedNodes();
-    useAppStore.getState().showToast(t('已复制 {count} 个节点', { count: useAppStore.getState().selectedNodeIds.length }));
+    if (copySelectedNodes()) {
+      useAppStore.getState().showToast(t('已复制 {count} 个节点', { count: useAppStore.getState().selectedNodeIds.length }));
+    }
   }, [copySelectedNodes, t]);
 
   if (selectedCount < 2 || !toolbarScreenPos) return null;

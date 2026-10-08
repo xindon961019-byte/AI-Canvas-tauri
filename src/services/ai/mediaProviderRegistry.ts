@@ -11,6 +11,7 @@ import type {
 } from '../../types/aiTypes';
 import { apimartMediaProviderAdapter } from './providers/apimartMedia';
 import { runninghubMediaProviderAdapter } from './providers/runninghubMedia';
+import { grsaiMediaProviderAdapter } from './providers/grsaiMedia';
 
 export type MediaProviderCapability = 'image' | 'video' | 'audio';
 
@@ -122,4 +123,5 @@ export class MediaProviderRegistry {
 export const mediaProviderRegistry = new MediaProviderRegistry([
   apimartMediaProviderAdapter,
   runninghubMediaProviderAdapter,
+  grsaiMediaProviderAdapter,
 ]);

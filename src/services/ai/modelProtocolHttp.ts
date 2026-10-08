@@ -7,7 +7,7 @@
 import type { ModelProtocolAuthConfig, ModelProtocolResultConfig, ProtocolJsonValue } from '../../types/aiTypes';
 import { corsSafeFetch } from './httpTransport';
 import { readModelProtocolFirstScalar } from './modelProtocolResponse';
-import { MIME_TYPE_RE, isRecord, resolveAuthentication } from './modelProtocolShared';
+import { MIME_TYPE_RE, isRecord, resolveAuthentication, validateHeaderName } from './modelProtocolShared';
 import { applyQueryAuthentication } from './modelProtocolRequest';
 
 export class ModelProtocolHttpError extends Error {
@@ -155,16 +155,26 @@ export function normalizeBase64Result(
 function buildResultAuthenticationHeaders(
   auth: ModelProtocolAuthConfig | undefined,
   apiKey: string,
+  extraHeaders?: Record<string, string>,
 ): Record<string, string> {
-  if (!apiKey) return {};
+  if (extraHeaders !== undefined && !isRecord(extraHeaders)) throw new Error('结果下载请求头必须是 JSON 对象');
+  const headers: Record<string, string> = {};
+  const errors: string[] = [];
+  for (const [name, value] of Object.entries(extraHeaders ?? {})) {
+    validateHeaderName(name, '结果下载请求 ', errors);
+    if (typeof value !== 'string') errors.push('结果下载请求头的值必须是字符串');
+    headers[name] = value;
+  }
+  if (errors.length > 0) throw new Error(errors[0]);
+  if (!apiKey) return headers;
   const resolvedAuth = resolveAuthentication(auth);
   if (resolvedAuth.type === 'bearer') {
-    return { Authorization: `${resolvedAuth.prefix ?? 'Bearer '}${apiKey}` };
+    headers.Authorization = `${resolvedAuth.prefix ?? 'Bearer '}${apiKey}`;
   }
   if (resolvedAuth.type === 'header') {
-    return { [resolvedAuth.name!]: `${resolvedAuth.prefix ?? ''}${apiKey}` };
+    headers[resolvedAuth.name!] = `${resolvedAuth.prefix ?? ''}${apiKey}`;
   }
-  return {};
+  return headers;
 }
 
 export async function fetchSameOriginResultUrls(
@@ -174,7 +184,10 @@ export async function fetchSameOriginResultUrls(
   apiKey: string,
   fallbackMimeType?: string,
   signal?: AbortSignal,
+  extraHeaders?: Record<string, string>,
 ): Promise<string[]> {
+  signal?.throwIfAborted();
+  const headers = buildResultAuthenticationHeaders(auth, apiKey, extraHeaders);
   const allowedOrigin = new URL(baseUrl).origin;
   return Promise.all(urls.map(async (rawUrl) => {
     const url = new URL(rawUrl);
@@ -183,10 +196,11 @@ export async function fetchSameOriginResultUrls(
     }
     const response = await corsSafeFetch(
       applyQueryAuthentication(url.toString(), auth, apiKey),
-      { method: 'GET', headers: buildResultAuthenticationHeaders(auth, apiKey), signal },
+      { method: 'GET', headers, signal },
     );
     await ensureSuccessfulRawResponse(response, '模型结果下载失败');
     const bytes = new Uint8Array(await response.arrayBuffer());
+    signal?.throwIfAborted();
     if (bytes.byteLength === 0) throw new Error('模型结果下载内容为空');
     const responseMimeType = response.headers.get('Content-Type')?.split(';')[0]?.trim();
     const mimeType = responseMimeType && MIME_TYPE_RE.test(responseMimeType)

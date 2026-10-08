@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '@iconify/react';
 import type { AssetFileEntry } from '../../services/fileService';
+import { isTauriEnv } from '../../services/fileService';
 import type { HistoryRecord } from '../../services/indexedDbService';
+import { getAllAssetMeta, getAssetMetaById, putAssetMeta, deleteAssetMeta } from '../../services/indexedDbService';
 import { describeAssetImageHistory, loadAssetImageDetails, resolvePromptImageReferences } from '../../services/assetImageDetails';
 import { useAppStore } from '../../store/useAppStore';
-import type { AssetImageLoadedDetails, AssetImageReferenceView } from '../../types/assetImage';
+import type { AssetImageLoadedDetails, AssetImageReferenceView, AssetImageTagReplacement } from '../../types/assetImage';
 import { MAX_ASSET_IMAGE_PROMPT, MAX_ASSET_IMAGE_REFERENCES, pickAssetImageReferences, previewPendingAssetImageReferences, resolveAssetImageReferences } from '../../services/fs/assetImageMetadata';
 import { copyText } from '../../services/clipboardService';
 import { formatSize } from '../../utils/assetFormat';
@@ -12,16 +14,26 @@ import ModalOverlay from '../shared/ModalOverlay';
 import ZoomableImage from '../shared/ZoomableImage';
 import { getNodeMetaMap } from '../nodes/shared/mentionEditorDom';
 import { renderPromptWithChips } from '../nodes/shared/PromptChipViewer';
+import ModelSelector from '../nodes/shared/ModelSelector';
+import { resolveVisionTextModel, reversePromptAndTags } from '../../services/ai/reversePrompt';
 
 /** 资产库专用图片预览。列表与画布保留原状态，历史信息按图片身份只读加载。 */
-export default function AssetImagePreview({ files, initialPath, projectId: fallbackProjectId, projectIdForFile, onClose }: {
+export default function AssetImagePreview({ files: sourceFiles, initialPath, projectId: fallbackProjectId, projectIdForFile, onTagsSaved, onRenamed, onClose }: {
   files: AssetFileEntry[];
   initialPath: string;
   projectId?: string;
   projectIdForFile?: (file: AssetFileEntry) => string | undefined;
+  onTagsSaved?: (file: AssetFileEntry, tags: string[]) => void;
+  onRenamed?: (previous: AssetFileEntry, next: AssetFileEntry) => void;
   onClose: () => void;
 }) {
   const [activePath, setActivePath] = useState(initialPath);
+  const [renamedFiles, setRenamedFiles] = useState<Record<string, AssetFileEntry>>({});
+  const files = useMemo(() => sourceFiles.map((entry) => renamedFiles[entry.path] ?? entry), [sourceFiles, renamedFiles]);
+  const [renameDraft, setRenameDraft] = useState<{ path: string; value: string } | null>(null);
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameMessage, setRenameMessage] = useState('');
+  const renameBusyRef = useRef(false);
   const [retry, setRetry] = useState(0);
   const [imageRetry, setImageRetry] = useState(0);
   const [failedImage, setFailedImage] = useState('');
@@ -29,14 +41,20 @@ export default function AssetImagePreview({ files, initialPath, projectId: fallb
   const [metadata, setMetadata] = useState<{ key: string; history: HistoryRecord | null; saved: AssetImageLoadedDetails | null; error: boolean } | null>(null);
   const [copyStatus, setCopyStatus] = useState<{ key: string; message: string } | null>(null);
   const saveAction = useAppStore((state) => state.saveAssetImageDetails);
+  const renameAction = useAppStore((state) => state.renameAssetFile);
   const nodes = useAppStore((state) => state.nodes ?? []);
   const dramaAssets = useAppStore((state) => state.dramaAssets);
   const nodeMetaMap = useMemo(() => getNodeMetaMap(nodes), [nodes]);
   const [promptReferences, setPromptReferences] = useState<AssetImageReferenceView[]>([]);
-  const [draft, setDraft] = useState<{ key: string; prompt: string; references: AssetImageReferenceView[]; pending: Array<{ path: string; name: string; url: string }> } | null>(null);
+  const [draft, setDraft] = useState<{ key: string; prompt: string; tags: string[]; tagInput: string; references: AssetImageReferenceView[]; pending: Array<{ path: string; name: string; url: string }> } | null>(null);
+  const [savedTags, setSavedTags] = useState<{ key: string; tags: string[] } | null>(null);
   const [operation, setOperation] = useState<{ key: string; message: string; busy: boolean } | null>(null);
   const [referenceState, setReferencePreview] = useState<{ key: string; url: string; name: string } | null>(null);
   const [leaveRequest, setLeaveRequest] = useState<{ direction?: -1 | 1 } | null>(null);
+  const [reversePanelKey, setReversePanelKey] = useState<string | null>(null);
+  const [reverseModel, setReverseModel] = useState(() => resolveVisionTextModel());
+  const [reverseRunningKey, setReverseRunningKey] = useState<string | null>(null);
+  const reverseControllerRef = useRef<AbortController | null>(null);
   const operationRef = useRef<AbortController | null>(null);
   const activeKeyRef = useRef('');
   const draftRef = useRef(false);
@@ -52,7 +70,10 @@ export default function AssetImagePreview({ files, initialPath, projectId: fallb
   const history = metadata?.key === queryKey ? metadata.history : null;
   const saved = metadata?.key === queryKey ? metadata.saved : null;
   const editing = draft?.key === queryKey;
-  const busy = operation?.key === queryKey && operation.busy;
+  const tags = editing ? draft.tags : savedTags?.key === queryKey ? savedTags.tags : file?.tags ?? [];
+  const reversePanelOpen = reversePanelKey === queryKey;
+  const reversing = reverseRunningKey === queryKey;
+  const busy = reversing || operation?.key === queryKey && operation.busy;
   const prompt = saved?.record?.prompt ?? history?.prompt ?? '';
   const referenceViews = useMemo(() => {
     if (editing) return draft?.references ?? [];
@@ -74,10 +95,12 @@ export default function AssetImagePreview({ files, initialPath, projectId: fallb
   const metadataError = metadata?.key === queryKey && metadata.error;
   const details = useMemo(() => history ? describeAssetImageHistory(history) : [], [history]);
   const close = useCallback(() => {
+    if (renameBusyRef.current) return;
     if (draftRef.current) { setLeaveRequest({}); return; }
     onClose();
   }, [onClose]);
   const navigate = useCallback((direction: -1 | 1) => {
+    if (renameBusyRef.current) return;
     if (draftRef.current) { setLeaveRequest({ direction }); return; }
     setActivePath((path) => {
       const current = files.findIndex((entry) => entry.path === path);
@@ -86,10 +109,13 @@ export default function AssetImagePreview({ files, initialPath, projectId: fallb
   }, [files]);
 
   useEffect(() => {
-    if (!file) { onClose(); return; }
+    if (!file) { if (!renameBusyRef.current) onClose(); return; }
     const controller = new AbortController();
-    void loadAssetImageDetails(file, projectId, controller.signal).then((result) => {
-      if (!controller.signal.aborted) setMetadata({ key: queryKey, history: result.history, saved: result, error: false });
+    void Promise.all([loadAssetImageDetails(file, projectId, controller.signal), getAllAssetMeta()]).then(([result, metas]) => {
+      if (!controller.signal.aborted) {
+        setMetadata({ key: queryKey, history: result.history, saved: result, error: false });
+        setSavedTags({ key: queryKey, tags: metas.find((meta) => meta.assetId === (file.assetId ?? file.path))?.tags ?? file.tags ?? [] });
+      }
     }).catch(() => {
       if (!controller.signal.aborted) setMetadata({ key: queryKey, history: null, saved: null, error: true });
     });
@@ -114,6 +140,7 @@ export default function AssetImagePreview({ files, initialPath, projectId: fallb
 
   useEffect(() => () => {
     operationRef.current?.abort();
+    reverseControllerRef.current?.abort();
     activeKeyRef.current = '';
   }, [queryKey]);
   useEffect(() => { draftRef.current = editing; activeKeyRef.current = queryKey; }, [editing, queryKey]);
@@ -138,25 +165,79 @@ export default function AssetImagePreview({ files, initialPath, projectId: fallb
       if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.isComposing) return;
       if (event.key === 'Escape') {
         event.preventDefault(); event.stopImmediatePropagation();
+        if (renameBusyRef.current) return;
+        if (renameDraft && renameDraft.path === file?.path) { setRenameDraft(null); setRenameMessage(''); return; }
+        if (reversePanelOpen) { reverseControllerRef.current?.abort(); setReversePanelKey(null); return; }
         if (referencePreview) setReferencePreview(null); else if (leaveRequest) setLeaveRequest(null); else close(); return;
       }
       const target = event.target as HTMLElement | null;
       if (target?.isContentEditable || target?.closest?.('input, textarea, select')) return;
-      if (referencePreview || leaveRequest || draftRef.current) return;
+      if (referencePreview || leaveRequest || reversePanelOpen || draftRef.current || renameDraft || renameBusyRef.current) return;
       if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
       event.preventDefault(); event.stopImmediatePropagation(); navigate(event.key === 'ArrowLeft' ? -1 : 1);
     };
     // 在背景画布与资产库的键盘监听器之前消费按键。
     window.addEventListener('keydown', handleKey, true);
     return () => window.removeEventListener('keydown', handleKey, true);
-  }, [close, navigate, referencePreview, leaveRequest]);
+  }, [close, navigate, referencePreview, leaveRequest, reversePanelOpen, renameDraft, file?.path]);
 
   if (!file || !file.assetUrl) return null;
   const shownImageKey = referencePreview ? `${referencePreview.url}:${imageRetry}` : imageKey;
   const broken = failedImage === shownImageKey;
+  const extension = file.name.lastIndexOf('.') > 0 ? file.name.slice(file.name.lastIndexOf('.')) : '';
+  const renaming = renameDraft?.path === file.path;
+  const saveFileName = async () => {
+    if (!renameDraft || !renaming || renameBusyRef.current || busy || editing || reversing) return;
+    renameBusyRef.current = true;
+    setRenameBusy(true); setRenameMessage('');
+    try {
+      const result = await renameAction({ ...file, assetId: file.assetId ?? saved?.identity?.assetId }, renameDraft.value, projectId);
+      setRenamedFiles((current) => ({ ...Object.fromEntries(Object.entries(current).map(([path, entry]) =>
+        [path, entry.path === file.path ? result.file : entry])), [file.path]: result.file }));
+      setActivePath(result.file.path);
+      setRenameDraft(null); setRenameMessage(result.warning ?? '文件名已修改');
+      onRenamed?.(file, result.file);
+    } catch (error) {
+      setRenameMessage(error instanceof Error ? error.message : '修改文件名失败，请检查文件是否被占用或目录权限');
+    } finally { renameBusyRef.current = false; setRenameBusy(false); }
+  };
   const startEdit = () => {
-    setDraft({ key: queryKey, prompt, references: saved?.references ?? [], pending: [] });
+    if (busy || renaming || renameBusyRef.current) return;
+    setDraft({ key: queryKey, prompt, tags: [...tags], tagInput: '', references: saved?.references ?? [], pending: [] });
     setOperation(null);
+  };
+  const closeReversePanel = () => {
+    reverseControllerRef.current?.abort();
+    setReversePanelKey(null);
+  };
+  const runReverse = async () => {
+    if (!reverseModel?.model || !reverseModel.provider || !saved?.identity || busy || reverseControllerRef.current) return;
+    const key = queryKey;
+    const controller = new AbortController();
+    reverseControllerRef.current = controller;
+    setReverseRunningKey(key);
+    setOperation(null);
+    try {
+      const baseline = await getAssetMetaById(saved.identity.assetId);
+      if (controller.signal.aborted || activeKeyRef.current !== key) return;
+      const result = await reversePromptAndTags({ imageUrls: [file.assetUrl!], ...reverseModel, signal: controller.signal });
+      if (controller.signal.aborted || activeKeyRef.current !== key) return;
+      const existing = draft?.key === key ? draft : { key, prompt, tags: [...tags], tagInput: '', references: saved.references, pending: [] };
+      const nextDraft = { ...existing, prompt: result.prompt, tags: [...new Set(result.tags)], tagInput: '' };
+      setDraft(nextDraft);
+      draftRef.current = true;
+      setReversePanelKey(null);
+      await saveEdit(nextDraft, {
+        tags: nextDraft.tags, expected: baseline ? { tags: [...baseline.tags], updatedAt: baseline.updatedAt } : null,
+      }, controller);
+    } catch (error) {
+      if (!controller.signal.aborted && activeKeyRef.current === key) {
+        setOperation({ key, message: error instanceof Error ? error.message : '反推失败，请重试', busy: false });
+      }
+    } finally {
+      if (reverseControllerRef.current === controller) reverseControllerRef.current = null;
+      setReverseRunningKey((current) => current === key ? null : current);
+    }
   };
   const addReferences = async () => {
     if (!editing || busy) return;
@@ -172,28 +253,43 @@ export default function AssetImagePreview({ files, initialPath, projectId: fallb
       setOperation(null);
     } catch { if (activeKeyRef.current === key) setOperation({ key, message: '添加失败，请检查图片类型、数量或访问权限后重试', busy: false }); }
   };
-  const saveEdit = async () => {
-    if (!editing || !saved?.identity || busy) return;
+  const saveEdit = async (nextDraft = draft, tagReplacement?: AssetImageTagReplacement, reverseController?: AbortController) => {
+    if (!nextDraft || nextDraft.key !== queryKey || !saved?.identity || busy) return;
     const key = queryKey;
-    const controller = new AbortController();
+    const controller = reverseController ?? new AbortController();
     operationRef.current = controller;
+    const nextTags = [...new Set([...nextDraft.tags, nextDraft.tagInput.trim()].filter(Boolean))];
+    let promptSaved = false;
     setOperation({ key, message: '正在保存…', busy: true });
     try {
-      const record = await saveAction(file, { identity: saved.identity, record: saved.record, prompt: draft.prompt,
-        references: draft.references.map(({ id, name, relativePath, digest, bytes }) => ({ id, name, relativePath, digest, bytes })), newReferencePaths: draft.pending.map((reference) => reference.path) }, {
+      const record = await saveAction(file, { identity: saved.identity, record: saved.record, prompt: nextDraft.prompt,
+        references: nextDraft.references.map(({ id, name, relativePath, digest, bytes }) => ({ id, name, relativePath, digest, bytes })), newReferencePaths: nextDraft.pending.map((reference) => reference.path),
+        ...(tagReplacement ? { tagReplacement } : {}),
+      }, {
         signal: controller.signal, onProgress: ({ transferredBytes, totalBytes }) => {
           if (activeKeyRef.current === key) setOperation({ key, message: totalBytes ? `正在复制参考图 ${Math.round(transferredBytes / totalBytes * 100)}%` : '正在复制参考图…', busy: true });
         },
       });
       // 事务已经提交后，取消或预览读取失败不能把成功保存报告成失败。
       if (activeKeyRef.current !== key) return;
+      promptSaved = true;
       setMetadata({ key, history, saved: { ...saved, record, references: record.references.map((reference) => ({ ...reference, url: null })), warning: null }, error: false });
-      setDraft(null); setOperation({ key, message: '已保存', busy: false });
+      // 标签写入失败时保留新记录版本及参考图，重试不会重复复制参考图。
+      setDraft((current) => current?.key === key ? { ...current, tags: nextTags, tagInput: '', references: record.references.map((reference) => ({ ...reference, url: null })), pending: [] } : current);
+      const assetId = file.assetId ?? file.path;
+      if (!tagReplacement) {
+        if (nextTags.length) await putAssetMeta({ assetId, path: file.path, tags: nextTags, taggedBy: 'manual', updatedAt: Date.now() });
+        else await deleteAssetMeta(assetId);
+      }
+      if (activeKeyRef.current !== key) return;
+      setSavedTags({ key, tags: nextTags });
+      onTagsSaved?.(file, nextTags);
+      setDraft(null); draftRef.current = false; setLeaveRequest(null); setOperation({ key, message: '已保存', busy: false });
       const references = await resolveAssetImageReferences(record.references, controller.signal).catch(() => record.references.map((reference) => ({ ...reference, url: null })));
       if (activeKeyRef.current !== key) return;
       setMetadata({ key, history, saved: { ...saved, record, references, warning: null }, error: false });
     } catch {
-      if (activeKeyRef.current === key) setOperation({ key, message: controller.signal.aborted ? '已取消，草稿仍保留' : '保存失败：原图可能已变化、信息发生冲突或目录不可用。草稿仍保留，可重试或取消编辑。', busy: false });
+      if (activeKeyRef.current === key) setOperation({ key, message: promptSaved ? '提示词和参考图已保存，标签保存失败。标签草稿仍保留，请重试。' : controller.signal.aborted ? '已取消，草稿仍保留' : '保存失败：原图可能已变化、信息发生冲突或目录不可用。草稿仍保留，可重试或取消编辑。', busy: false });
     } finally { if (operationRef.current === controller) operationRef.current = null; }
   };
   const pixelSize = dimensions?.key === imageKey ? `${dimensions.width} × ${dimensions.height}` : null;
@@ -218,13 +314,23 @@ export default function AssetImagePreview({ files, initialPath, projectId: fallb
       <aside className="asset-image-preview-info" aria-label="图片提示词和参数">
         <header className="flex shrink-0 items-center gap-3">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-canvas-hover text-canvas-text-secondary"><Icon icon="lucide:image" className="h-4 w-4" aria-hidden="true" /></div>
-          <div className="min-w-0 flex-1"><h1 className="break-words text-sm font-semibold text-canvas-text">{file.name}</h1>
-            <p className="pt-1 text-xs text-canvas-text-muted" aria-live="polite">{index + 1} / {files.length}</p></div>
-          <button type="button" className="ui-close-btn" aria-label="关闭图片预览" title="关闭（Esc）" onClick={close}><Icon icon="lucide:x" aria-hidden="true" /></button>
+          <div className="min-w-0 flex-1">{renaming ? <form className="flex items-center gap-1" onSubmit={(event) => { event.preventDefault(); void saveFileName(); }}>
+              <input autoFocus className="ui-input ui-input--sm min-w-0 flex-1" aria-label="新文件名" value={renameDraft.value} disabled={renameBusy}
+                onChange={(event) => setRenameDraft({ path: file.path, value: event.target.value })} />
+              <span className="shrink-0 text-xs text-canvas-text-muted">{extension}</span>
+              <button type="submit" className="ui-icon-btn ui-icon-btn--sm" aria-label="保存文件名" title="保存文件名" disabled={renameBusy || !renameDraft.value.trim()}><Icon icon="lucide:check" aria-hidden="true" /></button>
+              <button type="button" className="ui-icon-btn ui-icon-btn--sm" aria-label="取消修改文件名" disabled={renameBusy} onClick={() => { setRenameDraft(null); setRenameMessage(''); }}><Icon icon="lucide:x" aria-hidden="true" /></button>
+            </form> : <h1 className="break-words text-sm font-semibold text-canvas-text">{file.name}</h1>}
+            <p className="pt-1 text-xs text-canvas-text-muted" aria-live="polite">{index + 1} / {files.length}</p>
+            {renameMessage && <p role="status" className="pt-1 text-xs text-canvas-text-secondary">{renameMessage}</p>}</div>
+          {!renaming && <button type="button" className="ui-icon-btn ui-icon-btn--sm [&.ui-icon-btn]:border-0 [&.ui-icon-btn]:bg-transparent [&.ui-icon-btn:hover]:bg-transparent" aria-label="修改文件名" title={editing ? '请先保存或取消当前编辑' : '修改磁盘文件名'}
+            disabled={!isTauriEnv() || busy || reversing || reversePanelOpen || editing || renameBusy || file.availability === 'offline'}
+            onClick={() => { setRenameMessage(''); setRenameDraft({ path: file.path, value: extension ? file.name.slice(0, -extension.length) : file.name }); }}><Icon icon="lucide:pencil" aria-hidden="true" /></button>}
+          <button type="button" className="ui-close-btn" aria-label="关闭图片预览" title="关闭（Esc）" disabled={renameBusy} onClick={close}><Icon icon="lucide:x" aria-hidden="true" /></button>
         </header>
         <div ref={infoContentRef} className="asset-image-preview-info-content">
           <section className="ui-card asset-image-preview-section p-3" aria-label="提示词">
-            <div className="flex items-center justify-between gap-2 pb-2"><h2 ref={promptHeadingRef} tabIndex={-1} className="flex items-center gap-2 text-xs font-medium text-canvas-text-secondary"><Icon icon="lucide:sparkles" className="h-3.5 w-3.5" aria-hidden="true" />提示词</h2>
+            <div className="flex items-center justify-between gap-2 pb-2"><h2 ref={promptHeadingRef} tabIndex={-1} className="text-xs font-medium text-canvas-text-secondary">提示词</h2>
               <button type="button" className="ui-btn ui-btn--sm" disabled={!prompt.trim()} onClick={() => {
                 if (!prompt) return;
                 const key = queryKey;
@@ -258,13 +364,32 @@ export default function AssetImagePreview({ files, initialPath, projectId: fallb
                   emptyText: saved?.record ? '尚未填写提示词' : history ? '此记录未保存提示词' : '暂无生成信息',
                   onPreviewImage: (preview) => setReferencePreview({ key: queryKey, url: preview.url, name: preview.name }),
                 })}</p>}
+            {(tags.length > 0 || editing) && <div className="flex flex-wrap items-center gap-2 pt-3" role="group" aria-label="资产标签">
+              {tags.map((tag) => <span key={tag} className={editing ? 'ui-tag' : 'ui-badge ui-badge--primary'}>{tag}
+                {editing && <button type="button" className="ui-tag__remove" aria-label={`移除标签 ${tag}`} disabled={busy}
+                  onClick={() => setDraft((current) => current ? { ...current, tags: current.tags.filter((item) => item !== tag) } : current)}><Icon icon="lucide:x" aria-hidden="true" /></button>}
+              </span>)}
+              {editing && <input className="ui-input ui-input--sm w-40" aria-label="添加资产标签" placeholder="标签，回车添加" title="输入后按回车添加，也可直接保存" value={draft.tagInput} disabled={busy}
+                onChange={(event) => setDraft((current) => current ? { ...current, tagInput: event.target.value } : current)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
+                  event.preventDefault();
+                  setDraft((current) => {
+                    if (!current) return current;
+                    const tag = current.tagInput.trim();
+                    return { ...current, tags: tag && !current.tags.includes(tag) ? [...current.tags, tag] : current.tags, tagInput: '' };
+                  });
+                }} />}
+            </div>}
             {saved?.warning && <p className="pt-2 text-xs text-canvas-text-muted">{saved.warning}</p>}
-            {canEdit && <div className="flex justify-end gap-2 pt-2">
+            {canEdit && <div className="flex flex-wrap justify-end gap-2 pt-2">
+              <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" disabled={busy || reversing || renaming || renameBusy} onClick={() => { setOperation(null); setReversePanelKey(queryKey); }}>
+                <Icon icon="lucide:sparkles" aria-hidden="true" />反推提示词和标签</button>
               {editing ? <><button type="button" className="ui-btn ui-btn--sm" disabled={busy} onClick={() => { setDraft(null); setOperation(null); }}>取消编辑</button>
                 <button type="button" className="ui-btn ui-btn--primary ui-btn--sm" disabled={busy} onClick={() => void saveEdit()}>保存</button></>
-                : <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" onClick={startEdit}><Icon icon="lucide:pencil" aria-hidden="true" />编辑提示词与参考图</button>}
+                : <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" disabled={busy || renaming || renameBusy} onClick={startEdit}><Icon icon="lucide:pencil" aria-hidden="true" />编辑提示词与参考图</button>}
             </div>}
-            {operation?.key === queryKey && <div className="pt-2 text-xs text-canvas-text-secondary" role="status">{operation.message}{busy && operation.message !== '正在选择参考图…' && <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" onClick={() => operationRef.current?.abort()}>取消保存</button>}</div>}
+            {operation?.key === queryKey && <div className="pt-2 text-xs text-canvas-text-secondary" role="status">{operation.message}{operation.busy && operation.message !== '正在选择参考图…' && <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" onClick={() => operationRef.current?.abort()}>取消保存</button>}</div>}
             {copyStatus?.key === queryKey && <p role="status" className="pt-2 text-xs text-canvas-text-secondary">{copyStatus.message}</p>}
           </section>
           <section className="asset-image-preview-parameters" aria-label="生成参数">
@@ -283,12 +408,28 @@ export default function AssetImagePreview({ files, initialPath, projectId: fallb
         <footer className="asset-image-preview-footer">
           <p className="pb-2 text-center text-xs text-canvas-text-muted">双击缩放 · 拖动查看 · Esc 关闭</p>
           <div className="flex gap-2">
-            <button type="button" className="ui-btn ui-btn--block" aria-label="上一张图片" title="上一张（←）" disabled={index <= 0} onClick={() => navigate(-1)}><Icon icon="lucide:arrow-left" aria-hidden="true" />上一张</button>
-            <button type="button" className="ui-btn ui-btn--primary ui-btn--block" aria-label="下一张图片" title="下一张（→）" disabled={index >= files.length - 1} onClick={() => navigate(1)}>下一张<Icon icon="lucide:arrow-right" aria-hidden="true" /></button>
+            <button type="button" className="ui-btn ui-btn--block" aria-label="上一张图片" title="上一张（←）" disabled={renameBusy || index <= 0} onClick={() => navigate(-1)}><Icon icon="lucide:arrow-left" aria-hidden="true" />上一张</button>
+            <button type="button" className="ui-btn ui-btn--primary ui-btn--block" aria-label="下一张图片" title="下一张（→）" disabled={renameBusy || index >= files.length - 1} onClick={() => navigate(1)}>下一张<Icon icon="lucide:arrow-right" aria-hidden="true" /></button>
           </div>
         </footer>
       </aside>
     </div>
+    {reversePanelOpen && <ModalOverlay isOpen onClose={closeReversePanel} ariaLabel="反推提示词和标签" zIndex={370} closeOnBackdrop={false}
+      className="w-full max-w-lg [&.glass-panel]:overflow-visible">
+      <div className="ui-card w-full space-y-3 p-3 [&.ui-card]:overflow-visible">
+        <div className="flex items-center justify-between gap-2"><h2 className="flex items-center gap-2 text-sm font-semibold text-canvas-text"><Icon icon="lucide:sparkles" aria-hidden="true" />反推提示词和标签</h2>
+          <button type="button" className="ui-close-btn" aria-label="关闭反推" onClick={closeReversePanel}><Icon icon="lucide:x" aria-hidden="true" /></button></div>
+        <p className="text-xs text-canvas-text-secondary">选择能读图的文本模型。反推成功后自动保存提示词和标签，之后仍可手动编辑。</p>
+        <fieldset disabled={reversing} className="min-w-0 space-y-2"><legend className="pb-2 text-xs text-canvas-text-secondary">反推模型</legend>
+          <ModelSelector nodeType="ai-text" selectedModel={reverseModel?.model} selectedProvider={reverseModel?.provider}
+            onSelect={(option) => setReverseModel({ model: option.value, provider: option.provider })} />
+        </fieldset>
+        {operation?.key === queryKey && <p role="status" className="whitespace-pre-wrap break-words text-xs text-canvas-text-secondary">{operation.message}</p>}
+        <div className="flex justify-end gap-2"><button type="button" className="ui-btn ui-btn--sm" onClick={closeReversePanel}>{reversing ? '取消反推' : '取消'}</button>
+          <button type="button" className="ui-btn ui-btn--primary ui-btn--sm" disabled={reversing || !reverseModel?.model || !reverseModel.provider} onClick={() => void runReverse()}>
+            <Icon icon={reversing ? 'lucide:loader-circle' : 'lucide:sparkles'} className={reversing ? 'animate-spin' : undefined} aria-hidden="true" />{reversing ? '正在反推…' : '开始反推'}</button></div>
+      </div>
+    </ModalOverlay>}
     {leaveRequest && <ModalOverlay isOpen onClose={() => setLeaveRequest(null)} ariaLabel="未保存的图片信息" zIndex={370} closeOnBackdrop={false}>
       <div ref={leavePanelRef} role="alertdialog" className="ui-card p-3 space-y-3"><p className="text-sm text-canvas-text">图片信息尚未保存，要放弃这次编辑吗？</p>
         <div className="flex justify-end gap-2"><button type="button" className="ui-btn" onClick={() => setLeaveRequest(null)}>继续编辑</button>

@@ -174,6 +174,55 @@ describe('storage health cross-project deletion protection', () => {
     expect(report.orphans.map((file) => file.path)).toEqual(['/b/unused.png']);
   });
 
+  it('retains AI definitions used only by current nodes and undo snapshots in their owning project', async () => {
+    const previousHash = 'a'.repeat(64);
+    const currentHash = 'b'.repeat(64);
+    const unusedHash = 'c'.repeat(64);
+    const appNode = (sha256: string) => ({
+      id: 'ai-app-1', type: 'ai-app', position: { x: 0, y: 0 },
+      data: { type: 'ai-app', label: '筛选器', aiApp: {
+        version: 1, instanceId: 'ai-app-1', revision: sha256 === previousHash ? 1 : 2,
+        definition: { relativePath: `ai-apps/${sha256}.json`, sha256, bytes: 10 },
+        title: '筛选器', description: '', actions: [{ id: 'scan', title: '筛选', inputSchema: { type: 'object' } }],
+        inputNodeIds: [], savedState: {},
+      } },
+    });
+    addDirectory('/a', ['ai-apps/']);
+    addDirectory('/a/ai-apps', [`${previousHash}.json`, `${currentHash}.json`, `${unusedHash}.json`]);
+    addDirectory('/b', ['ai-apps/']);
+    addDirectory('/b/ai-apps', [`${previousHash}.json`]);
+    mocks.getProjectById.mockImplementation(async (id: string) => ({
+      ...project(id), nodes: id === 'a' ? [appNode(currentHash)] : [],
+    }));
+    const liveCanvas = {
+      nodes: [appNode(currentHash)],
+      history: [{ nodes: [appNode(previousHash)], edges: [], groups: [] }], messages: [],
+    };
+    const collectLive = async () => collectNodeFilePaths([{ data: liveCanvas }], '/a');
+    const report = await scanStorageHealth([], collectLive);
+    expect(report.orphans.map((file) => file.path)).toEqual([
+      `/a/ai-apps/${unusedHash}.json`, `/b/ai-apps/${previousHash}.json`,
+    ]);
+    const removed = await deleteOrphanFile(`/a/ai-apps/${previousHash}.json`, async (path) => {
+      const fresh = await scanStorageHealth([], collectLive);
+      return fresh.orphans.some((file) => file.path === path);
+    });
+    expect(removed).toBe(false);
+    expect(mocks.remove).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when asynchronous current-project reference resolution cannot finish', async () => {
+    const collectLive = async (): Promise<Set<string>> => {
+      throw new Error('项目已切换');
+    };
+    await expect(scanStorageHealth([], collectLive)).rejects.toThrow('项目已切换');
+    expect(await deleteOrphanFile('/b/unused.png', async () => {
+      await scanStorageHealth([], collectLive);
+      return true;
+    })).toBe(false);
+    expect(mocks.remove).not.toHaveBeenCalled();
+  });
+
   it.each([undefined, { nodes: null }])('fails closed on missing or malformed project records', async (record) => {
     mocks.getProjectById.mockResolvedValue(record);
     await expect(scanStorageHealth([], new Set())).rejects.toThrow();

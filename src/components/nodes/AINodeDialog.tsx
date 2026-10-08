@@ -54,6 +54,7 @@ import { completeWorkflowApiNodeTask, stopWorkflowApiNodeTask } from '../../serv
 import WorkflowApiTaskStatus from './shared/WorkflowApiTaskStatus';
 import { cancelRunningHubNodeTask, completeRunningHubNodeTask } from '../../services/ai/providers/runninghubWorkflow';
 import { completeCanvasDerivation, isCanvasDerivationFresh, registerCanvasDerivation } from '../../services/canvasDerivationGuard';
+import { animationProcessing, animationResultPatch } from '../../services/animationService';
 import { useT } from '../../i18n';
 
 const DIALOG_VIEWPORT_MARGIN = 16;
@@ -403,13 +404,14 @@ function AINodeDialog() {
     const submittingNodeId = activeNodeId!;
     const submittingProjectId = currentProjectId;
     const runningHubTask = cloudWorkflow || latestData.provider === 'runninghub';
-    let cloudGuard = runningHubTask ? registerCanvasDerivation(store, submittingNodeId) : null;
+    const guardedSubmission = runningHubTask || (nodeType === 'ai-animation' && !!submittingProjectId);
+    let cloudGuard = guardedSubmission ? registerCanvasDerivation(store, submittingNodeId) : null;
     const isStillCurrentSubmission = () => {
       const state = useAppStore.getState();
       return (
         state.currentProjectId === submittingProjectId
         && state.nodes.some((n) => n.id === submittingNodeId)
-        && (!runningHubTask || (!!cloudGuard && isCanvasDerivationFresh(cloudGuard, state)))
+        && (!guardedSubmission || (!!cloudGuard && isCanvasDerivationFresh(cloudGuard, state)))
       );
     };
     updateNodeDataTransient(activeNodeId!, { status: 'loading', error: undefined });
@@ -459,8 +461,9 @@ function AINodeDialog() {
         const aspectRatio = isAnimation
           ? resolveAnimationSheetAspectRatio(animationFrames, nodeProvider)
           : (latestData.aspectRatio as string) || '1:1';
+        const spriteProcessing = isAnimation ? animationProcessing({ ...latestData, animationSheet: undefined }) : undefined;
         const requestPrompt = isAnimation
-          ? buildAnimationSpritePrompt(effectivePrompt, animationAction, animationFrames, aspectRatio)
+          ? buildAnimationSpritePrompt(effectivePrompt, animationAction, animationFrames, aspectRatio, spriteProcessing)
           : effectivePrompt;
         const result = await generateImage({
           prompt: requestPrompt,
@@ -477,7 +480,7 @@ function AINodeDialog() {
         const persisted = getCloudWorkflowPersistedOutput(result.workflowApiOutputs ?? result.runninghubOutputs, result.url) ?? (currentProjectId
           ? await persistMediaUrlToProjectData(result.url, currentProjectId, 'ai-image', nodeLabel)
           : { mediaUrl: result.url, sourceUrl: result.url });
-        if (runningHubTask && !isStillCurrentSubmission()) return;
+        if (!isStillCurrentSubmission()) return;
         const mediaUrl = persisted.mediaUrl;
         updateNodeData(activeNodeId!, {
           imageUrl: mediaUrl,
@@ -488,7 +491,7 @@ function AINodeDialog() {
           status: 'success',
           imageWidth: result.width,
           imageHeight: result.height,
-          ...(isAnimation ? { aspectRatio } : {}),
+          ...(isAnimation ? { aspectRatio, ...animationResultPatch(latestData) } : {}),
         });
         if (runningHubTask) completeRunningHubNodeTask(submittingNodeId);
         if (result.workflowApiTaskId) completeWorkflowApiNodeTask(submittingNodeId, result.workflowApiTaskId);
@@ -497,7 +500,7 @@ function AINodeDialog() {
           nodeId: activeNodeId!,
           nodeLabel: nodeLabel,
           timestamp: Date.now(),
-          prompt: effectivePrompt,
+          prompt: requestPrompt,
           output: persisted.sourceUrl,
           nodeType: isAnimation ? 'ai-animation' : 'ai-image',
           model: nodeModel,
@@ -506,7 +509,7 @@ function AINodeDialog() {
           mediaUrl,
           filePath: persisted.filePath,
           params: isAnimation
-            ? { imageSize, aspectRatio, animationAction, animationFrames, grid: ANIMATION_FRAME_GRIDS[animationFrames] }
+            ? { imageSize, aspectRatio, animationAction, animationFrames, grid: ANIMATION_FRAME_GRIDS[animationFrames], animationProcessing: spriteProcessing, animationPromptVersion: 1 }
             : { imageSize, aspectRatio, cameraSettings: latestData.cameraSettings },
         });
         if (postProcess === 'character-8-direction-grid') {

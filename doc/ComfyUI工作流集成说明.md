@@ -1,7 +1,7 @@
 # ComfyUI 工作流集成说明
 
 > 本文档描述 AI Canvas 如何导入、管理和执行 ComfyUI 工作流，包括 IO 节点识别、内容与参数注入规则、结果取回和编辑回写链路。
-> 最后更新：2026-09-22。范围、验证与回滚见[可靠性修复](./plans/2026-09-08-comfyui-reliability.md)、[助手多服务器支持](./plans/2026-09-08-comfyui-assistant-servers.md)和[打开与编辑体验](./plans/2026-09-08-comfyui-editor-experience.md)。
+> 最后更新：2026-10-07。范围、验证与回滚见[可靠性修复](./plans/2026-09-08-comfyui-reliability.md)、[助手多服务器支持](./plans/2026-09-08-comfyui-assistant-servers.md)和[打开与编辑体验](./plans/2026-09-08-comfyui-editor-experience.md)。
 
 ## 1. 概览
 
@@ -68,7 +68,17 @@ ComfyUI 在 AI Canvas 里是一种 **provider**：工作流导入后会出现在
 
 ### 4.2 内置工作流播种
 
-[builtinWorkflows.ts](../src/services/builtinWorkflows.ts) 内置了 10 个 MiniMax H3 视频工作流（原有文生/图生/参考生 × 普通/Turbo、3 个 PDD，以及 12GB 极速图生视频）、2 个 AuK、3 个 Qwen3 和 2 个 Breeze TTS 2 音频工作流。每项可独立声明分类，未声明时保留视频分类。API JSON 打包在 `src/assets/comfyWorkflows/` 下，界面格式放在同级 `ui/` 里。
+[builtinWorkflows.ts](../src/services/builtinWorkflows.ts) 内置了 10 个 MiniMax H3 视频工作流（原有文生/图生/参考生 × 普通/Turbo、3 个 PDD，以及 12GB 极速图生视频）、DLSS5 图片与视频材质增强各 1 项、2 个 AuK、3 个 Qwen3 和 2 个 Breeze TTS 2 音频工作流。每项可独立声明分类，未声明时保留视频分类。API JSON 打包在 `src/assets/comfyWorkflows/` 下，界面格式放在同级 `ui/` 里。
+
+**DLSS5 材质增强**
+
+两项来自 `DLSS5_图片材质增强_工作流.json` 与 `DLSS5_视频材质增强_工作流.json`，分别注册为 `builtin-dlss5-image-enhance`（`ai-image`）和 `builtin-dlss5-video-enhance`（`ai-video`）。默认素材入口均为节点 1，无提示词入口；通过图片或视频引用提供待增强素材。图片模板的 `example.png` 清空，避免依赖示例文件。编辑图保留原布局、说明和增强参数；API 图移除说明节点、上传按钮与视频预览控件。
+
+两项均采用 `DLSS5Settings → DLSS5EnhanceImages`，保留原始 1x、Natural、强度 1、结构强度 1.5、皮肤强度 2、自动蒙版和 M 档配置。图片通过 `SaveImage` 输出；视频采用 `VHS_LoadVideo → DLSS5EnhanceImages → CreateVideo → SaveVideo`，原音轨仍从加载节点连接到合成节点。默认整段加载、24fps、10-bit 合成，画布帧率控件沿既有规则覆盖合成帧率；应选择与源视频一致的帧率，避免变速与音画不同步。目标 ComfyUI 需提供 DLSS5 自定义节点及其运行环境、VideoHelperSuite 和图中的原生视频节点，内置模板不会安装这些依赖。
+
+按固定 ID 增量播种，不覆盖已有工作流或恢复用户已删除项；可通过“重置内置工作流”手动恢复。验证入口为 `builtinWorkflows.test.ts`，覆盖增量播种、分类与默认输入、API/UI 连线、增强参数、素材注入和结果解析；真实增强效果与硬件兼容性仍需目标 ComfyUI 验收。回滚撤销本批注册、四份资源、测试和文档补丁；已播种的两条用户工作流记录可单独删除。
+
+本次接入验证：内置工作流、默认输入、媒体路由、图像/视频参数、编辑打开、工作流持久化及模型选择器共 8 个测试文件、145 项通过；应用和测试类型检查、定向 ESLint、严格 UTF-8 与 JSON 检查通过。未启动 ComfyUI 或执行真实增强，未更新已安装应用。
 
 | AuK 工作流 | 默认输入 | 输出 |
 |---|---|---|

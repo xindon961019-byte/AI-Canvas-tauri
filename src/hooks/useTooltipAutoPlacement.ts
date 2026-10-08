@@ -116,6 +116,19 @@ function updateTooltipContent(tooltip: HTMLDivElement, target: HTMLElement): boo
   const content = target.dataset.tooltip?.trim();
   if (!content) return false;
 
+  const hint = target.dataset.tooltipHint?.trim();
+  if (hint) {
+    const hintElement = document.createElement('div');
+    hintElement.className = 'app-tooltip__hint';
+    hintElement.textContent = hint;
+    const contentElement = document.createElement('div');
+    contentElement.className = 'app-tooltip__body';
+    contentElement.textContent = content.startsWith(`${hint}\n`) ? content.slice(hint.length + 1) : content;
+    tooltip.replaceChildren(hintElement, contentElement);
+    tooltip.removeAttribute('data-structured');
+    return true;
+  }
+
   const label = target.dataset.tooltipLabel?.trim();
   const action = target.dataset.tooltipAction?.trim();
   if (label && action) {
@@ -208,7 +221,7 @@ export function useTooltipAutoPlacement() {
 
       activeTargetObserver.observe(activeTarget, {
         attributes: true,
-        attributeFilter: ['data-tooltip', 'data-tooltip-label', 'data-tooltip-action', 'data-tooltip-pos', 'data-tooltip-anchor'],
+        attributeFilter: ['data-tooltip', 'data-tooltip-hint', 'data-tooltip-label', 'data-tooltip-action', 'data-tooltip-pos', 'data-tooltip-anchor'],
       });
       showTimer = window.setTimeout(showTooltip, SHOW_DELAY);
     };

@@ -1,0 +1,89 @@
+{
+  "1": {
+    "inputs": {
+      "video": "",
+      "force_rate": 0,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 0,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "format": "AnimateDiff"
+    },
+    "class_type": "VHS_LoadVideo",
+    "_meta": {
+      "title": "① 选择/上传视频"
+    }
+  },
+  "2": {
+    "inputs": {
+      "upscaling_mode": "1x (DLAA / native)",
+      "nr_preset": "Default",
+      "nr_style": "Natural",
+      "nr_intensity": 1,
+      "local_tone_strength": 1,
+      "local_structure_strength": 1.5,
+      "skin_structure_strength": 2,
+      "automatic_mask": true,
+      "dlss_model_preset": "M",
+      "motion": "auto",
+      "scene_change_threshold": 0.24,
+      "warmup_frames": 0,
+      "runtime_dir": ""
+    },
+    "class_type": "DLSS5Settings",
+    "_meta": {
+      "title": "② DLSS5 参数"
+    }
+  },
+  "3": {
+    "inputs": {
+      "verify_neural_rendering": true,
+      "images": [
+        "1",
+        0
+      ],
+      "settings": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "DLSS5EnhanceImages",
+    "_meta": {
+      "title": "③ DLSS5 神经渲染（逐帧）"
+    }
+  },
+  "4": {
+    "inputs": {
+      "fps": 24,
+      "bit_depth": 10,
+      "images": [
+        "3",
+        0
+      ],
+      "audio": [
+        "1",
+        2
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "④ 合成视频（含原音轨）"
+    }
+  },
+  "6": {
+    "inputs": {
+      "filename_prefix": "DLSS5_NR_video",
+      "format": "auto",
+      "codec": "auto",
+      "video": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "⑤ 保存成片"
+    }
+  }
+}

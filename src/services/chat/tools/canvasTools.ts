@@ -35,6 +35,7 @@ import {
   type AgentToolExecutionResult,
 } from '../toolRegistry';
 import { listConfiguredModels } from './appTools';
+import { normalizeAiAppReference } from '../../aiApps/aiAppSchema';
 
 const NODE_TYPES: NodeType[] = [
   'ai-text',
@@ -511,6 +512,14 @@ function truncateText(value: string | undefined, limit = DETAIL_TEXT_LIMIT): {
  */
 function describeNode(node: Node<BaseNodeData>): Record<string, unknown> {
   const data = node.data;
+  let aiApp: Record<string, unknown> | undefined;
+  if (node.type === 'ai-app') {
+    try {
+      const app = normalizeAiAppReference(data.aiApp);
+      aiApp = { title: app.title, revision: app.revision,
+        actions: app.actions.map((action) => ({ id: action.id, title: action.title })), inputNodeIds: app.inputNodeIds };
+    } catch { aiApp = { unavailable: true }; }
+  }
   // 缩略图仅作为没有主产物时的图片预览，不能盖过视频、音频或正文。
   const outputKind = data.videoUrl
     ? 'video'
@@ -561,6 +570,7 @@ function describeNode(node: Node<BaseNodeData>): Record<string, unknown> {
     prompt: truncateText(data.prompt),
     outputKind,
     outputText: outputKind === 'text' ? truncateText(data.output) : undefined,
+    ...(aiApp ? { aiApp } : {}),
   };
 }
 

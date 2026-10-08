@@ -172,8 +172,9 @@ export async function generateApimartImagesBatch(
   // 能力表驱动：命中 APIMart 生图能力表时，按模型约束分辨率 / 批量数量 / 参考图，
   // 并复用能力表换算出的结果回填尺寸；未命中则回退通用提交逻辑（兼容旧模型）。
   const requestedBatchCount = Math.max(1, Math.floor(count));
-  const capability = getImageCapability(model);
-  const capabilityRequest = buildImageCapabilityRequest(model, prompt, {
+  const capabilityModel = model.startsWith('apimart/') ? model : `apimart/${model}`;
+  const capability = getImageCapability(capabilityModel);
+  const capabilityRequest = buildImageCapabilityRequest(capabilityModel, prompt, {
     resolution: imageSize,
     ratio: aspectRatio,
     count: requestedBatchCount,
@@ -232,6 +233,8 @@ export async function generateApimartImagesBatch(
           headers: {
             'Authorization': `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
+            ...capability?.requestHeaders,
+            ...(capability?.supportsIdempotency ? { 'Idempotency-Key': crypto.randomUUID() } : {}),
           },
           body: JSON.stringify(submitBodies[index]),
           signal,

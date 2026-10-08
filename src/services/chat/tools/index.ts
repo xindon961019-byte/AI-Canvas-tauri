@@ -2,6 +2,7 @@
  * 汇总并幂等注册全部 Agent 工具域，同时提供测试环境下的完整注销入口。
  */
 import { registerCanvasAgentTools } from './canvasTools';
+import { registerAiAppAgentTools } from './aiAppTools';
 import { registerMediaAgentTools } from './mediaTools';
 import { registerFileAgentTools } from './fileTools';
 import { registerSkillAgentTools } from './skillTools';
@@ -48,6 +49,7 @@ function getRegistrationState(): AgentToolsRegistrationState {
 function getRegistrationFactories(): AgentToolRegistrationFactory[] {
   return [
     registerCanvasAgentTools,
+    registerAiAppAgentTools,
     registerMediaAgentTools,
     registerComfyAgentTools,
     registerProjectAgentTools,

@@ -1,4 +1,4 @@
-import { findImageHistoryByReferences, getNodeHistoryEntries, type HistoryRecord } from './indexedDbService';
+import { findImageHistoryByReferences, getNodeHistoryEntries, getProjectById, imageHistoryReferenceKey, type HistoryRecord } from './indexedDbService';
 import { getFileCategory, type AssetFileEntry } from './fileService';
 import type { AssetImageLoadedDetails, AssetImageReferenceView } from '../types/assetImage';
 import { findSavedAssetImage, identifyAssetImage, resolveAssetImageReferences } from './fs/assetImageMetadata';
@@ -7,6 +7,9 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { parseDramaMentionId, type DramaAssetLibrary } from '../types/dramaAssets';
 import { resolveDramaActionMediaRef } from './dramaAssetPrompt';
 import { bestNodeThumb } from '../components/nodes/shared/mentionEditorDom';
+import { ANIMATION_ACTION_LABELS, ANIMATION_FRAME_GRIDS, type AnimationAction } from '../types';
+import { buildAnimationSpritePrompt, resolveAnimationSheetAspectRatio, type AnimationFrameCount } from './ai/animationPrompt';
+import type { AnimationProcessing } from '../types/animation';
 
 const IS_TAURI = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -20,9 +23,78 @@ function safeLocalAssetUrl(filePath?: string): string | undefined {
   }
 }
 
-/** 仅在打开预览后读取，精确匹配图片身份；查询不产生任何持久化写入。 */
-export function loadAssetImageHistory(file: AssetFileEntry, projectId?: string, signal?: AbortSignal): Promise<HistoryRecord | null> {
-  return findImageHistoryByReferences([file.path, ...(file.assetUrl ? [file.assetUrl] : [])], projectId, signal);
+/** 旧记录没有保存拼接文本时按已有参数重建，只读展示并注明来源。 */
+function completeAnimationPrompt(history: HistoryRecord): HistoryRecord {
+  if (history.nodeType !== 'ai-animation' || history.params?.animationPromptVersion === 1) return history;
+  const params = history.params ?? {};
+  const frames = params.animationFrames;
+  const action = params.animationAction;
+  if (typeof frames !== 'number' || !Object.hasOwn(ANIMATION_FRAME_GRIDS, frames)
+    || typeof action !== 'string' || !Object.hasOwn(ANIMATION_ACTION_LABELS, action)) return history;
+  const processing = params.animationProcessing as Partial<AnimationProcessing> | undefined;
+  const spriteProcessing = processing && ['auto', 'magenta', 'green', 'none'].includes(processing.chromaKey ?? '')
+    && typeof processing.ground === 'boolean' && typeof processing.margin === 'number' && Number.isFinite(processing.margin)
+    ? processing as Pick<AnimationProcessing, 'chromaKey' | 'ground' | 'margin'> : undefined;
+  const aspectRatio = typeof params.aspectRatio === 'string' && params.aspectRatio
+    ? params.aspectRatio : resolveAnimationSheetAspectRatio(frames as AnimationFrameCount, history.provider);
+  return {
+    ...history,
+    prompt: buildAnimationSpritePrompt(history.prompt, action as AnimationAction, frames as AnimationFrameCount, aspectRatio, spriteProcessing),
+    params: { ...params, assetPromptSource: params.assetPromptSource === 'canvas-node' ? 'animation-node' : 'animation-reconstructed' },
+  };
+}
+
+/** 精确匹配图片与所属项目；历史缺失时只读找回生成节点，不按文件名猜测。 */
+export async function loadAssetImageHistory(file: AssetFileEntry, projectId?: string, signal?: AbortSignal): Promise<HistoryRecord | null> {
+  const references = [file.path, ...(file.assetUrl ? [file.assetUrl] : [])];
+  const history = await findImageHistoryByReferences(references, projectId, signal);
+  if (history) return completeAnimationPrompt(history);
+  if (!projectId) return null;
+  const checkAbort = () => { if (signal?.aborted) throw new DOMException('Preview closed', 'AbortError'); };
+  checkAbort();
+  const { useAppStore } = await import('../store/useAppStore');
+  checkAbort();
+  const state = useAppStore.getState();
+  // 当前项目用实时节点；未打开的项目只读持久化画布，不切换项目或写回。
+  const projectNodes = state.currentProjectId === projectId ? state.nodes : (await getProjectById(projectId))?.nodes;
+  const nodes: unknown[] = Array.isArray(projectNodes) ? projectNodes : [];
+  checkAbort();
+  const keys = new Set(references.map(imageHistoryReferenceKey).filter(Boolean));
+  const matches = nodes.filter((node): node is { id: string; data: Record<string, unknown> } => {
+    if (!node || typeof node !== 'object' || !('id' in node) || typeof node.id !== 'string'
+      || !('data' in node) || !node.data || typeof node.data !== 'object') return false;
+    const data = node.data as Record<string, unknown>;
+    if ((data.type !== 'ai-image' && data.type !== 'ai-animation') || data.role === 'source' || data.status !== 'success') return false;
+    // filePath 是磁盘图片的权威引用；不以缩略图、输入参考图或同名文件关联。
+    const reference = typeof data.filePath === 'string' && data.filePath ? data.filePath : data.imageUrl;
+    const key = typeof reference === 'string' ? imageHistoryReferenceKey(reference) : undefined;
+    return !!key && keys.has(key);
+  });
+  if (matches.length !== 1) return null;
+  const { id, data } = matches[0];
+  const originalReferences = [data.sourceUrl, data.output].filter((value): value is string => typeof value === 'string' && !!value);
+  // 节点改名后仍保留原输出地址，可以用它找回原始提示词与参数。
+  const original = originalReferences.length ? await findImageHistoryByReferences(originalReferences, projectId, signal) : null;
+  checkAbort();
+  if (original?.nodeId === id) return completeAnimationPrompt(original);
+  if (typeof data.prompt !== 'string' || !data.prompt.trim()) return null;
+  const sheet = data.animationSheet as { frameCount?: number; action?: string } | undefined;
+  // 这只是节点现有内容的只读投影，不伪造生成时间，也不冒充原始生成记录。
+  return completeAnimationPrompt({
+    id: `canvas-node:${projectId}:${id}`, projectId, nodeId: id,
+    nodeLabel: typeof data.label === 'string' ? data.label : file.name,
+    timestamp: 0, prompt: data.prompt, output: typeof data.output === 'string' ? data.output : '',
+    nodeType: data.type as string, model: '', provider: typeof data.provider === 'string' ? data.provider : '', status: 'success',
+    filePath: file.path, mediaUrl: file.assetUrl, params: {
+      assetPromptSource: 'canvas-node',
+      ...(data.type === 'ai-animation' ? {
+        animationFrames: sheet?.frameCount ?? data.animationFrames ?? 8,
+        animationAction: sheet?.action ?? data.animationAction ?? 'idle',
+        animationProcessing: data.animationProcessing,
+        aspectRatio: data.aspectRatio,
+      } : {}),
+    },
+  });
 }
 
 export async function loadAssetImageDetails(file: AssetFileEntry, projectId?: string, signal?: AbortSignal): Promise<AssetImageLoadedDetails & { history: HistoryRecord | null }> {
@@ -46,6 +118,9 @@ const IMAGE_PARAMETERS: ReadonlyArray<readonly [string, string]> = [
 /** 只展示已保存的参数白名单，不显示凭据、路径或任意嵌套对象。 */
 export function describeAssetImageHistory(history: HistoryRecord): Array<{ label: string; value: string }> {
   const details: Array<{ label: string; value: string }> = [];
+  if (history.params?.assetPromptSource === 'canvas-node') details.push({ label: '提示词来源', value: '画布节点当前内容' });
+  if (history.params?.assetPromptSource === 'animation-node') details.push({ label: '提示词来源', value: '画布节点当前内容 + 动画规则重建' });
+  if (history.params?.assetPromptSource === 'animation-reconstructed') details.push({ label: '提示词来源', value: '原提示词 + 现有动画规则重建（旧记录未保留完整文本）' });
   if (history.model) details.push({ label: '模型', value: history.model });
   if (history.provider) details.push({ label: '供应商', value: history.provider });
   for (const [key, label] of IMAGE_PARAMETERS) {

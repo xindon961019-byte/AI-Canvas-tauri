@@ -39,7 +39,7 @@ export function renderMarkdown(md: string): string {
   // 下面的占位符用 \x00 作分隔符，第 3 步的转义靠「按 \x00 切分，只转义偶数段」实现。
   // 输入里混进一个 \x00 就会翻转奇偶性，让后面的原始 HTML 整段绕过转义（XSS）。
   // NUL 在 Markdown 里没有任何呈现意义，直接丢掉即可。
-  const source = md.split('\x00').join('');
+  const source = md.split('\x00').join('').replace(/\r\n/g, '\n');
 
   // ── 1. 提取代码块，用占位符保护 ──
   const codeBlocks: string[] = [];
@@ -102,9 +102,36 @@ export function renderMarkdown(md: string): string {
   const lines = processed.split('\n');
   const result: string[] = [];
   let inList: 'ul' | 'ol' | null = null;
+  const tableCells = (row: string) => row.trim().replace(/^\|/, '').replace(/\|$/, '')
+    .replace(/\\\|/g, '&#124;').split('|').map((cell) => cell.trim());
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+
+    // 代码块保持块级结构，不放进段落中。
+    const codeBlock = line.trim();
+    if (codeBlock.startsWith('\x00CODEBLOCK') && codeBlock.endsWith('\x00') && /^\d+$/.test(codeBlock.slice(10, -1))) {
+      if (inList) { result.push(`</${inList}>`); inList = null; }
+      result.push(line);
+      continue;
+    }
+
+    if (line.includes('|') && i + 1 < lines.length) {
+      const headers = tableCells(line);
+      const separators = tableCells(lines[i + 1]);
+      if (headers.length === separators.length && separators.every((cell) => /^:?-{3,}:?$/.test(cell))) {
+        if (inList) { result.push(`</${inList}>`); inList = null; }
+        const classes = separators.map((cell) => cell.endsWith(':') ? cell.startsWith(':') ? 'md-align-center' : 'md-align-right' : 'md-align-left');
+        result.push(`<table><thead><tr>${headers.map((cell, col) => `<th class="${classes[col]}">${cell}</th>`).join('')}</tr></thead><tbody>`);
+        i++;
+        while (i + 1 < lines.length && lines[i + 1].includes('|') && lines[i + 1].trim()) {
+          const cells = tableCells(lines[++i]);
+          result.push(`<tr>${headers.map((_, col) => `<td class="${classes[col]}">${cells[col] ?? ''}</td>`).join('')}</tr>`);
+        }
+        result.push('</tbody></table>');
+        continue;
+      }
+    }
 
     // ── 9. 标题 #-###### ──
     const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
@@ -130,7 +157,8 @@ export function renderMarkdown(md: string): string {
         result.push('<ul>');
         inList = 'ul';
       }
-      result.push(`<li>${ulMatch[2]}</li>`);
+      const task = ulMatch[2].match(/^\[([ xX])\]\s+(.*)$/);
+      result.push(task ? `<li class="md-task"><input type="checkbox" disabled${task[1] !== ' ' ? ' checked' : ''} aria-label="任务状态" /> ${task[2]}</li>` : `<li>${ulMatch[2]}</li>`);
       continue;
     }
 
@@ -150,7 +178,7 @@ export function renderMarkdown(md: string): string {
     if (inList) { result.push(`</${inList}>`); inList = null; }
 
     // ── 13. 引用 > text ──
-    const bqMatch = line.match(/^>\s?(.*)$/);
+    const bqMatch = line.match(/^&gt;\s?(.*)$/);
     if (bqMatch) {
       result.push(`<blockquote>${bqMatch[1] || '&nbsp;'}</blockquote>`);
       continue;

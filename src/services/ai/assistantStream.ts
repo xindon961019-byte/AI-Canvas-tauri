@@ -19,7 +19,7 @@ import {
   isVisionCapableTextModel,
 } from '../../components/nodes/shared/defaultModels';
 import { DEFAULT_BASE_URLS } from '../../constants/api';
-import { extractModelName } from './helpers';
+import { extractModelName, resolveGeneralModelConnection } from './helpers';
 import { corsSafeFetch } from './httpTransport';
 import { buildAssistantToolGuidance, buildMediaPrompt } from '../chat/agentPromptGuidance';
 import {
@@ -73,9 +73,9 @@ function resolveAssistantModelById(assistantModelId: string): ResolvedModelConfi
   );
 
   if (gm) {
-    const provider = config.providers[gm.providerConfigId];
-    const baseUrl = provider?.baseUrl?.trim() || '';
-    if (!provider || !baseUrl || !gm.modelId) return null;
+    const connection = resolveGeneralModelConnection(assistantModelId);
+    if (!connection?.baseUrl || !gm.modelId) return null;
+    const { provider, baseUrl } = connection;
 
     const nativeTextProtocol = resolveNativeTextChatProtocol(gm.executionProfile);
     let protocol: ModelExecutionProtocol;

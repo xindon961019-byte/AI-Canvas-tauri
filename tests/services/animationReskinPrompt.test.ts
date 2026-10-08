@@ -26,4 +26,17 @@ describe('buildAnimationReskinPrompt', () => {
     expect(full).toContain('4 列 × 2 行');
     expect(full).toContain('【骨骼连续性】');
   });
+
+  it('锁定参考身份、非对称饰物、中心轴与默认脚底线', () => {
+    const prompt = buildAnimationSpritePrompt('角色图', 'walk', 8, '2:1');
+    expect(prompt).toContain('身份与美术风格的唯一来源');
+    expect(prompt).toContain('不得镜像或随姿势换边');
+    expect(prompt).toContain('x=50%'); expect(prompt).toContain('y=90%');
+    expect(prompt).toContain('品红色 #FF00FF');
+  });
+  it('跳跃保留纵向轨迹，背景与安全线匹配处理选项', () => {
+    const prompt = buildAnimationSpritePrompt('角色图', 'jump', 8, '2:1', { chromaKey: 'green', ground: false, margin: 0.08 });
+    expect(prompt).toContain('不把腾空帧重新贴到地面');
+    expect(prompt).toContain('y=92%'); expect(prompt).toContain('绿色 #00FF00');
+  });
 });

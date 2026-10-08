@@ -12,6 +12,7 @@ import NumberStepper from '../shared/NumberStepper';
 import Tabs from '../shared/Tabs';
 import PopupCloseButton from '../shared/PopupCloseButton';
 import VideoPlayer from '../shared/VideoPlayer';
+import MarkdownEditor from '../shared/MarkdownEditor';
 import FileUploadButton from '../shared/FileUploadButton';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import StyleGuideMascot from './StyleGuideMascot';
@@ -1302,6 +1303,15 @@ function VideoPlayerSection() {
   </Section>;
 }
 
+function MarkdownEditorSection() {
+  const [value, setValue] = useState('# Markdown 编辑器\n\n资源文件与节点大屏共用真实组件。支持 **粗体**、*斜体* 和 [链接](https://example.com)。\n\n- [x] 编辑与预览\n- [ ] 查找替换\n\n| 功能 | 状态 |\n| --- | --- |\n| 分栏预览 | 可用 |\n\n```ts\nconst message = "Hello";\n```');
+  return <Section id="sg-markdown-editor" title="Markdown 编辑器" desc="受控组件；保存策略由宿主提供。支持格式工具、分栏预览、查找替换、撤销重做与字数统计。">
+    <Demo code={'<MarkdownEditor value={value} onChange={setValue} initialMode="split" /> · ui-markdown-editor'}>
+      <div className="h-[480px] min-w-0"><MarkdownEditor value={value} onChange={setValue} status="交互样例 · 不写入磁盘" /></div>
+    </Demo>
+  </Section>;
+}
+
 export function StyleGuideContent({ theme }: { theme: 'dark' | 'light' }) {
   return (
     <>
@@ -1327,6 +1337,7 @@ export function StyleGuideContent({ theme }: { theme: 'dark' | 'light' }) {
       <BadgesSection />
       <FeedbackSection />
       <VideoPlayerSection />
+      <MarkdownEditorSection />
       <Section id="sg-mascot" title="吉祥物" desc="预览真实吉祥物的状态、表情与身体动作，支持循环演示和不同尺寸查看。">
         <StyleGuideMascot theme={theme} />
       </Section>

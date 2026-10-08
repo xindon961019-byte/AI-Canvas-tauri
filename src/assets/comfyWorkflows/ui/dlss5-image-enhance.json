@@ -1,0 +1,382 @@
+{
+  "id": "dlss5-nr-minimal-9024ceb6",
+  "revision": 0,
+  "last_node_id": 5,
+  "last_link_id": 3,
+  "nodes": [
+    {
+      "id": 5,
+      "type": "MarkdownNote",
+      "pos": [
+        -640,
+        220
+      ],
+      "size": [
+        560,
+        1010
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "使用说明",
+      "properties": {
+        "Node name for S&R": "MarkdownNote"
+      },
+      "widgets_values": [
+        "# DLSS5 神经渲染 · 极简材质增强（图片版）\n\n**用途**：对已有图片做 NVIDIA DLSS 5 神经渲染（NGX feature 18）材质重绘——皮肤毛孔、毛发、布料结构、接触阴影。**等分辨率进出，不是放大节点**；放大请接 RTXVSR / 4x-UltraSharp。\n\n## 用法\n1. `LoadImage` 选图（单张；多张按播放顺序同批喂入=序列帧，motion=auto 会自动开时序）\n2. `DLSS5 Settings` 按下方配方选档\n3. Queue 出图 → `SaveImage`\n\n> 为什么是 4 个节点：`DLSS5 Settings` 是增强节点的**必接输入**（类型 DLSS5_SETTINGS），缺它无法运行。\n\n## 三档现成配方\n| 场景 | nr_style | intensity | structure | skin | preset |\n|---|---|---|---|---|---|\n| 人物/猫特写（皮肤毛发优先） | Natural | 1.0 | 1.5~1.7 | 2.0 | M |\n| 整图自然增强 | Natural | 1.0 | 1.2~1.5 | 1.5 | L |\n| 出蜡感/浮雕感的退烧组合 | Natural | 0.7~0.8 | 1.0 | 1.0~1.5 | L 或 K |\n\n## 逐参数说明\n- **upscaling_mode**：`1x (DLAA / native)`=只增强不改分辨率；1.5x/2x/3x=顺便放大（AI 素材更建议走 RTXVSR 放大）。\n- **nr_preset**（Default/#1~#3）：官方实测各档输出几乎一致，不用动。\n- **nr_style**：Natural 最贴原图（推荐）；Cinematic 更浓，易让 AI 素材过塑。\n- **nr_intensity**（0~2）：**>1.0 无额外效果**；<1.0 向原图回退混合。痕迹感重→0.7~0.85。\n- **local_tone_strength**：局部影调。保持 1.0；整体明暗被改→0.7。\n- **local_structure_strength**：**全部材质的主旋钮**。细节糊→1.7；浮雕感/纹理被编造→1.0~1.2。猫毛等高频纹理对它最敏感。\n- **skin_structure_strength + automatic_mask**：皮肤毛孔专项，**mask 关掉则 skin 完全无效**。人脸/猫脸→2.0；塑料感/怪斑→1.5；风景物件→1.0。\n- **dlss_model_preset**：**L/M 皮肤毛发最强，Default/J/K 柔和**。人物用 M；过度加工退 L。\n\n## 调参顺序（一次只动一个）\n1. 按配方选档，先跑一张看效果\n2. 看皮肤：只动 skin_structure（1.5↔2.0）和 preset（M↔L）\n3. 看整体：只动 local_structure（±0.3 一档）\n4. 还嫌重：最后动 nr_intensity → 0.8\n\n## 注意\n- 神经渲染只在 8-bit SDR 上运行，HDR 图高光会裁切。\n- 相同输入命中缓存，重复提交不重算。\n"
+      ]
+    },
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [
+        0,
+        240
+      ],
+      "size": [
+        340,
+        314
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            1
+          ]
+        },
+        {
+          "localized_name": "MASK",
+          "name": "MASK",
+          "type": "MASK",
+          "slot_index": 1,
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "",
+        "image"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "DLSS5Settings",
+      "pos": [
+        0,
+        640
+      ],
+      "size": [
+        360,
+        624
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "upscaling_mode",
+          "name": "upscaling_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "upscaling_mode"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "nr_preset",
+          "name": "nr_preset",
+          "type": "COMBO",
+          "widget": {
+            "name": "nr_preset"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "nr_style",
+          "name": "nr_style",
+          "type": "COMBO",
+          "widget": {
+            "name": "nr_style"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "nr_intensity",
+          "name": "nr_intensity",
+          "type": "FLOAT",
+          "widget": {
+            "name": "nr_intensity"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "local_tone_strength",
+          "name": "local_tone_strength",
+          "type": "FLOAT",
+          "widget": {
+            "name": "local_tone_strength"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "local_structure_strength",
+          "name": "local_structure_strength",
+          "type": "FLOAT",
+          "widget": {
+            "name": "local_structure_strength"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "skin_structure_strength",
+          "name": "skin_structure_strength",
+          "type": "FLOAT",
+          "widget": {
+            "name": "skin_structure_strength"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "automatic_mask",
+          "name": "automatic_mask",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "automatic_mask"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "dlss_model_preset",
+          "name": "dlss_model_preset",
+          "type": "COMBO",
+          "widget": {
+            "name": "dlss_model_preset"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "motion",
+          "name": "motion",
+          "type": "COMBO",
+          "widget": {
+            "name": "motion"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "scene_change_threshold",
+          "name": "scene_change_threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "scene_change_threshold"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "warmup_frames",
+          "name": "warmup_frames",
+          "type": "INT",
+          "widget": {
+            "name": "warmup_frames"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "runtime_dir",
+          "name": "runtime_dir",
+          "type": "STRING",
+          "widget": {
+            "name": "runtime_dir"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "settings",
+          "name": "settings",
+          "type": "DLSS5_SETTINGS",
+          "slot_index": 0,
+          "links": [
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "DLSS5Settings"
+      },
+      "widgets_values": [
+        "1x (DLAA / native)",
+        "Default",
+        "Natural",
+        1,
+        1,
+        1.5,
+        2,
+        true,
+        "M",
+        "auto",
+        0.24,
+        0,
+        ""
+      ]
+    },
+    {
+      "id": 3,
+      "type": "DLSS5EnhanceImages",
+      "pos": [
+        420,
+        300
+      ],
+      "size": [
+        400,
+        186
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "images",
+          "name": "images",
+          "type": "IMAGE",
+          "link": 1
+        },
+        {
+          "localized_name": "settings",
+          "name": "settings",
+          "type": "DLSS5_SETTINGS",
+          "link": 2
+        },
+        {
+          "localized_name": "verify_neural_rendering",
+          "name": "verify_neural_rendering",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "verify_neural_rendering"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "images",
+          "name": "images",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "DLSS5EnhanceImages"
+      },
+      "widgets_values": [
+        true
+      ]
+    },
+    {
+      "id": 4,
+      "type": "SaveImage",
+      "pos": [
+        880,
+        300
+      ],
+      "size": [
+        440,
+        480
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "images",
+          "name": "images",
+          "type": "IMAGE",
+          "link": 3
+        },
+        {
+          "localized_name": "filename_prefix",
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveImage"
+      },
+      "widgets_values": [
+        "DLSS5_NR"
+      ]
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      3,
+      0,
+      "IMAGE"
+    ],
+    [
+      2,
+      2,
+      0,
+      3,
+      1,
+      "DLSS5_SETTINGS"
+    ],
+    [
+      3,
+      3,
+      0,
+      4,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "DLSS5 神经渲染 · 极简材质增强",
+      "bounding": [
+        -660,
+        160,
+        2000,
+        1140
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.8,
+      "offset": [
+        700,
+        140
+      ]
+    }
+  },
+  "version": 0.4
+}

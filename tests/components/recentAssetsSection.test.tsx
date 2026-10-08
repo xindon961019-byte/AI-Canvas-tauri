@@ -105,15 +105,20 @@ describe('启动页最近使用资源区', () => {
     expect(all(tree, (element) => !!element.props['data-recent-asset'])).toHaveLength(1);
     expect(driver.load).toHaveBeenCalledOnce();
   });
-  it('视频使用全屏参数面板，只记录展开事件；文本入口定位所属项目', async () => {
+  it('视频使用全屏参数面板，只记录展开事件；文本直接打开所属项目的文档预览', async () => {
     driver.load.mockResolvedValue([entry('video', 'video'), entry('text', 'text')]); render(); await settle();
     const thumbnail = find((element) => element.type === 'asset-thumb' && element.props.category === 'video');
     expect(thumbnail.props.videoPresentation).toBe('fullscreen'); expect(thumbnail.props.videoProjectId).toBe('project');
     (thumbnail.props.onVideoExpandedChange as (open: boolean) => void)(true); render();
     (thumbnail.props.onVideoExpandedChange as (open: boolean) => void)(false); render();
     expect(driver.mark).toHaveBeenCalledOnce();
-    (find((element) => element.props['aria-label'] === '在资源库查看 text.png').props.onClick as () => void)();
-    expect(driver.open).toHaveBeenLastCalledWith(true, 'page', { tab: 'project', projectId: 'project' });
+    (find((element) => element.type === 'asset-thumb' && element.props.category === 'text').props.onTextPreview as () => void)(); render();
+    const preview = find((element) => (element.props.file as RecentAssetEntry['file'] | undefined)?.category === 'text');
+    expect(preview.props).toMatchObject({ file: entry('text', 'text').file, projectId: 'project' });
+    expect(driver.mark).toHaveBeenLastCalledWith(entry('text', 'text').file);
+    (preview.props.onClose as () => void)(); render();
+    expect(all(tree, (element) => !!element.props.file)).toHaveLength(0);
+    expect(driver.open).not.toHaveBeenCalled();
   });
   it('目录范围改变时取消旧读取，过期结果不能恢复已撤销关联的资源', async () => {
     let finish!: (entries: RecentAssetEntry[]) => void;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createPresetNode } from '../../src/components/nodes/shared/toolbar/presetAction';
+import { createPresetNode, resolvePresetAction, resolvePresetDef } from '../../src/components/nodes/shared/toolbar/presetAction';
 import type { BaseNodeData } from '../../src/types';
 
 const source = (data: Partial<BaseNodeData>) => ({
@@ -15,6 +15,29 @@ const source = (data: Partial<BaseNodeData>) => ({
 });
 
 const resolved = { label: '摄影机视角', icon: 'mdi:camera-control', filledPrompt: '低角度镜头', shouldTrigger: true };
+
+it('双面部特写预设沿用原快捷指令 ID，并将横版源图切换为 4:5 竖幅', () => {
+  const action = resolvePresetAction('char-three-view-face', 'ai-image', '参考人物穿棕色外套', []);
+  expect(action).not.toBeNull();
+  expect(resolvePresetDef('char-three-view-face', 'ai-image', [])?.label).toBe('人物三视图＋双面部特写');
+  expect(action!.shouldTrigger).toBe(true);
+  expect(action!.filledPrompt).toContain('上二下三的两排布局');
+  expect(action!.filledPrompt).toContain('正面面部特写、侧面面部特写');
+  expect(action!.filledPrompt).toContain('正面身体图、90度侧面身体图、背面身体图');
+  expect(action!.filledPrompt).toContain('下排三张只展示肩部到脚底');
+  expect(action!.filledPrompt).toContain('整个头部置于各自画框之外');
+  expect(action!.filledPrompt).not.toContain('头顶到脚底完整入画');
+  expect(action!.filledPrompt).toContain('参考人物穿棕色外套');
+  const { node, edge } = createPresetNode(source({
+    model: 'gpt-image-2', provider: 'apimart', aspectRatio: '16:9', imageSize: '2K',
+  }), action!);
+  expect(node.data).toMatchObject({
+    label: '人物三视图＋双面部特写', aspectRatio: '4:5', nodeWidth: 224, nodeHeight: 280,
+    model: 'gpt-image-2', provider: 'apimart', imageSize: '2K',
+  });
+  expect(edge.source).toBe('node-src');
+  expect(edge.target).toBe(node.id);
+});
 
 describe('createPresetNode 派生 ComfyUI 工作流节点', () => {
   it('provider=comfyui 时继承 workflowId，但不继承 workflowInputs', () => {

@@ -38,7 +38,7 @@ const NODE_ITEMS: MergedNodeItem[] = [
   { label: '生成视频', type: 'ai-video', role: 'generator', shortcut: '3' },
   { label: '生成音频', type: 'ai-audio', role: 'generator', shortcut: '4' },
   { label: '生成360全景', type: 'ai-panorama', role: 'generator', shortcut: '5' },
-  { label: '生成动画', type: 'ai-animation', role: 'generator', shortcut: '6' },
+  { label: '帧动画', type: 'ai-animation', role: 'generator', shortcut: '6' },
   { label: '3D 导演台', type: 'ai-director', role: 'source', shortcut: '7' },
   // ── 源节点 ──
   { label: '文本', type: 'ai-text', role: 'source', shortcut: '1' },

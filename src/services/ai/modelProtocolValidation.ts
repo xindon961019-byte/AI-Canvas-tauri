@@ -388,12 +388,33 @@ function validateResultConfig(
   label: string,
   requirePath: boolean,
   errors: string[],
+  asyncTaskIdPath?: unknown,
 ): void {
   if (!isRecord(value)) {
     errors.push(`${label}配置无效`);
     return;
   }
-  if (requirePath && value.urlPath === undefined && value.textPath === undefined && value.base64Path === undefined) {
+  if (value.download !== undefined) {
+    if (asyncTaskIdPath === undefined) {
+      errors.push('结果下载请求仅支持异步轮询协议');
+    }
+    if (['urlPath', 'textPath', 'base64Path', 'base64Transform', 'fetchUrl']
+      .some((key) => value[key] !== undefined)) {
+      errors.push('结果下载请求不能同时配置 URL、文本、Base64 或 fetchUrl 结果映射');
+    }
+    if (validateRequest(value.download, '结果下载请求', true, errors) && isRecord(value.download)) {
+      if (value.download.method !== 'GET') errors.push('结果下载请求只支持 GET');
+      const allowedKeys = new Set(['method', 'path', 'pathMode', 'headers', 'query']);
+      if (Object.keys(value.download).some((key) => !allowedKeys.has(key))) {
+        errors.push('结果下载请求只允许 method、path、pathMode、headers 和 query');
+      }
+      if (!pollRequestUsesTaskId(value.download, asyncTaskIdPath)) {
+        errors.push('结果下载请求必须引用本次提交响应中的任务 ID');
+      }
+    }
+  }
+  if (requirePath && value.download === undefined
+    && value.urlPath === undefined && value.textPath === undefined && value.base64Path === undefined) {
     errors.push(`${label}必须配置 URL、文本或 Base64 结果路径`);
   }
   if (value.urlPath !== undefined) validatePathExpression(value.urlPath, `${label} URL 路径`, errors);
@@ -511,7 +532,7 @@ export function validateModelExecutionProtocol(value: unknown): string[] {
       }
       const pollResponse = protocol.poll.response;
       validatePathExpression(pollResponse.statusPath, '轮询状态路径', errors);
-      validateResultConfig(pollResponse.result, '轮询协议', true, errors);
+      validateResultConfig(pollResponse.result, '轮询协议', true, errors, response.taskIdPath);
       if (!Array.isArray(pollResponse.successValues) || pollResponse.successValues.length === 0) {
         errors.push('轮询成功状态不能为空');
       }

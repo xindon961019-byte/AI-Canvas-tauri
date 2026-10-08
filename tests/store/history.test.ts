@@ -175,6 +175,18 @@ describe('shotlist column width history', () => {
   });
 });
 
+it('动画帧编排与导入原图一起撤销和重做', async () => {
+  const original = node('animation', { type: 'ai-animation', imageUrl: 'asset://old.png', filePath: 'project/old.png', animationSheet: { cols: 4, rows: 2, frameCount: 8, action: 'idle' } });
+  useAppStore.setState({ nodes: [original] });
+  const state = useAppStore.getState();
+  state.updateNodeData('animation', { imageUrl: 'asset://new.png', filePath: 'project/new.png', animationSheet: { cols: 3, rows: 2, frameCount: 6, action: 'walk' }, animationEdits: [{ sourceIndex: 2, enabled: true, offsetX: 3, offsetY: 4 }], animationLoop: false });
+  expect(await useAppStore.getState().undo()).toBe(true);
+  expect(useAppStore.getState().nodes[0].data).toMatchObject({ imageUrl: 'asset://old.png', filePath: 'project/old.png', animationSheet: { frameCount: 8 } });
+  expect(useAppStore.getState().nodes[0].data.animationEdits).toBeUndefined();
+  expect(await useAppStore.getState().redo()).toBe(true);
+  expect(useAppStore.getState().nodes[0].data).toMatchObject({ imageUrl: 'asset://new.png', animationSheet: { frameCount: 6 }, animationLoop: false, animationEdits: [{ sourceIndex: 2, offsetX: 3 }] });
+});
+
 describe('automatic connection mentions', () => {
   const targetPrompt = () => useAppStore.getState().nodes.find((item) => item.id === 'target')?.data.prompt;
   const connect = () => useAppStore.getState().onConnect({

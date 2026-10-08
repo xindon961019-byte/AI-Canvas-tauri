@@ -57,6 +57,27 @@ beforeEach(() => {
 });
 
 describe('provider secret persistence', () => {
+  it('persists and restores independent CCC group credentials without copying keys into configuration', async () => {
+    const raw = config({
+      'cccapi-free': { name: 'CCC', catalogId: 'cccapi', cccGroup: 'CCC生图白嫖', apiKey: 'free-fixture' },
+      'cccapi-stable': { name: 'CCC', catalogId: 'cccapi', cccGroup: 'CCC生图稳定', apiKey: 'stable-fixture' },
+    });
+    const { config: stripped } = await stripConfigSecrets(raw);
+    expect(hasPlaintextSecret(stripped)).toBe(false);
+    expect(JSON.stringify(stripped)).not.toContain('free-fixture');
+    expect(JSON.stringify(stripped)).not.toContain('stable-fixture');
+    const restored = await restoreConfigSecrets(stripped);
+    expect(restored.config).toMatchObject({ providers: {
+      'cccapi-free': { apiKey: 'free-fixture', cccGroup: 'CCC生图白嫖' },
+      'cccapi-stable': { apiKey: 'stable-fixture', cccGroup: 'CCC生图稳定' },
+    } });
+    tauriMocks.keychain.delete('provider/cccapi-stable');
+    const missing = await restoreConfigSecrets(stripped);
+    expect(missing.missing).toEqual(['cccapi-stable']);
+    expect(missing.config).toMatchObject({ providers: {
+      'cccapi-free': { apiKey: 'free-fixture' }, 'cccapi-stable': { apiKey: '' },
+    } });
+  });
   it('passes the observed native value as a compare condition and does not retry conflicts', async () => {
     tauriMocks.keychain.set('provider/apimart', 'original-fixture');
     await stripConfigSecrets(config({ apimart: { apiKey: 'next-fixture' } }));

@@ -26,6 +26,7 @@ export interface WhisperTranscriptionRequest {
 }
 
 export interface FlowMusicGenerationRequest {
+  version?: 'lyria-3.5';
   soundPrompt?: string;
   lyrics?: string;
   title?: string;
@@ -50,6 +51,7 @@ export interface FlowMusicLyrics {
 
 export interface FlowMusicTaskState {
   status?: string;
+  error?: string | { message?: string };
   progress?: number;
   result?: {
     music?: FlowMusicTrack[];
@@ -214,6 +216,7 @@ export function submitFlowMusicGeneration(
     body.length = Math.min(240, Math.max(1, Math.round(request.length)));
   }
   if (request.seed?.trim()) body.seed = request.seed.trim();
+  if (request.version) body.version = request.version;
 
   return submitFlowMusicTask(
     apiKey,
@@ -223,6 +226,28 @@ export function submitFlowMusicGeneration(
     'APIMart 音乐任务提交失败',
     signal,
   );
+}
+
+/** Suno 与 Flow Music 共用提交和查询路径；版本及歌词字段必须分别映射。 */
+export function submitSunoGeneration(
+  apiKey: string,
+  baseUrl: string,
+  request: { version: 'v6' | 'v6-wild' | 'v6-mini'; prompt: string; lyrics?: string; title?: string; duration?: number },
+  signal?: AbortSignal,
+): Promise<string> {
+  const lyrics = request.lyrics?.trim();
+  const custom = Boolean(lyrics);
+  const prompt = custom ? lyrics! : request.prompt.trim();
+  if (!prompt) throw new Error('Suno 提示词或歌词不能为空');
+  if (Array.from(prompt).length > (custom ? 5000 : 3000)) throw new Error('Suno 提示词或歌词超过长度限制');
+  if (custom && Array.from(request.prompt).length > 1000) throw new Error('Suno 风格不能超过 1000 个字符');
+  if (custom && Array.from(request.title ?? '').length > 80) throw new Error('Suno 标题不能超过 80 个字符');
+  if (custom && request.duration !== undefined
+    && (!Number.isInteger(request.duration) || request.duration < 10 || request.duration > 360)) throw new Error('Suno 时长必须是 10–360 秒的整数');
+  return submitFlowMusicTask(apiKey, baseUrl, '/music/generations', {
+    model: 'suno', version: request.version, custom, prompt,
+    ...(custom ? { style: request.prompt.trim(), title: request.title?.trim(), duration: request.duration } : {}),
+  }, 'APIMart Suno 音乐任务提交失败', signal);
 }
 
 export async function fetchFlowMusicTask(

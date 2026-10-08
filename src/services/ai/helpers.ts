@@ -3,6 +3,7 @@
  */
 import { useAppStore } from '../../store/useAppStore';
 import type { ApiProviderConfig, GeneralModelConfig } from '../../types';
+import { getProviderDefinition } from './providerCatalogService';
 
 /** 去掉 model value 中的 provider/ 前缀，得到实际的模型名 */
 export function extractModelName(modelValue: string, provider: string): string {
@@ -85,7 +86,7 @@ export interface ResolvedGeneralModelConnection {
   baseUrl: string;
 }
 
-/** 通过模型引用解析当前连接，密钥和地址始终以 config.providers 为准。 */
+/** 通过模型引用解析当前连接；地址缺省时沿用内置厂商定义，密钥只取该连接。 */
 export function resolveGeneralModelConnection(
   modelValue: string,
 ): ResolvedGeneralModelConnection | undefined {
@@ -100,7 +101,7 @@ export function resolveGeneralModelConnection(
     providerConfigId: model.providerConfigId,
     provider,
     apiKey: provider.apiKey || '',
-    baseUrl: provider.baseUrl?.trim() || '',
+    baseUrl: provider.baseUrl?.trim() || getProviderDefinition(model.providerConfigId, provider)?.defaultBaseUrl || '',
   };
 }
 

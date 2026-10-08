@@ -4,7 +4,7 @@
  */
 import { useState, useEffect, type ReactNode } from 'react';
 import type { FileCategory } from '../../services/fileService';
-import { readTextFilePreview, getCachedTextPreview } from '../../services/fileService';
+import { readTextFilePreview, getCachedTextPreview, ASSET_TEXT_UPDATED_EVENT } from '../../services/fileService';
 import { CATEGORY_ICONS, formatSize } from '../../utils/assetFormat';
 import ViewportImage from './ViewportImage';
 import ResourceVideoPreview from './ResourceVideoPreview';
@@ -24,6 +24,7 @@ interface AssetThumbProps {
   /** 悬停操作按钮区 */
   children?: ReactNode;
   onImagePreview?: () => void;
+  onTextPreview?: () => void;
   /** 宿主提供完整悬浮提示时，避免同时出现浏览器原生标题。 */
   showNativeTooltip?: boolean;
   /** 外部直接注入文本预览（用于测试或已具备文本的场景） */
@@ -31,6 +32,7 @@ interface AssetThumbProps {
 }
 
 interface AssetTextPreviewProps {
+  onTextPreview?: () => void;
   filePath?: string;
   name: string;
   size: number;
@@ -48,7 +50,16 @@ export function AssetTextPreview({
   children,
   textPreview: propTextPreview,
   showNativeTooltip = true,
+  onTextPreview,
 }: AssetTextPreviewProps) {
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    const refresh = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === filePath) setRevision((value) => value + 1);
+    };
+    window.addEventListener(ASSET_TEXT_UPDATED_EVENT, refresh);
+    return () => window.removeEventListener(ASSET_TEXT_UPDATED_EVENT, refresh);
+  }, [filePath]);
   const [content, setContent] = useState<string | null>(() => {
     if (propTextPreview !== undefined) return propTextPreview;
     if (filePath) return getCachedTextPreview(filePath, size) ?? null;
@@ -66,8 +77,10 @@ export function AssetTextPreview({
     return () => {
       active = false;
     };
-  }, [filePath, size, propTextPreview]);
+  }, [filePath, size, propTextPreview, revision]);
 
+  const trigger = onTextPreview && <button type="button" className="asset-image-preview-trigger" aria-label={`查看文档 ${name}`}
+    title={showNativeTooltip ? '查看和编辑文档' : undefined} onClick={(event) => { event.stopPropagation(); onTextPreview(); }} />;
   const effectiveText = propTextPreview !== undefined ? propTextPreview : content;
 
   if (effectiveText && effectiveText.trim().length > 0) {
@@ -75,6 +88,7 @@ export function AssetTextPreview({
       <div className="assets-card-text-wrap" title={showNativeTooltip ? name : undefined}>
         <div className="assets-card-text-content">{effectiveText}</div>
         <div className="assets-card-text-fade" />
+        {trigger}
         <span className="assets-card-size">{formatSize(size)}</span>
         {badge && <span className="assets-card-badge">{badge}</span>}
         {children}
@@ -85,6 +99,7 @@ export function AssetTextPreview({
   return (
     <div className="assets-card-icon-wrap" title={showNativeTooltip ? name : undefined}>
       <span className="assets-card-icon">{CATEGORY_ICONS.text}</span>
+      {trigger}
       <span className="assets-card-size">{formatSize(size)}</span>
       {badge && <span className="assets-card-badge">{badge}</span>}
       {children}
@@ -105,6 +120,7 @@ export default function AssetThumb({
   badge,
   children,
   onImagePreview,
+  onTextPreview,
   showNativeTooltip = true,
   textPreview,
 }: AssetThumbProps) {
@@ -129,6 +145,7 @@ export default function AssetThumb({
         size={size}
         badge={badge}
         textPreview={textPreview}
+        onTextPreview={onTextPreview}
         showNativeTooltip={showNativeTooltip}
       >
         {children}

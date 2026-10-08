@@ -11,16 +11,16 @@
  * 否则这批改动会被当成「已保存」，直到下一次编辑才有机会再写盘。
  */
 import { useEffect, useRef } from 'react';
-import { useAppStore } from '../store/useAppStore';
+import { useAppStore, type AppState } from '../store/useAppStore';
 import { PROJECT_DISK_CHANGED_EVENT } from '../services/fileService';
 
-/** 计算结构指纹：节点 ID + 边 ID + 分组 ID/成员 */
-function structureFingerprint(
-  nodeIds: string[],
-  edgeIds: string[],
-  groupHash: string,
-): string {
-  return `${nodeIds.join(',')}|${edgeIds.join(',')}|${groupHash}`;
+/** 位置和选中不影响指纹；父分组和分组名称会改变文件归档位置。 */
+function structureFingerprint(state: Pick<AppState, 'nodes' | 'edges' | 'groups'>): string {
+  return JSON.stringify([
+    state.nodes.map((node) => JSON.stringify([node.id, node.parentId])).sort(),
+    state.edges.map((edge) => edge.id).sort(),
+    state.groups.map((group) => JSON.stringify([group.id, group.name, [...group.nodeIds].sort()])).sort(),
+  ]);
 }
 
 type NodeDataReference = { id: string; data: object };
@@ -60,8 +60,12 @@ export function useAutoSave() {
   });
 
   useEffect(() => {
+    let active = true;
     function saveAndRetryOnFailure() {
-      void useAppStore.getState().saveCurrentProjectSilent().then((savedId) => {
+      const state = useAppStore.getState();
+      const projectId = state.currentProjectId;
+      void state.saveCurrentProjectSilent().then((savedId) => {
+        if (!active || useAppStore.getState().currentProjectId !== projectId) return;
         if (savedId !== undefined) return;
         const failure = useAppStore.getState().autoSaveFailure;
         if (!failure) return; // 没有当前项目/没有可保存记录，不是失败
@@ -80,35 +84,20 @@ export function useAutoSave() {
     // 拖拽期间每帧只做一次极廉价的引用比较（见下方 subscribe 回调），
     // 不再每帧 map/sort/join 分配数组（消除 GC 抖动）。
     function checkAndSave() {
+      timerRef.current = null;
       const state = useAppStore.getState();
       if (!state.currentProjectId) return;
 
-      // 分组成员或分组名变化后，把节点文件搬进对应文件夹；有搬动会再触发一轮保存
-      void state.syncGroupFiles();
-
       if (state.currentProjectId !== projectIdRef.current) {
         projectIdRef.current = state.currentProjectId;
-        fingerprintRef.current = structureFingerprint(
-          state.nodes.map((node) => node.id).sort(),
-          state.edges.map((edge) => edge.id).sort(),
-          state.groups
-            .map((group) => `${group.id}:${[...group.nodeIds].sort().join('+')}`)
-            .sort()
-            .join(','),
-        );
+        fingerprintRef.current = structureFingerprint(state);
         dataRefsRef.current = captureNodeDataReferences(state.nodes);
         forceSaveRef.current = false;
+        void state.syncGroupFiles();
         return;
       }
 
-      const nodeIds = state.nodes.map((n) => n.id).sort();
-      const edgeIds = state.edges.map((e) => e.id).sort();
-      const groupHash = state.groups
-        .map((g) => `${g.id}:${[...g.nodeIds].sort().join('+')}`)
-        .sort()
-        .join(',');
-
-      const structFp = structureFingerprint(nodeIds, edgeIds, groupHash);
+      const structFp = structureFingerprint(state);
       const structChanged = structFp !== fingerprintRef.current;
       const dataChanged = hasNodeDataReferenceChanges(state.nodes, dataRefsRef.current);
 
@@ -117,6 +106,7 @@ export function useAutoSave() {
         forceSaveRef.current = false;
         fingerprintRef.current = structFp;
         dataRefsRef.current = captureNodeDataReferences(state.nodes);
+        void state.syncGroupFiles();
         saveAndRetryOnFailure();
         return;
       }
@@ -126,21 +116,16 @@ export function useAutoSave() {
 
       fingerprintRef.current = structFp;
       dataRefsRef.current = captureNodeDataReferences(state.nodes);
+      void state.syncGroupFiles();
       saveAndRetryOnFailure();
     }
 
     // 挂载时立即建立当前项目基线，避免第一次用户操作被误认为初始化加载。
     const initialState = useAppStore.getState();
     projectIdRef.current = initialState.currentProjectId;
-    fingerprintRef.current = structureFingerprint(
-      initialState.nodes.map((node) => node.id).sort(),
-      initialState.edges.map((edge) => edge.id).sort(),
-      initialState.groups
-        .map((group) => `${group.id}:${[...group.nodeIds].sort().join('+')}`)
-        .sort()
-        .join(','),
-    );
+    fingerprintRef.current = structureFingerprint(initialState);
     dataRefsRef.current = captureNodeDataReferences(initialState.nodes);
+    prevRefs.current = { nodes: initialState.nodes, edges: initialState.edges, groups: initialState.groups };
 
     // 磁盘增删改事件：标记强制保存并重置防抖计时器
     const onDiskChanged = () => {
@@ -152,21 +137,22 @@ export function useAutoSave() {
     window.addEventListener(PROJECT_DISK_CHANGED_EVENT, onDiskChanged);
 
     const unsub = useAppStore.subscribe((state) => {
-      if (!state.currentProjectId) return;
+      if (!state.currentProjectId) {
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = null;
+        projectIdRef.current = null;
+        forceSaveRef.current = false;
+        return;
+      }
 
       if (state.currentProjectId !== projectIdRef.current) {
         if (timerRef.current) clearTimeout(timerRef.current);
         projectIdRef.current = state.currentProjectId;
-        const nodeIds = state.nodes.map((node) => node.id).sort();
-        const edgeIds = state.edges.map((edge) => edge.id).sort();
-        const groupHash = state.groups
-          .map((group) => `${group.id}:${[...group.nodeIds].sort().join('+')}`)
-          .sort()
-          .join(',');
-        fingerprintRef.current = structureFingerprint(nodeIds, edgeIds, groupHash);
+        fingerprintRef.current = structureFingerprint(state);
         dataRefsRef.current = captureNodeDataReferences(state.nodes);
         prevRefs.current = { nodes: state.nodes, edges: state.edges, groups: state.groups };
         forceSaveRef.current = false;
+        void state.syncGroupFiles();
         return;
       }
 
@@ -185,8 +171,11 @@ export function useAutoSave() {
       if (timerRef.current) clearTimeout(timerRef.current);
       timerRef.current = setTimeout(checkAndSave, 2000);
     });
+    // 初次打开也恢复未完成迁移；之后先确认有持久化改动，再走归档检查。
+    if (initialState.currentProjectId) void initialState.syncGroupFiles();
 
     return () => {
+      active = false;
       if (timerRef.current) clearTimeout(timerRef.current);
       window.removeEventListener(PROJECT_DISK_CHANGED_EVENT, onDiskChanged);
       unsub();

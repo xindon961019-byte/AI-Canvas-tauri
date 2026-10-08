@@ -22,6 +22,7 @@ import {
   getApimartAudioCapability,
   submitFlowMusicGeneration,
   submitFlowMusicLyrics,
+  submitSunoGeneration,
   type FlowMusicGenerationRequest,
   type FlowMusicTaskState,
 } from '../apimartAudio';
@@ -78,8 +79,9 @@ function buildFlowMusicRequest(
   generated?: { title: string; lyrics: string },
 ): FlowMusicGenerationRequest {
   return {
+    version: params.model.endsWith('flowmusic-lyria-3.5') ? 'lyria-3.5' : undefined,
     soundPrompt: prompt,
-    lyrics: generated?.lyrics || params.musicLyrics,
+    lyrics: generated?.lyrics || (params.autoGenerateLyrics ? undefined : params.musicLyrics),
     title: generated?.title || params.musicTitle,
     bpm: params.musicBpm,
     length: params.musicDuration ?? 60,
@@ -97,7 +99,7 @@ function waitForFlowMusicTask(
     isComplete: (task) => task.status === 'completed' ? task : null,
     isFailed: (task) =>
       task.status === 'failed' || task.status === 'error' || task.status === 'cancelled'
-        ? `APIMart 音乐任务失败: ${task.status}`
+        ? `APIMart 音乐任务失败: ${typeof task.error === 'string' ? task.error : task.error?.message || task.status}`
         : null,
     interval: 3000,
     signal,
@@ -111,7 +113,10 @@ async function generateFlowMusic(
   prompt: string,
   externalSignal?: AbortSignal,
 ): Promise<AudioGenerationResult> {
-  const shouldGenerateLyrics = params.autoGenerateLyrics === true;
+  const model = extractModelName(params.model, params.provider);
+  const isSuno = /^suno(?:-v6(?:-wild|-mini)?)?$/.test(model);
+  // 新音乐模型直接使用自身的风格/歌词生成，保持只有一个可恢复的音乐任务阶段。
+  const shouldGenerateLyrics = params.autoGenerateLyrics === true && model === 'flowmusic';
   const initialStage = shouldGenerateLyrics ? 'lyrics' : 'music';
   const projectId = useAppStore.getState().currentProjectId;
   const nodeSignal = params.nodeId ? registerNodePolling(params.nodeId) : undefined;
@@ -163,12 +168,13 @@ async function generateFlowMusic(
       }
     }
 
-    const musicTaskId = await submitFlowMusicGeneration(
-      apiKey,
-      baseUrl,
-      buildFlowMusicRequest(params, prompt, generatedLyrics),
-      signal,
-    );
+    const musicTaskId = isSuno
+      ? await submitSunoGeneration(apiKey, baseUrl, {
+        version: model === 'suno' ? 'v6' : model.slice('suno-'.length) as 'v6' | 'v6-wild' | 'v6-mini',
+        prompt, lyrics: params.autoGenerateLyrics ? undefined : params.musicLyrics,
+        title: params.musicTitle, duration: params.musicDuration,
+      }, signal)
+      : await submitFlowMusicGeneration(apiKey, baseUrl, buildFlowMusicRequest(params, prompt, generatedLyrics), signal);
     if (params.nodeId) {
       updatePendingTask(params.nodeId, {
         taskId: musicTaskId,
@@ -322,10 +328,14 @@ export const apimartMediaProviderAdapter: MediaProviderAdapter = {
       signal,
     );
     if (signal?.aborted) throw new DOMException('请求已取消', 'AbortError');
-    if (capability?.omniVariant) {
+    if (capability?.omniVariant || capability?.requestVariant) {
+      const constraints = structuredClone(capability.inputConstraints);
+      if (capability.requestVariant === 'wan3' && constraints?.referenceVideo && params.seedanceDuration !== -1) {
+        constraints.referenceVideo.totalDurationSeconds = { max: Math.min(15, Math.max(0, 30 - (params.seedanceDuration ?? 5))) };
+      }
       await assertVideoInputConstraints(
         { ...referenceInput, videoUrls, audioUrls },
-        { inputConstraints: capability.inputConstraints },
+        { inputConstraints: constraints },
         capability.modelId,
         { signal },
       );

@@ -58,6 +58,17 @@ beforeEach(() => {
 });
 
 describe('canvas agent tools', () => {
+  it('keeps canvas queries usable when an imported AI application is malformed', async () => {
+    useAppStore.setState({ nodes: [
+      ...useAppStore.getState().nodes,
+      node('broken-app', { type: 'ai-app', aiApp: {} as BaseNodeData['aiApp'] }),
+    ] });
+    const result = await getAgentTool('canvas_query')!.execute(context(), { detail: true });
+    expect(result.status).toBe('success');
+    expect(JSON.parse(result.modelContent).nodes.find((item: { id: string }) => item.id === 'broken-app'))
+      .toMatchObject({ aiApp: { unavailable: true } });
+  });
+
   it('connects the shotlist and per-shot briefs into downstream directors', async () => {
     registerShotlistAgentTools();
     useAppStore.setState({ projectLoadStatus: 'ready' });

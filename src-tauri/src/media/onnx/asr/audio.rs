@@ -161,6 +161,61 @@ pub fn resample(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
     let output_len = ((input.len() as f64 - 1.0) / ratio).floor() as usize + 1;
     let mut output = Vec::with_capacity(output_len);
 
+    let (mut divisor, mut remainder) = (source_rate, target_rate);
+    while remainder != 0 {
+        (divisor, remainder) = (remainder, divisor % remainder);
+    }
+    let phase_count = (target_rate / divisor) as usize;
+    // 常见采样率的相位会重复；只缓存这次调用的权重，权重最多约 516 KiB。
+    // 相位过多时仍走下面的原算法，避免不常见采样率撑大内存。
+    if source_rate != 0 && phase_count != 0 && phase_count <= 512 && output_len > phase_count {
+        let kernels: Vec<Vec<f64>> = (0..phase_count)
+            .map(|phase| {
+                let fraction = phase as f64 / phase_count as f64;
+                (0..=half_width * 2)
+                    .map(|tap| {
+                        let distance = tap as f64 - half_width as f64 - fraction;
+                        let normalized = distance / half_width as f64;
+                        if normalized.abs() > 1.0 {
+                            0.0
+                        } else {
+                            2.0 * cutoff
+                                * sinc(2.0 * cutoff * distance)
+                                * blackman((normalized + 1.0) * 0.5)
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let whole_step = (source_rate / target_rate) as usize;
+        let phase_step = ((source_rate % target_rate) / divisor) as usize;
+        let (mut source_index, mut phase) = (0usize, 0usize);
+        for _ in 0..output_len {
+            let from = (source_index + usize::from(phase != 0)).saturating_sub(half_width);
+            let to = source_index.saturating_add(half_width + 1).min(input.len());
+            let first_tap = half_width - (source_index - from);
+            let mut weighted = 0f64;
+            let mut total_weight = 0f64;
+            for (sample, weight) in input[from..to].iter().zip(&kernels[phase][first_tap..]) {
+                weighted += weight * f64::from(*sample);
+                total_weight += weight;
+            }
+            // 首尾只有部分采样可用，仍按实际参与计算的权重归一化。
+            output.push(if total_weight.abs() > 1e-12 {
+                (weighted / total_weight) as f32
+            } else {
+                0.0
+            });
+            source_index += whole_step;
+            phase += phase_step;
+            if phase >= phase_count {
+                phase -= phase_count;
+                source_index += 1;
+            }
+        }
+        return output;
+    }
+
     for index in 0..output_len {
         let center = index as f64 * ratio;
         let from = (center - half_width as f64).ceil().max(0.0) as usize;
@@ -175,8 +230,8 @@ pub fn resample(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
             if normalized.abs() > 1.0 {
                 continue;
             }
-            let weight = 2.0 * cutoff * sinc(2.0 * cutoff * distance)
-                * blackman((normalized + 1.0) * 0.5);
+            let weight =
+                2.0 * cutoff * sinc(2.0 * cutoff * distance) * blackman((normalized + 1.0) * 0.5);
             weighted += weight * f64::from(input[position]);
             total_weight += weight;
         }
@@ -210,6 +265,44 @@ fn blackman(position: f64) -> f64 {
 mod tests {
     use super::*;
 
+    // 保留优化前的逐采样算法作对照，覆盖相位复用和边缘截断的数值行为。
+    fn reference_resample(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
+        if source_rate == target_rate || input.is_empty() {
+            return input.to_vec();
+        }
+        let ratio = source_rate as f64 / target_rate as f64;
+        let cutoff = (0.5 / ratio).min(0.5);
+        let half_width = ((16.0 * ratio.max(1.0)).round() as usize).clamp(8, 64);
+        let output_len = ((input.len() as f64 - 1.0) / ratio).floor() as usize + 1;
+        (0..output_len)
+            .map(|index| {
+                let center = index as f64 * ratio;
+                let from = (center - half_width as f64).ceil().max(0.0) as usize;
+                let to = ((center + half_width as f64).floor() as usize + 1).min(input.len());
+                let mut weighted = 0f64;
+                let mut total_weight = 0f64;
+                for position in from..to {
+                    let distance = position as f64 - center;
+                    let normalized = distance / half_width as f64;
+                    if normalized.abs() > 1.0 {
+                        continue;
+                    }
+                    let weight = 2.0
+                        * cutoff
+                        * sinc(2.0 * cutoff * distance)
+                        * blackman((normalized + 1.0) * 0.5);
+                    weighted += weight * f64::from(input[position]);
+                    total_weight += weight;
+                }
+                if total_weight.abs() > 1e-12 {
+                    (weighted / total_weight) as f32
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+
     fn sine(sample_rate: u32, frequency: f32, seconds: f32) -> Vec<f32> {
         let len = (sample_rate as f32 * seconds) as usize;
         (0..len)
@@ -222,6 +315,77 @@ mod tests {
         let input = sine(16_000, 440.0, 0.1);
         let output = resample(&input, 16_000, 16_000);
         assert_eq!(output, input);
+    }
+
+    #[test]
+    fn phase_kernels_match_reference_for_common_rates_and_short_edges() {
+        let rates = [
+            (8_000, 16_000),
+            (16_000, 8_000),
+            (22_050, 16_000),
+            (24_000, 16_000),
+            (32_000, 16_000),
+            (44_100, 16_000),
+            (48_000, 16_000),
+            (96_000, 16_000),
+            (16_000, 44_100),
+            (44_100, 48_000),
+            (51_100, 51_200),
+            (51_300, 51_200),
+        ];
+        let mut seed = 42u32;
+        let noise: Vec<f32> = (0..4_097)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 8) as f32 / 8_388_608.0 - 1.0
+            })
+            .collect();
+        for (source, target) in rates {
+            for len in [0, 1, 2, 17, 129, 512, 513, noise.len()] {
+                let actual = resample(&noise[..len], source, target);
+                let expected = reference_resample(&noise[..len], source, target);
+                assert_eq!(actual.len(), expected.len(), "{source} → {target}, {len}");
+                for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                    assert!(
+                        (actual - expected).abs() <= 2e-6,
+                        "{source} → {target}, {len}, sample {index}: {actual} vs {expected}"
+                    );
+                }
+                let dc = resample(&vec![0.5; len], source, target);
+                assert!(dc.iter().all(|value| (value - 0.5).abs() < 1e-6));
+            }
+        }
+    }
+
+    #[test]
+    fn large_phase_counts_keep_the_reference_fallback() {
+        let input = sine(48_001, 1_000.0, 0.02);
+        assert_eq!(
+            resample(&input, 48_001, 16_000),
+            reference_resample(&input, 48_001, 16_000)
+        );
+    }
+
+    #[test]
+    fn downsampling_rejects_above_nyquist_tones() {
+        let rms = |values: &[f32]| {
+            let middle = &values[64..values.len() - 64];
+            (middle
+                .iter()
+                .map(|value| f64::from(*value).powi(2))
+                .sum::<f64>()
+                / middle.len() as f64)
+                .sqrt()
+        };
+        for source in [44_100, 48_000] {
+            let passband = resample(&sine(source, 1_000.0, 0.2), source, 16_000);
+            let stopband = resample(&sine(source, 12_000.0, 0.2), source, 16_000);
+            assert!(rms(&passband) > 0.65);
+            assert!(
+                rms(&stopband) / rms(&passband) < 0.01,
+                "{source} Hz 的高频混叠未被充分抑制"
+            );
+        }
     }
 
     #[test]
@@ -240,8 +404,7 @@ mod tests {
         let skip = 32;
         let mut worst = 0f32;
         for index in skip..(output.len() - skip) {
-            let ideal =
-                (2.0 * std::f32::consts::PI * 1_000.0 * index as f32 / 16_000.0).sin();
+            let ideal = (2.0 * std::f32::consts::PI * 1_000.0 * index as f32 / 16_000.0).sin();
             worst = worst.max((output[index] - ideal).abs());
         }
         assert!(worst < 0.02, "重采样后波形偏差过大: {worst}");

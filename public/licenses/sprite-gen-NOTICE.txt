@@ -1,0 +1,59 @@
+sprite-gen
+Copyright 2026 Alex Kim
+
+AI-Canvas adapts prompt constraints, chroma-key edge unmixing, projection
+gutter selection, and alpha/foot anchors from sprite-gen into Rust.
+The implementation uses a shared animation scale and preserves source images.
+Reference revision: ece1ac8b4827d5d8075592471aef5152c371cda9.
+The original upstream notices follow; optional upstream algorithms listed here
+are not all implemented by AI-Canvas.
+
+This project is inspired by the Apache-2.0 licensed hatch-pet component-row
+workflow. sprite-gen targets generic game sprite atlases and does not include
+Codex pet assets, pet packages, or hatch-pet visual assets.
+
+The `align_x: "alpha-centroid"` frame alignment (sprite_gen/extract.py) is a
+port of the alpha-weighted mass-centroid alignment from perfectpixel-studio
+(https://github.com/gykim80/perfectpixel-studio, internal/sprite/extract.go),
+Copyright Andrew Kim (gykim80), MIT License.
+
+The `segmentation: "projection"` frame separation (sprite_gen/segment.py) is a
+port of the projection-profile + DP optimal-cut segmentation from
+perfectpixel-studio (https://github.com/gykim80/perfectpixel-studio,
+internal/sprite/segment.go), Copyright Andrew Kim (gykim80), MIT License.
+
+The opt-in `chroma.mode: "ycbcr"` background matting (sprite_gen/extract.py) is
+a port of the chrominance-plane matting — CbCr border-mode key detection,
+Hermite soft matte, key-direction despill, border flood fill and the pure-key
+rematte self-diagnostic — from perfectpixel-studio
+(https://github.com/gykim80/perfectpixel-studio, internal/sprite/chroma.go),
+Copyright Andrew Kim (gykim80), MIT License.
+
+The estimation-only `estimate_pixel_grid_runlen` pitch estimator
+(sprite_gen/extract.py) is a port of the unfake same-color run-length mode
+block-size estimation from perfectpixel-studio
+(https://github.com/gykim80/perfectpixel-studio, internal/sprite/pixelize.go),
+Copyright Andrew Kim (gykim80), MIT License.
+
+PerfectPixel permission notice:
+MIT License
+
+Copyright (c) 2026 PerfectPixel contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

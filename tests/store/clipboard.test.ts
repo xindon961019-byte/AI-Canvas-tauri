@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Edge, Node } from '@xyflow/react';
-import type { BaseNodeData } from '../../src/types';
+import { createCanvasNoteData, type BaseNodeData, type NodeType } from '../../src/types';
 
 const fileMocks = vi.hoisted(() => ({
   copyFileToProjectData: vi.fn(),
@@ -226,35 +226,94 @@ describe('modifier-drag duplication', () => {
       .toEqual({ x: 320, y: 200 });
   });
 
-  it('keeps the latest drop position when independent media copying finishes after pointer release', async () => {
-    let finish!: (value: unknown) => void;
-    fileMocks.copyFileToProjectData.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  it('creates an empty media node at the latest drop position without copying files', async () => {
+    fileMocks.copyFileToProjectData.mockRejectedValue(new Error('copy failed'));
     const source = mediaNode('source', 'a');
-    useAppStore.setState({ currentProjectId: 'a', nodes: [source], showToast: vi.fn() });
+    source.data = { ...source.data,
+      prompt: '把 @{reference:参考图} 改成森林风格', model: 'image-model', provider: 'image-provider',
+      imageSize: '2K', aspectRatio: '9:16', batchCount: 2,
+      workflowId: 'workflow', workflowInputs: { '1/prompt': '森林' },
+      runninghubModelParameters: { strength: '0.8' },
+      cameraSettings: { lens: '50mm' },
+      mattingMask: 'data:mask', annotation: 'data:annotation',
+      imageWidth: 1440, imageHeight: 2560, sourceUrl: 'https://example.test/result.png',
+      fileName: 'original.png', output: 'https://example.test/result.png',
+      artifactId: 'artifact', mediaVersion: 3, batchGroupId: 'old-batch',
+      runninghubOutputs: [{ kind: 'image', url: 'asset:///workflow.png', filePath: '/data/a/workflow.png' }],
+      workflowApiOutputs: [{ kind: 'image', url: 'asset:///workflow-api.png' }],
+      runninghubStage: '已完成', workflowApiStage: '已完成',
+      dramaAssetId: 'old-character',
+      characterLibraryLinks: [{ scope: 'global', characterId: 'character', referenceImageId: 'reference' }],
+    };
+    const originalData = structuredClone(source.data);
+    const showToast = vi.fn();
+    useAppStore.setState({ currentProjectId: 'a', nodes: [source], showToast });
     const drag = createNodeDuplicateDrag(useAppStore.getState, source.id);
-    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    useAppStore.getState().onNodesChange(drag.mapChanges([
+      { type: 'position', id: source.id, position: { x: 200, y: 300 }, dragging: true },
+    ]));
     useAppStore.getState().onNodesChange(drag.mapChanges([
       { type: 'position', id: source.id, position: { x: 400, y: 500 }, dragging: false },
     ]));
-    const stopped = drag.finish();
-    expect(useAppStore.getState().nodes).toMatchObject([source]);
-    finish({ filePath: '/data/a/copy.png', assetUrl: 'asset:///data/a/copy.png' });
-    const clone = await stopped;
+    const clone = await drag.finish();
     expect(clone).toMatchObject({ position: { x: 400, y: 500 }, dragging: false,
-      data: { filePath: '/data/a/copy.png' } });
+      data: { status: 'idle', prompt: originalData.prompt, model: 'image-model', provider: 'image-provider',
+        imageSize: '2K', aspectRatio: '9:16', batchCount: 2,
+        workflowId: 'workflow', workflowInputs: { '1/prompt': '森林' },
+        runninghubModelParameters: { strength: '0.8' }, cameraSettings: { lens: '50mm' } } });
+    for (const field of ['output', 'filePath', 'fileName', 'imageUrl', 'thumbnailUrl', 'sourceUrl',
+      'assetId', 'relativePath', 'artifactId', 'mediaVersion', 'batchGroupId',
+      'imageWidth', 'imageHeight', 'mattingMask', 'annotation', 'dramaAssetId', 'characterLibraryLinks',
+      'runninghubOutputs', 'runninghubStage', 'workflowApiOutputs', 'workflowApiStage']) {
+      expect(clone?.data[field], field).toBeUndefined();
+    }
+    expect(clone?.data.workflowInputs).not.toBe(source.data.workflowInputs);
+    expect(fileMocks.copyFileToProjectData).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
     expect(useAppStore.getState().nodes.find((item) => item.id === source.id)).toMatchObject(source);
+    expect(source.data).toEqual(originalData);
   });
 
-  it('leaves the original untouched when media copying fails', async () => {
-    fileMocks.copyFileToProjectData.mockRejectedValueOnce(new Error('copy failed'));
-    const source = mediaNode('source', 'a');
-    useAppStore.setState({ currentProjectId: 'a', nodes: [source], showToast: vi.fn() });
+  const contentCases: { type: NodeType; content: Partial<BaseNodeData>; config?: Partial<BaseNodeData> }[] = [
+    { type: 'ai-text', content: { output: '已生成的正文' } },
+    { type: 'ai-markdown', content: { output: '# 已生成的文档', filePath: '/data/a/doc.md' } },
+    { type: 'ai-video', content: { videoUrl: 'asset:///video.mp4', videoBatchFingerprint: 'old-result',
+      shotlistProductionSource: { nodeId: 'sheet', rowId: 'shot', kind: 'video', durationSync: 'auto' } },
+      config: { seedanceDuration: 5, generateAudio: true,
+        videoReferences: [{ id: 'reference', url: 'asset:///reference.png', kind: 'frame', role: 'first_frame' }] } },
+    { type: 'ai-audio', content: { audioUrl: 'asset:///music.mp3', musicClipId: 'clip' },
+      config: { musicTitle: '森林', musicLyrics: '歌词', musicDuration: 60, audioSpeed: 1.2 } },
+    { type: 'ai-panorama', content: { imageUrl: 'asset:///panorama.png' } },
+    { type: 'ai-animation', content: { imageUrl: 'asset:///sheet.png',
+      animationSheet: { cols: 4, rows: 2, frameCount: 8, action: 'walk' },
+      animationEdits: [{ sourceIndex: 0, enabled: true, offsetX: 1, offsetY: 2 }] },
+      config: { animationAction: 'walk', animationFrames: 8, animationFps: 12,
+        animationProcessing: { chromaKey: 'auto', keyThreshold: 40, segmentation: 'grid', alignment: 'foot', ground: true, margin: 4 } } },
+    { type: 'ai-storyboard', content: { imageUrl: 'asset:///grid.png', storyboardExtracted: [true],
+      storyboardOverrides: [{ url: 'asset:///override.png', filePath: '/data/a/override.png' }] },
+      config: { storyboardCols: 3, storyboardRows: 3, storyboardColPositions: [30, 60] } },
+    { type: 'ai-shotlist', content: { shotlistRows: [{ id: 'shot', shotNo: '1', content: '已有镜头' }],
+      shotlistScriptSource: { episodeId: 'episode', nodeId: 'script' } },
+      config: { shotlistColumns: ['shotNo', 'content'], shotlistColumnRatios: { content: 2 } } },
+    { type: 'plugin-node', content: { output: '插件结果', pluginOutputs: { text: '插件结果' } },
+      config: { pluginId: 'plugin', pluginNodeId: 'node', pluginValues: { strength: 2 } } },
+    { type: 'source-image', content: { imageUrl: 'asset:///input.png' }, config: { role: 'source' } },
+    { type: 'source-video', content: { videoUrl: 'asset:///input.mp4' }, config: { role: 'source' } },
+    { type: 'source-audio', content: { audioUrl: 'asset:///input.mp3' }, config: { role: 'source' } },
+    { type: 'source-text', content: { output: '已有输入文本' }, config: { role: 'source' } },
+  ];
+  it.each(contentCases)('clears $type content and loading state while preserving configuration', async ({ type, content, config }) => {
+    const source: Node<BaseNodeData> = { ...node('source'), type,
+      data: { label: 'source', type, prompt: '复用提示词', status: 'loading', error: '旧错误', ...content, ...config } };
+    useAppStore.setState({ nodes: [source], showToast: vi.fn() });
     const drag = createNodeDuplicateDrag(useAppStore.getState, source.id);
-    useAppStore.getState().onNodesChange(drag.mapChanges([
-      { type: 'position', id: source.id, position: { x: 400, y: 500 }, dragging: true },
-    ]));
-    expect(await drag.finish()).toBeUndefined();
-    expect(useAppStore.getState().nodes).toMatchObject([source]);
+    const clone = await drag.finish();
+    expect(clone?.data).toMatchObject({ label: 'source', type, prompt: '复用提示词', status: 'idle', ...config });
+    expect(clone?.data.error).toBeUndefined();
+    for (const field of Object.keys(content)) expect(clone?.data[field], field).toBeUndefined();
+    expect(source.data.status).toBe('loading');
+    expect(source.data).toMatchObject(content);
+    expect(fileMocks.copyFileToProjectData).not.toHaveBeenCalled();
   });
 
   it('does not apply a completed drag to a different project', async () => {
@@ -298,7 +357,7 @@ describe('modifier-drag duplication', () => {
     expect(useAppStore.getState().nodes[0].data.filePath).toBe('/data/a/new.png');
   });
 
-  it('keeps incoming connections on both nodes without inheriting outgoing connections', () => {
+  it('keeps incoming connections on both nodes without inheriting outgoing connections', async () => {
     const incomingEdge: Edge = {
       id: 'edge-source-dragged',
       source: 'source',
@@ -317,7 +376,7 @@ describe('modifier-drag duplication', () => {
       ],
     });
 
-    useAppStore.getState().duplicateNode('dragged');
+    await createNodeDuplicateDrag(useAppStore.getState, 'dragged').finish();
 
     const draggedClone = useAppStore.getState().nodes.find((item) => (
       !['source', 'dragged', 'downstream'].includes(item.id)
@@ -347,7 +406,42 @@ describe('modifier-drag duplication', () => {
     expect(useAppStore.getState().edges.find((edge) => edge.id === incomingEdge.id)).toBe(incomingEdge);
   });
 
-  it('keeps director media while resetting the cloned runtime session', () => {
+  it('clears director results and scenes while preserving runtime and generation settings', async () => {
+    const source = directorNode('director-source', 'blender', 'loading');
+    source.data = { ...source.data,
+      directorScene: { schemaVersion: 1, sceneId: 'scene', revision: 1,
+        relativePath: 'director/scenes/scene.json', sha256: 'a'.repeat(64), bytes: 512 },
+      directorPrevisScene: { kind: 'project-file', relativePath: 'director/previs/previs.json', sha256: 'b'.repeat(64), bytes: 512 },
+      directorResultManifest: { schemaVersion: 1, sceneId: 'scene', sceneRevision: 1, sceneSha256: 'a'.repeat(64),
+        manifestRevision: 1, relativePath: 'director/results/manifest.json', sha256: 'c'.repeat(64), bytes: 512 },
+      directorPrevisPrompt: '树林中的双人镜头', directorPrevisModel: 'previs-model', directorPrevisProvider: 'provider',
+    };
+    useAppStore.setState({ nodes: [source], edges: [] });
+    const clone = await createNodeDuplicateDrag(useAppStore.getState, source.id).finish();
+    expect(clone?.data).toMatchObject({ directorRuntimeKind: 'blender', directorInstanceId: clone?.id,
+      directorStatus: 'idle', status: 'idle', directorPrevisPrompt: '树林中的双人镜头',
+      directorPrevisModel: 'previs-model', directorPrevisProvider: 'provider' });
+    expect(clone?.data.directorInstanceId).not.toBe(source.data.directorInstanceId);
+    expect(clone?.data.directorScene).toBeUndefined();
+    expect(clone?.data.directorPrevisScene).toBeUndefined();
+    expect(clone?.data.directorResultManifest).toBeUndefined();
+    expect(clone?.data.directorCaptureUrls).toBeUndefined();
+    expect(clone?.data.directorCaptureFilePaths).toBeUndefined();
+    expect(clone?.data.imageUrl).toBeUndefined();
+    expect(clone?.data.videoUrl).toBeUndefined();
+    expect(useAppStore.getState().directorDeskRuntimeRequest).toBeNull();
+  });
+
+  it('preserves authored canvas note content during drag duplication', async () => {
+    const source: Node<BaseNodeData> = { ...node('note'), type: 'canvas-note',
+      data: { label: '笔记', type: 'canvas-note', note: createCanvasNoteData('text', { text: '手写内容' }) } };
+    useAppStore.setState({ nodes: [source] });
+    const clone = await createNodeDuplicateDrag(useAppStore.getState, source.id).finish();
+    expect(clone?.data.note).toEqual(source.data.note);
+    expect(clone?.data.note).not.toBe(source.data.note);
+  });
+
+  it('keeps director media on ordinary duplication while resetting the cloned runtime session', () => {
     const source = directorNode('director-dragged', 'lightweight-web', 'loading');
     useAppStore.setState({ nodes: [source], edges: [] });
 

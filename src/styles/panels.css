@@ -1683,54 +1683,56 @@ button.wf-ionode-badge.is-default {
 .ui-select--custom .assets-project-select.ui-select__trigger:focus-visible { border-color: var(--border-focus); }
 
 /* 资产面板顶部工具栏保持紧凑，不影响独立资源搜索窗口的同名控件。 */
-.assets-panel .assets-toolbar {
+:is(.assets-panel, .assets-library-page) .assets-toolbar {
   gap: 6px;
   padding: 2px 8px 0;
 }
-.assets-panel .assets-project-select-wrap {
+:is(.assets-panel, .assets-library-page) .assets-project-select-wrap {
   width: clamp(140px, 14vw, 168px);
 }
-.assets-panel .ui-select--custom .assets-project-select.ui-select__trigger {
-  height: 30px;
+:is(.assets-panel, .assets-library-page) .ui-select--custom .assets-project-select.ui-select__trigger {
+  height: var(--ui-control-h-sm);
   padding: 4px 22px 4px 8px;
-  border-radius: 7px;
-  font-size: 12px;
+  border-radius: var(--ui-radius-sm);
+  font-size: var(--ui-font-sm);
 }
-.assets-panel .assets-search {
+:is(.assets-panel, .assets-library-page) .assets-search {
   width: clamp(160px, 20vw, 240px);
-  height: 30px;
+  height: var(--ui-control-h-sm);
   flex: 0 1 240px;
   gap: 6px;
-  padding: 4px 8px;
-  border-radius: 7px;
+  padding: 0 var(--ui-pad-sm);
+  border-radius: var(--ui-radius-sm);
 }
-.assets-panel .assets-search > svg {
+:is(.assets-panel, .assets-library-page) .assets-search > svg {
   width: 13px;
   height: 13px;
 }
-.assets-panel .assets-search input {
-  font-size: 12px;
+:is(.assets-panel, .assets-library-page) .assets-search input {
+  height: 100%;
+  padding: 0;
+  font-size: var(--ui-font-sm);
 }
-.assets-panel .assets-column-stepper {
+:is(.assets-panel, .assets-library-page) .assets-column-stepper {
   grid-template-columns: 16px 20px 18px 20px;
-  height: 30px;
-  padding: 3px;
-  border-radius: 7px;
+  height: var(--ui-control-h-sm);
+  padding: 1px 3px;
+  border-radius: var(--ui-radius-sm);
 }
-.assets-panel .assets-column-stepper-icon {
+:is(.assets-panel, .assets-library-page) .assets-column-stepper-icon {
   width: 12px;
   height: 12px;
   margin-left: 2px;
 }
-.assets-panel .assets-column-stepper button {
+:is(.assets-panel, .assets-library-page) .assets-column-stepper button {
   width: 20px;
   height: 20px;
 }
-.assets-panel .assets-column-stepper button svg {
+:is(.assets-panel, .assets-library-page) .assets-column-stepper button svg {
   width: 12px;
   height: 12px;
 }
-.assets-panel .assets-column-stepper output {
+:is(.assets-panel, .assets-library-page) .assets-column-stepper output {
   font-size: 11px;
 }
 
@@ -2059,6 +2061,14 @@ button.wf-ionode-badge.is-default {
   flex-wrap: wrap;
   gap: 4px;
   padding: 6px 7px;
+}
+.assets-card-tags--collapsed {
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.assets-card-tags--collapsed .assets-card-tag {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .assets-card-tag {
   display: inline-flex;

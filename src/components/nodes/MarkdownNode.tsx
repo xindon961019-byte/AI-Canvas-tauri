@@ -10,7 +10,9 @@ import FullscreenOverlay from '../shared/FullscreenOverlay';
 import { useNodeRename } from './shared/useNodeRename';
 import { useSourceFileUpload } from './shared/useSourceFileUpload';
 import { useAppStore } from '../../store/useAppStore';
-import { saveBinaryToProjectData } from '../../services/fileService';
+import { saveBinaryToProjectData, readAssetTextFile, saveAssetTextFile, type AssetTextSnapshot } from '../../services/fileService';
+import { completeCanvasDerivation, isCanvasDerivationFresh, registerCanvasDerivation } from '../../services/canvasDerivationGuard';
+import MarkdownEditor from '../shared/MarkdownEditor';
 import AnimatedButton from '../shared/AnimatedButton';
 import { renderMarkdown } from '../../utils/renderMarkdown';
 import { textNodeHeight } from '../../utils/num';
@@ -32,8 +34,7 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
 
   // ── Fullscreen ──
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [fsViewMode, setFsViewMode] = useState<'edit' | 'preview'>('preview');
-  const fullscreenTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const [saveStatus, setSaveStatus] = useState('编辑后自动保存');
   const contentEditActiveRef = useRef(false);
 
   const finishContentEdit = useCallback(() => {
@@ -43,7 +44,6 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
   }, [commitToHistory]);
 
   const handleOpenFullscreen = useCallback(() => {
-    setFsViewMode('preview');
     setIsFullscreen(true);
   }, []);
 
@@ -75,46 +75,82 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
     }
   }, [data.output, showToast, t]);
 
-  // Auto-focus textarea when fullscreen opens in edit mode
-  useEffect(() => {
-    if (isFullscreen && fsViewMode === 'edit') {
-      requestAnimationFrame(() => {
-        const ta = fullscreenTextareaRef.current;
-        if (ta) {
-          ta.focus();
-          ta.setSelectionRange(ta.value.length, ta.value.length);
-        }
-      });
-    }
-  }, [isFullscreen, fsViewMode]);
-
   // ── Upload ──
   const { isUploading, handleUpload } = useSourceFileUpload('.md');
 
   // ── 固定文件名（仅首次生成，之后始终覆写到同一文件）──
   const savedFileNameRef = useRef<string>((data.fileName as string) || `markdown-${id}.md`);
 
-  const doSave = useCallback(async (content: string) => {
-    if (!content) return;
-    const fileName = savedFileNameRef.current;
-
-    try {
-      if (!currentProjectId) return;
-      const bytes = new TextEncoder().encode(content);
-      const result = await saveBinaryToProjectData(bytes, currentProjectId, fileName);
-      if (result) {
-        const resolvedName = result.filePath.split(/[/\\]/).pop() || fileName;
-        savedFileNameRef.current = resolvedName;
-        updateNodeDataTransient(id, {
-          fileName: resolvedName,
-          filePath: result.filePath,
-          status: 'success',
-        } as Partial<BaseNodeData>);
-      }
-    } catch {
-      // ignore save errors (non-Tauri environment etc.)
+  const savedFilePathRef = useRef<string>((data.filePath as string) || '');
+  const baselineRef = useRef<{ path: string; snapshot: AssetTextSnapshot } | null>(null);
+  const originalContentRef = useRef((data.output as string) || '');
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const activeRef = useRef(true);
+  useEffect(() => {
+    const path = (data.filePath as string) || '';
+    if (path && path !== savedFilePathRef.current) {
+      savedFilePathRef.current = path;
+      savedFileNameRef.current = (data.fileName as string) || `markdown-${id}.md`;
+      baselineRef.current = null;
+      originalContentRef.current = (data.output as string) || '';
+    } else if (!contentEditActiveRef.current && baselineRef.current?.snapshot.content !== data.output) {
+      // 资源大屏同步或撤销恢复了节点内容；下一次保存重新核对磁盘基线。
+      baselineRef.current = null;
+      originalContentRef.current = (data.output as string) || '';
     }
-  }, [currentProjectId, id, updateNodeDataTransient]);
+  }, [data.filePath, data.fileName, data.output, id]);
+  useEffect(() => {
+    activeRef.current = true;
+    return () => { activeRef.current = false; };
+  }, []);
+
+  const doSave = useCallback((content: string): Promise<void> => {
+    const task = async () => {
+      const state = useAppStore.getState();
+      const node = state.nodes.find((entry) => entry.id === id);
+      if (!activeRef.current || state.currentProjectId !== currentProjectId || node?.data.output !== content) return;
+      const controller = new AbortController();
+      const guard = registerCanvasDerivation(state, id, { onCancel: () => controller.abort() });
+      if (!guard) return;
+      setSaveStatus('正在自动保存…');
+      try {
+        let path = savedFilePathRef.current;
+        if (path) {
+          let baseline = baselineRef.current?.path === path ? baselineRef.current.snapshot : null;
+          if (!baseline) {
+            baseline = await readAssetTextFile(path, controller.signal);
+            if (baseline.content !== originalContentRef.current.replace(/\r\n/g, '\n')) throw new Error('磁盘与节点内容不同，未覆盖文件；请在资源库检查后同步');
+          }
+          if (!isCanvasDerivationFresh(guard, useAppStore.getState())) return;
+          const saved = await saveAssetTextFile(path, baseline, content, controller.signal);
+          baselineRef.current = { path, snapshot: saved };
+          originalContentRef.current = saved.content;
+        } else {
+          if (!currentProjectId || !isCanvasDerivationFresh(guard, useAppStore.getState())) return;
+          const result = await saveBinaryToProjectData(new TextEncoder().encode(content), currentProjectId, savedFileNameRef.current, { throwOnError: true });
+          if (!result) throw new Error('当前环境无法保存本地文件');
+          path = result.filePath;
+          // 运行时记住首次创建的文件，即使后续输入令本轮画布 revision 过期也不创建副本。
+          savedFilePathRef.current = path;
+          const saved = await readAssetTextFile(path);
+          baselineRef.current = { path, snapshot: saved };
+          originalContentRef.current = saved.content;
+        }
+        const current = useAppStore.getState();
+        if (isCanvasDerivationFresh(guard, current)) {
+          const name = path.split(/[/\\]/).pop() || savedFileNameRef.current;
+          savedFileNameRef.current = name;
+          current.updateNodeDataTransient(id, { fileName: name, filePath: path, status: 'success' });
+        }
+        if (activeRef.current) setSaveStatus('已自动保存');
+      } catch (reason) {
+        if (activeRef.current) setSaveStatus(controller.signal.aborted ? '自动保存已中止，节点内容已保留' : reason instanceof Error ? reason.message : '自动保存失败，节点内容已保留');
+      } finally { completeCanvasDerivation(guard); }
+    };
+    const queued = saveQueueRef.current.catch(() => {}).then(task);
+    saveQueueRef.current = queued;
+    return queued;
+  }, [currentProjectId, id]);
 
   const onUpload = useCallback(async () => {
     const result = await handleUpload();
@@ -138,10 +174,13 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
 
     // 使用上传文件的文件名
     savedFileNameRef.current = result.fileName;
+    savedFilePathRef.current = '';
+    baselineRef.current = null;
 
     updateNodeData(id, {
       output: textContent,
       fileName: result.fileName,
+      filePath: undefined,
       label: result.fileName,
       status: 'success',
       nodeHeight: estimatedHeight,
@@ -153,6 +192,11 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
 
   // ── Auto-save debounce ──
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    if (copyResetTimer.current) clearTimeout(copyResetTimer.current);
+  }, []);
 
   // ── Resize（四角 + 四边，Shift 锁比例；逻辑统一在 ResizeHandle 内）──
   const nodeWidth = (data.nodeWidth as number) || 280;
@@ -170,8 +214,8 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
 
   // ── Content change (edit mode) with debounced auto-save ──
   const handleContentChange = useCallback(
-    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-      const value = e.target.value;
+    (value: string) => {
+      setSaveStatus('未保存 · 即将自动保存');
       if (!contentEditActiveRef.current) {
         commitToHistory();
         contentEditActiveRef.current = true;
@@ -285,7 +329,7 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
             <textarea
               className="nodrag nowheel markdown-edit-area text-selection-source"
               value={(data.output as string) || ''}
-              onChange={handleContentChange}
+              onChange={(event) => handleContentChange(event.target.value)}
               onBlur={finishContentEdit}
               placeholder={t('# Markdown 文档&#10;&#10;点击上方按钮上传 .md 文件，或直接在此编辑…')}
               spellCheck={false}
@@ -336,53 +380,17 @@ function MarkdownNode({ id, data, selected }: { id: string; data: BaseNodeData; 
       isOpen={isFullscreen}
       onClose={handleCloseFullscreen}
       title={(data.label as string) || t('Markdown 文档')}
-      headerContent={
-        <div className="fullscreen-toolbar">
-          <AnimatedButton
-            type="button"
-            className={`markdown-mode-btn${fsViewMode === 'edit' ? ' active' : ''}`}
-            onClick={() => setFsViewMode('edit')}
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
-            </svg>
-          </AnimatedButton>
-          <AnimatedButton
-            type="button"
-            className={`markdown-mode-btn${fsViewMode === 'preview' ? ' active' : ''}`}
-            onClick={() => setFsViewMode('preview')}
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
-              <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
-            </svg>
-          </AnimatedButton>
-        </div>
-      }
+      panelWidth="min(96vw, 1400px)"
+      bodyClassName="min-h-0"
+      unmountOnClose
     >
-      {fsViewMode === 'edit' ? (
-        <textarea
-          ref={fullscreenTextareaRef}
-          className="fullscreen-textarea"
-          value={(data.output as string) || ''}
-          onChange={handleContentChange}
-          onBlur={finishContentEdit}
-          spellCheck={false}
-        />
-      ) : (
-        <div className="fullscreen-md-view">
-          {(data.output as string) ? (
-            <div
-              className="markdown-rendered"
-              dangerouslySetInnerHTML={{ __html: previewHtml }}
-            />
-          ) : (
-            <div className="node-preview-placeholder" style={{ textAlign: 'center', padding: 40 }}>
-              {t('暂无内容')}
-            </div>
-          )}
-        </div>
-      )}
+      <div className="flex h-[78vh] min-h-0 flex-col">
+        <MarkdownEditor value={(data.output as string) || ''} onChange={handleContentChange} onBlur={finishContentEdit}
+          initialMode="split" status={saveStatus} onSave={() => {
+            if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+            void doSave((data.output as string) || '');
+          }} />
+      </div>
     </FullscreenOverlay>
     </>
   );

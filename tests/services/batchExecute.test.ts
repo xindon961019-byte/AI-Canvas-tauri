@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   persistAudioGenerationResult: vi.fn(),
   persistMediaUrlToProjectData: vi.fn(),
   syncDramaAssetImageFromNode: vi.fn(),
+  liveState: { currentProjectId: null as string | null, nodes: [] as Node<BaseNodeData>[], revision: 0 },
 }));
 
 vi.mock('../../src/services/aiService', () => ({
@@ -40,6 +41,8 @@ vi.mock('../../src/services/fileService', () => ({
 vi.mock('../../src/store/useAppStore', () => ({
   useAppStore: {
     getState: () => ({
+      ...mocks.liveState,
+      getCurrentRevision: () => mocks.liveState.revision,
       syncDramaAssetImageFromNode: mocks.syncDramaAssetImageFromNode,
     }),
   },
@@ -86,6 +89,7 @@ function createContext(): BatchContext {
 }
 
 beforeEach(() => {
+  mocks.liveState = { currentProjectId: null, nodes: [], revision: 0 };
   mocks.generateText.mockReset();
   mocks.generateImage.mockReset();
   mocks.generateVideo.mockReset();
@@ -412,7 +416,7 @@ describe('batchExecuteNodes', () => {
     });
 
     expect(mocks.resolveAnimationSheetAspectRatio).toHaveBeenCalledWith(12, 'provider-animation');
-    expect(mocks.buildAnimationSpritePrompt).toHaveBeenCalledWith('prompt-animation', 'run', 12, '2:1');
+    expect(mocks.buildAnimationSpritePrompt).toHaveBeenCalledWith('prompt-animation', 'run', 12, '2:1', expect.objectContaining({ alignment: 'foot', ground: true }));
     expect(mocks.buildPanoramaPrompt).toHaveBeenCalledWith('prompt-panorama');
     expect(mocks.generateImage).toHaveBeenCalledWith(expect.objectContaining({
       nodeId: 'animation',
@@ -434,5 +438,21 @@ describe('batchExecuteNodes', () => {
         aspectRatio: '2:1',
       }),
     }));
+    expect(ctx.updateNodeDataTransient).toHaveBeenCalledWith('animation', expect.objectContaining({ animationSheet: { cols: 4, rows: 3, frameCount: 12, action: 'run' }, animationEdits: undefined }));
+  });
+
+  it.each(['project', 'revision'])('discards an animation result after its %s changes', async (change) => {
+    const waiting = deferred<{ url: string }>();
+    const nodes = [createNode('animation', 'ai-animation')];
+    const ctx = createContext(); ctx.currentProjectId = 'p1';
+    mocks.liveState = { currentProjectId: 'p1', nodes, revision: 1 };
+    mocks.generateImage.mockReturnValue(waiting.promise);
+    const task = batchExecuteNodes(['animation'], nodes, [], ctx);
+    await vi.waitFor(() => expect(mocks.generateImage).toHaveBeenCalledOnce());
+    if (change === 'project') mocks.liveState.currentProjectId = 'p2'; else mocks.liveState.revision++;
+    waiting.resolve({ url: 'https://example.com/stale.png' }); await task;
+    expect(mocks.persistMediaUrlToProjectData).not.toHaveBeenCalled();
+    expect(ctx.recordOutputHistory).not.toHaveBeenCalled();
+    expect(ctx.updateNodeDataTransient).not.toHaveBeenCalledWith('animation', expect.objectContaining({ status: 'success' }));
   });
 });

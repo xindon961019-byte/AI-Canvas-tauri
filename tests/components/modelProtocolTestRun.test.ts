@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { describeProtocolTestRunBlocker } from '../../src/components/settings/modelProtocolTestRun';
+import { describeProtocolTestRunBlocker, resolveProtocolTestRunDraft } from '../../src/components/settings/modelProtocolTestRun';
+import { getDefaultCustomProtocol } from '../../src/services/ai/modelProtocol';
 
 describe('模型协议试跑前置条件', () => {
   it('凭据与地址齐全的声明式协议可以试跑', () => {
@@ -16,5 +17,17 @@ describe('模型协议试跑前置条件', () => {
     expect(describeProtocolTestRunBlocker('custom', 'sk-test', '   ')).toBe('missing-base-url');
     expect(describeProtocolTestRunBlocker('custom', '  ', 'https://gw.example/v1'))
       .toBe('missing-api-key');
+  });
+
+  it('无效草稿阻止试跑，执行前重新解析当前 JSON', () => {
+    const previous = getDefaultCustomProtocol('image');
+    const edited = structuredClone(previous);
+    edited.submit.path = '/new-images';
+    expect(describeProtocolTestRunBlocker('custom', 'sk-test', 'https://gw.example', true))
+      .toBe('invalid-draft');
+    expect(resolveProtocolTestRunDraft('custom', previous, JSON.stringify(edited))).toEqual(edited);
+    expect(() => resolveProtocolTestRunDraft('custom', previous, '{ invalid JSON')).toThrow();
+    expect(() => resolveProtocolTestRunDraft('custom', previous, JSON.stringify(previous), true))
+      .toThrow('请修正表单中的 JSON 错误');
   });
 });

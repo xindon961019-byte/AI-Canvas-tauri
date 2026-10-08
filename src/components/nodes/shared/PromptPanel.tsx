@@ -54,7 +54,7 @@ import type { AudioGenerationPurpose } from '../../../types/media';
 import { useT } from '../../../i18n';
 import WorkflowApiParameterFields from './WorkflowApiParameterFields';
 import { DREAMINA_IMAGE_RATIOS, getDreaminaImageModel } from '../../../services/ai/dreaminaModels';
-import { getImageCapability } from '../../../services/ai/mediaModelCapabilities';
+import { resolveImageParameterCapability } from '../../../services/ai/mediaModelCapabilities';
 
 const IMAGE_RATIO_CLASS_NAMES: Record<string, string> = {
   '1:1': 'img-rp-sq',
@@ -520,11 +520,12 @@ export default function PromptPanel({
   const batchLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const suppressSubmitClickRef = useRef(false);
   const [batchMenuOpen, setBatchMenuOpen] = useState(false);
+  const imageModelConfig = useAppStore((state) => state.config);
   const dreaminaImageModel = nodeType === 'ai-image' && selectedProvider === 'dreamina'
     ? getDreaminaImageModel(selectedModel)
     : undefined;
   const imageCapability = nodeType === 'ai-image' && !dreaminaImageModel
-    ? getImageCapability(selectedModel)
+    ? resolveImageParameterCapability(selectedModel, selectedProvider, imageModelConfig)
     : undefined;
   const imageResolutions = dreaminaImageModel?.resolutions ?? imageCapability?.resolutions;
   const imageRatioValues = useMemo<readonly string[] | undefined>(() => (
@@ -789,6 +790,7 @@ export default function PromptPanel({
   const runninghubModel = selectedProvider === 'runninghub' ? getRunningHubModel(selectedModel, true) : undefined;
   const runninghubWorkflow = workflows?.find((workflow) => workflow.id === selectedWorkflowId && workflow.adapterType === 'runninghub');
   const workflowApi = workflows?.find((workflow) => workflow.id === selectedWorkflowId && workflow.adapterType === 'workflow-api');
+  const generatingFallback = <span className="ui-spinner" role="img" aria-label={t('生成中')} />;
   const submitButton = (
     <button
       type="button"
@@ -806,8 +808,8 @@ export default function PromptPanel({
       onClick={handleSubmitClick}
     >
       {isGenerating && !performanceMode ? (
-        <LazyLoadBoundary label="生成按钮动画" errorFallback={<span aria-label={t('生成中')}>…</span>}>
-          <Suspense fallback={null}>
+        <LazyLoadBoundary label="生成按钮动画" errorFallback={generatingFallback}>
+          <Suspense fallback={generatingFallback}>
             <ThinkingOrb state="composing" size={20} aria-label={t('生成中')} />
           </Suspense>
         </LazyLoadBoundary>
@@ -1079,8 +1081,8 @@ export default function PromptPanel({
               >
                 {!performanceMode && (
                   <span className="prompt-stop-orb" aria-hidden="true">
-                    <LazyLoadBoundary label="停止按钮动画" errorFallback={null}>
-                      <Suspense fallback={null}>
+                    <LazyLoadBoundary label="停止按钮动画" errorFallback={generatingFallback}>
+                      <Suspense fallback={generatingFallback}>
                         <ThinkingOrb state="composing" size={20} />
                       </Suspense>
                     </LazyLoadBoundary>

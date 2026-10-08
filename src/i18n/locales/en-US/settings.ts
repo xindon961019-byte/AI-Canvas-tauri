@@ -183,6 +183,10 @@ const settings = {
   '保存画布': 'Save canvas',
   '复制节点': 'Copy node',
   '粘贴节点': 'Paste node',
+  '拖拽复制空白节点': 'Drag to duplicate an empty node',
+  '拖拽': 'Drag',
+  '保留提示词、配置和上游连线，不复制已有内容。画布笔记完整复制；分组和 AI 应用不支持此操作。':
+    'Keeps prompts, settings and incoming connections without copying existing content. Canvas notes are copied in full; groups and AI apps do not support this action.',
   '删除节点': 'Delete node',
   '分组 / 取消分组': 'Group / ungroup',
   '创建生成节点（文本 / 图像 / 视频 / 音频 / 全景 / 动画）': 'Create generation node (text / image / video / audio / panorama / animation)',
@@ -590,7 +594,6 @@ const settings = {
   '路径解析结果': 'Path parsing results',
   '未匹配': 'No match',
   '可用变量': 'Available variables',
-  '（鼠标在变量上悬浮可查看详细说明）': '(Hover over a variable to see the detailed description)',
   '本地请求预览': 'Local request preview',
   '示例变量 JSON': 'Example variables JSON',
   '请求路径不可用': 'Request path unavailable',
@@ -598,8 +601,6 @@ const settings = {
   'Body 预览': 'Body preview',
   '无请求体': 'No body',
   '当前模型可用变量': 'Variables available for this model',
-  '可放入 path、query、headers 或 body，调用时会替换为节点中的实际值':
-    'Can be placed in path, query, headers or body; replaced with actual node values on call',
   '声明式协议 JSON': 'Declarative protocol JSON',
   '配置说明': 'Configuration notes',
   '不确定如何填写时，可先在“表单”模式配置，再切回 JSON 查看结果':
@@ -617,8 +618,6 @@ const settings = {
   '响应路径': 'Response path',
   '用点号读取嵌套字段，例如 data.0.url；用 data.*.url 读取数组内全部 URL。':
     'Use dot notation to read nested fields, e.g. data.0.url; use data.*.url to read all URLs in an array.',
-  '异步流程先按 response.taskIdPath 取得任务 ID，再在 poll 中通过 {{submit.task_id}} 引用。':
-    'Async flow first gets the task ID via response.taskIdPath, then references it in poll via {{submit.task_id}}.',
 
   // ── SubAgentSettings ──
   '内置': 'Built-in',
@@ -717,7 +716,6 @@ const settings = {
   '先填写 API Key': 'Enter the API key first',
   '试跑中': 'Test running',
   '试跑': 'Test run',
-  '用上面的示例变量真发一次请求，会产生真实调用与计费': 'Sends a real request with the sample variables above — real usage and billing apply',
   '已获取 {count} 个模型，接口地址已更正为 {url}': 'Fetched {count} model(s); endpoint corrected to {url}',
   '接口地址已更正为 {url}': 'Endpoint corrected to {url}',
   '浏览器存储配额': 'Browser storage quota',

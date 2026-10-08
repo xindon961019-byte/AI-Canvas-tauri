@@ -397,6 +397,7 @@ export interface ProjectSlice {
   initFromDb: () => Promise<void>;
   moveGlobalAssetToFolder: (file: fileService.AssetFileEntry, selection: fileService.AssetFolderSelection,
     options?: fileService.FileTransferOptions) => Promise<{ path: string; moved: boolean }>;
+  renameAssetFile: (file: fileService.AssetFileEntry, name: string, projectId?: string) => Promise<fileService.AssetFileRenameResult>;
 }
 
 type ProjectSliceSet = Parameters<StateCreator<AppState, [], [], ProjectSlice>>[0];
@@ -585,6 +586,13 @@ export const createProjectSlice: StateCreator<AppState, [], [], ProjectSlice> = 
       if (relocateMediaReferences(state.nodes, [move]) !== state.nodes) state.commitToHistory();
       set((current) => ({ ...relocateMediaReferences(current, [move]), recentAssetsRevision: current.recentAssetsRevision + 1 }));
     }, options),
+
+  renameAssetFile: async (file, name, projectId) => fileService.renameAssetFile(
+    file, name, projectId, get().config.assetFolders ?? [], (move) => {
+      const state = get();
+      if (relocateMediaReferences(state.nodes, [move]) !== state.nodes) state.commitToHistory();
+      set((current) => ({ ...relocateMediaReferences(current, [move]), recentAssetsRevision: current.recentAssetsRevision + 1 }));
+    }),
 
   setProjectName: (name) => {
     const state = get();

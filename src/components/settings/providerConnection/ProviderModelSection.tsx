@@ -6,7 +6,7 @@
  */
 import Select from '../../shared/Select';
 import { Icon } from '@iconify/react';
-import type { Dispatch, SetStateAction } from 'react';
+import { useCallback, useEffect, useRef, type Dispatch, type SetStateAction } from 'react';
 import { GENERAL_MODEL_CATEGORY_LABELS } from '../../../types';
 import type {
   GeneralModelCategory,
@@ -129,6 +129,36 @@ export default function ProviderModelSection({
   onFetchModels,
 }: ProviderModelSectionProps) {
   const t = useT();
+  const settingsRef = useRef<HTMLDivElement>(null);
+  const settingsScrollFrameRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (settingsScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(settingsScrollFrameRef.current);
+    }
+  }, []);
+
+  const scrollToSettings = useCallback(() => {
+    if (settingsScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(settingsScrollFrameRef.current);
+    }
+    // 等本次点击展开的编辑器挂载后再定位；重复点击同一模型也会重新定位。
+    settingsScrollFrameRef.current = window.requestAnimationFrame(() => {
+      settingsScrollFrameRef.current = null;
+      if (!settingsRef.current?.firstElementChild) return;
+      settingsRef.current.scrollIntoView({
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+        block: 'start',
+        inline: 'nearest',
+      });
+    });
+  }, []);
+
+  const protocolSettingsId = protocolModel?.id;
+  const videoSettingsId = videoCapabilityModel?.id;
+  useEffect(() => {
+    if (protocolSettingsId || videoSettingsId) scrollToSettings();
+  }, [protocolSettingsId, videoSettingsId, scrollToSettings]);
 
   return (
     <section className="provider-model-section">
@@ -312,6 +342,7 @@ export default function ProviderModelSection({
                           setVideoCapabilityModelId(model.id);
                           setProtocolModelId(null);
                           setProtocolValid(true);
+                          scrollToSettings();
                         }}
                       >
                         <Icon icon="lucide:video" width="16" />
@@ -326,6 +357,7 @@ export default function ProviderModelSection({
                         setProtocolModelId(model.id);
                         setVideoCapabilityModelId(null);
                         setProtocolValid(true);
+                        scrollToSettings();
                       }}
                     >
                       <Icon icon="mdi:tune-variant" width="15" />
@@ -399,50 +431,53 @@ export default function ProviderModelSection({
             )}
           </div>
 
-          {definition.id === 'custom-openai'
-            && videoCapabilityModel
-            && videoCapabilityModel.category === 'video'
-            && selectedIds.has(videoCapabilityModel.id) ? (
-              <VideoCapabilityEditor
-                key={videoCapabilityModel.id}
-                model={videoCapabilityModel}
-                onChange={(capability) => onUpdateVideoCapability(
-                  videoCapabilityModel.id,
-                  capability,
-                )}
-                onApplySeedanceTemplate={(seedanceModel, transport) => {
-                  const template = createSeedanceQuickAdaptTemplate(seedanceModel, transport);
-                  onUpdateVideoCapability(videoCapabilityModel.id, template.capability);
-                  onUpdateModelProtocol(videoCapabilityModel.id, template.executionProfile);
-                }}
-                onApplyH3Template={(h3Model, transport) => {
-                  const template = createH3QuickAdaptTemplate(h3Model, transport);
-                  onUpdateVideoCapability(videoCapabilityModel.id, template.capability);
-                  onUpdateModelProtocol(videoCapabilityModel.id, template.executionProfile);
-                }}
-                onClose={() => setVideoCapabilityModelId(null)}
-              />
-            ) : null}
+          <div ref={settingsRef} className="scroll-mt-3">
+            {definition.id === 'custom-openai'
+              && videoCapabilityModel
+              && videoCapabilityModel.category === 'video'
+              && selectedIds.has(videoCapabilityModel.id) ? (
+                <VideoCapabilityEditor
+                  key={videoCapabilityModel.id}
+                  model={videoCapabilityModel}
+                  onChange={(capability) => onUpdateVideoCapability(
+                    videoCapabilityModel.id,
+                    capability,
+                  )}
+                  onApplySeedanceTemplate={(seedanceModel, transport) => {
+                    const template = createSeedanceQuickAdaptTemplate(seedanceModel, transport);
+                    onUpdateVideoCapability(videoCapabilityModel.id, template.capability);
+                    onUpdateModelProtocol(videoCapabilityModel.id, template.executionProfile);
+                  }}
+                  onApplyH3Template={(h3Model, transport) => {
+                    const template = createH3QuickAdaptTemplate(h3Model, transport);
+                    onUpdateVideoCapability(videoCapabilityModel.id, template.capability);
+                    onUpdateModelProtocol(videoCapabilityModel.id, template.executionProfile);
+                  }}
+                  onClose={() => setVideoCapabilityModelId(null)}
+                />
+              ) : null}
 
-          {definition.id === 'custom-openai'
-            && protocolModel
-            && selectedIds.has(protocolModel.id) ? (
-              <ModelProtocolEditor
-                key={protocolModel.id}
-                model={protocolModel}
-                inheritanceLabel={protocolModel.category === 'text'
-                  ? '跟随连接对话协议'
-                  : undefined}
-                apiKey={apiKey.trim()}
-                baseUrl={normalizeBaseUrl(baseUrl) || definition.defaultBaseUrl || ''}
-                onChange={(profile) => onUpdateModelProtocol(protocolModel.id, profile)}
-                onImageReferenceRequestModeChange={(mode) => (
-                  onUpdateImageReferenceRequestMode(protocolModel.id, mode)
-                )}
-                onValidityChange={setProtocolValid}
-                onClose={onCloseProtocolEditor}
-              />
-            ) : null}
+            {definition.id === 'custom-openai'
+              && protocolModel
+              && selectedIds.has(protocolModel.id) ? (
+                <ModelProtocolEditor
+                  key={protocolModel.id}
+                  model={protocolModel}
+                  inheritanceLabel={protocolModel.category === 'text'
+                    ? '跟随连接对话协议'
+                    : undefined}
+                  apiKey={apiKey.trim()}
+                  baseUrl={normalizeBaseUrl(baseUrl) || definition.defaultBaseUrl || ''}
+                  onChange={(profile) => onUpdateModelProtocol(protocolModel.id, profile)}
+                  onVideoCapabilityChange={(capability) => onUpdateVideoCapability(protocolModel.id, capability)}
+                  onImageReferenceRequestModeChange={(mode) => (
+                    onUpdateImageReferenceRequestMode(protocolModel.id, mode)
+                  )}
+                  onValidityChange={setProtocolValid}
+                  onClose={onCloseProtocolEditor}
+                />
+              ) : null}
+          </div>
         </>
       )}
 

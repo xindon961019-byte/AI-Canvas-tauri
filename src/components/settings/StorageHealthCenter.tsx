@@ -6,6 +6,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../store/useAppStore';
+import { getProjectDataDir } from '../../services/fileService';
 import {
   scanStorageHealth,
   clearTrashDir,
@@ -292,9 +293,13 @@ function StackedBar({ items }: { items: BarItem[] }) {
 // 主组件
 // ============================================
 
-function collectLiveReferences(): Set<string> {
+async function collectLiveReferences(projectId = useAppStore.getState().currentProjectId): Promise<Set<string>> {
+  const root = projectId ? await getProjectDataDir(projectId) : undefined;
   const state = useAppStore.getState();
-  return collectNodeFilePaths([{ data: { nodes: state.nodes, history: state.history, messages: state.messages } }]);
+  if (state.currentProjectId !== projectId || (projectId && !root)) {
+    throw new Error('当前项目的实时文件引用无法确认，请重新扫描');
+  }
+  return collectNodeFilePaths([{ data: { nodes: state.nodes, history: state.history, messages: state.messages } }], root ?? undefined);
 }
 
 export default function StorageHealthCenter() {
@@ -320,10 +325,12 @@ export default function StorageHealthCenter() {
       void estimateBrowserStorage().then(setBrowserStorage);
 
       // 收集所有节点的 filePath 引用
-      const nodeFilePaths = collectLiveReferences;
+      const projectId = useAppStore.getState().currentProjectId;
+      const nodeFilePaths = () => collectLiveReferences(projectId);
       const assetFolders = [] as { path: string; label: string }[];
 
       const result = await scanStorageHealth(useAppStore.getState().projects, nodeFilePaths, assetFolders);
+      if (useAppStore.getState().currentProjectId !== projectId) throw new Error('项目已切换，请重新扫描');
       setReport(result);
       scannedRef.current = true;
 
@@ -383,12 +390,13 @@ export default function StorageHealthCenter() {
 
   // 不信任旧报告：每次清理都重新读取所有项目与当前未保存的画布。
   const verifyUnreferenced = useCallback(async (path: string) => {
+    const projectId = useAppStore.getState().currentProjectId;
     const fresh = await scanStorageHealth(
       useAppStore.getState().projects,
-      collectLiveReferences,
+      () => collectLiveReferences(projectId),
     );
     const key = [...collectNodeFilePaths([{ data: { filePath: path } }])][0];
-    return !collectLiveReferences().has(key) && fresh.orphans.some((file) => file.path === path);
+    return !(await collectLiveReferences(projectId)).has(key) && fresh.orphans.some((file) => file.path === path);
   }, []);
 
   // 删除孤儿文件

@@ -73,6 +73,11 @@ beforeEach(() => {
 });
 
 describe('MediaProviderRegistry', () => {
+  it('registers GRSAI video while image generation keeps its existing contract', () => {
+    expect(mediaProviderRegistry.getVideoAdapter('grsai')?.providerId).toBe('grsai');
+    expect(mediaProviderRegistry.getImageAdapter('grsai')).toBeUndefined();
+    expect(mediaProviderRegistry.getAudioAdapter('grsai')).toBeUndefined();
+  });
   it('resolves only handlers declared by the provider capability contract', () => {
     const registry = new MediaProviderRegistry([imageAdapter('example')]);
 

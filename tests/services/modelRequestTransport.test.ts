@@ -9,6 +9,11 @@ vi.mock('../../src/services/ai/httpTransport', () => transportMocks);
 import { streamAssistantReply } from '../../src/services/ai/assistantStream';
 import { generateImagesBatch } from '../../src/services/ai/generateImage';
 import { generateText } from '../../src/services/ai/generateText';
+import { reversePromptAndTags } from '../../src/services/ai/reversePrompt';
+import { generateVideo } from '../../src/services/ai/generateVideo';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import VideoParamSelector from '../../src/components/nodes/shared/VideoParamSelector';
 import { parseResponseError } from '../../src/services/ai/httpUtils';
 import { resolveImageDataUrlArray } from '../../src/services/ai/imageUtils';
 import { getProviderDefinition } from '../../src/services/ai/providerCatalogService';
@@ -33,6 +38,118 @@ afterEach(() => {
 });
 
 describe('model request transport boundary', () => {
+  it.each([undefined, '   ', 'https://custom.example/v1/'])('reverses images and chats with the selected CCC group when its address is %s', async (baseUrl) => {
+    for (const group of ['pro', 'discount']) useAppStore.getState().saveProviderConfig(`cccapi-${group}`, {
+      name: 'CCC', catalogId: 'cccapi', cccGroup: group, apiKey: `${group}-fixture`, baseUrl,
+      selectedModels: [{ id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', category: 'text', provider: `cccapi-${group}`,
+        inputModalities: ['text', 'image'], executionProfile: { preset: 'openai-chat' } }],
+    });
+    const result = { prompt: '窗台上的橘猫', tags: ['橘猫', '窗台'] };
+    transportMocks.corsSafeFetch.mockImplementation(async () => jsonResponse({ choices: [{ message: { content: JSON.stringify(result) }, finish_reason: 'stop' }] }));
+    const expectedUrl = `${baseUrl?.trim().replace(/\/+$/, '') || 'https://cccapi.cn/v1'}/chat/completions`;
+    for (const model of useAppStore.getState().config.generalModels!) {
+      await expect(reversePromptAndTags({ provider: 'general', model: `general/${model.id}`, imageUrls: ['data:image/png;base64,Y2F0'] })).resolves.toEqual(result);
+      const [url, init] = transportMocks.corsSafeFetch.mock.calls.at(-1)!;
+      expect(url).toBe(expectedUrl);
+      expect(init.headers).toMatchObject({ Authorization: `Bearer ${useAppStore.getState().config.providers[model.providerConfigId].apiKey}` });
+      expect(JSON.parse(init.body)).toMatchObject({ model: 'gpt-5.6-sol', messages: [{ role: 'user', content: expect.arrayContaining([
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,Y2F0' } },
+      ]) }] });
+      useAppStore.getState().updateConfig({ assistantModelId: model.id });
+      await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', nonStream: true, onEvent: vi.fn() })).resolves.toBe(JSON.stringify(result));
+      const [chatUrl, chatInit] = transportMocks.corsSafeFetch.mock.calls.at(-1)!;
+      expect(chatUrl).toBe(expectedUrl);
+      expect(chatInit.headers).toMatchObject({ Authorization: `Bearer ${useAppStore.getState().config.providers[model.providerConfigId].apiKey}` });
+    }
+    useAppStore.getState().setProviderKey('cccapi-discount', '');
+    transportMocks.corsSafeFetch.mockClear();
+    const model = useAppStore.getState().config.generalModels!.find((item) => item.providerConfigId === 'cccapi-discount')!;
+    await expect(reversePromptAndTags({ provider: 'general', model: `general/${model.id}`, imageUrls: ['data:image/png;base64,Y2F0'] })).rejects.toThrow();
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+  });
+
+  it('still rejects an unconfigured custom connection address instead of borrowing a built-in URL', async () => {
+    useAppStore.getState().saveProviderConfig('custom-cccapi', { name: '自定义', catalogId: 'custom-openai', apiKey: 'fixture',
+      selectedModels: [{ id: 'gpt-5.6-sol', name: 'GPT', category: 'text', provider: 'custom-cccapi' }],
+    });
+    const model = useAppStore.getState().config.generalModels![0];
+    await expect(generateText({ provider: 'general', model: `general/${model.id}`, prompt: '你好' })).rejects.toThrow('未配置接口地址');
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+  });
+
+  it.each(['text', 'image'] as const)('routes identical CCC %s model IDs through the selected group Key', async (category) => {
+    const modelId = category === 'text' ? 'gpt-5' : 'gpt-image-2';
+    for (const group of ['free', 'stable']) {
+      useAppStore.getState().saveProviderConfig(`cccapi-${group}`, {
+        name: 'CCC', catalogId: 'cccapi', cccGroup: group, apiKey: `${group}-fixture`, baseUrl: 'https://cccapi.cn/v1',
+        selectedModels: [{ id: modelId, name: modelId, category, provider: `cccapi-${group}`,
+          executionProfile: { preset: category === 'text' ? 'openai-chat' : 'openai-image' } }],
+      });
+    }
+    transportMocks.corsSafeFetch.mockImplementation(async () => jsonResponse(category === 'text'
+      ? { choices: [{ message: { content: '回复' }, finish_reason: 'stop' }] }
+      : { data: [{ url: 'https://cdn.example/image.png' }] }));
+    const models = useAppStore.getState().config.generalModels!;
+    expect(new Set(models.map((model) => model.id)).size).toBe(2);
+    for (const model of models) {
+      const params = { provider: 'general', model: `general/${model.id}`, prompt: '测试' };
+      if (category === 'text') await expect(generateText(params)).resolves.toBe('回复');
+      else expect((await generateImagesBatch(params, 1)).results).toHaveLength(1);
+      const [url, init] = transportMocks.corsSafeFetch.mock.calls.at(-1)!;
+      const key = useAppStore.getState().config.providers[model.providerConfigId].apiKey;
+      expect(init.headers).toMatchObject({ Authorization: `Bearer ${key}` });
+      expect(url).toBe(`https://cccapi.cn/v1/${category === 'text' ? 'chat/completions' : 'images/generations'}`);
+      expect(JSON.parse(init.body).model).toBe(modelId);
+    }
+    useAppStore.getState().setProviderKey('cccapi-stable', '');
+    transportMocks.corsSafeFetch.mockClear();
+    const model = models.find((item) => item.providerConfigId === 'cccapi-stable')!;
+    const params = { provider: 'general', model: `general/${model.id}`, prompt: '测试' };
+    if (category === 'text') await expect(generateText(params)).rejects.toThrow();
+    else await expect(generateImagesBatch({ ...params, image_urls: ['https://cdn.example/reference.png'] }, 1)).rejects.toThrow('CCC API');
+    expect(transportMocks.corsSafeFetch).not.toHaveBeenCalled();
+  });
+  it('routes a GRSAI H3 selection from the video entry into its native asynchronous adapter', async () => {
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: { grsai: { name: 'GRSAI', apiKey: 'fixture-key' } } } }));
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ id: 'h3-task', status: 'running' }))
+      .mockResolvedValueOnce(jsonResponse({ status: 'succeeded', results: [{ url: 'https://cdn.example/h3.mp4' }] }));
+    await expect(generateVideo({ provider: 'grsai', model: 'grsai/minimax-h3', prompt: '写实短片', seedanceResolution: '768p', seedanceRatio: '9:16', seedanceDuration: 12 }))
+      .resolves.toEqual({ url: 'https://cdn.example/h3.mp4' });
+    expect(transportMocks.corsSafeFetch.mock.calls.map(([url]) => url)).toEqual([
+      'https://grsai.dakka.com.cn/v1/api/generate', 'https://grsai.dakka.com.cn/v1/api/result?id=h3-task',
+    ]);
+    expect(JSON.parse(transportMocks.corsSafeFetch.mock.calls[0][1].body)).toMatchObject({ aspectRatio: 'portrait', resolution: '768p', duration: 12, replyType: 'async' });
+  });
+
+  it('shows GRSAI H3 resolution and duration without unsupported audio toggle', () => {
+    const html = renderToStaticMarkup(createElement(VideoParamSelector, { provider: 'grsai', selectedModel: 'grsai/minimax-h3', seedanceResolution: '1080p', seedanceDuration: 15 }));
+    expect(html).toContain('1080p');
+    expect(html).toContain('10s');
+    expect(html).not.toContain('15s');
+  });
+  it.each(['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gemini-3.5-flash-lite', 'gemini-3.7-flash', 'gemini-3.8-flash'])('uses GRSAI shared chat transport for %s', async (modelId) => {
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: { grsai: { name: 'GRSAI', apiKey: 'fixture-key' } } } }));
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ choices: [{ message: { content: '回复' }, finish_reason: 'stop' }] }));
+    await expect(generateText({ provider: 'grsai', model: `grsai/${modelId}`, prompt: '你好' })).resolves.toBe('回复');
+    const [url, init] = transportMocks.corsSafeFetch.mock.calls[0];
+    expect(url).toBe('https://grsai.dakka.com.cn/v1/chat/completions');
+    expect(JSON.parse(init.body)).toMatchObject({ model: modelId, stream: false });
+  });
+
+  it.each(['nano-banana-2.1', 'nano-banana-2-lite', 'gpt-image-2.5', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'])('submits GRSAI %s through its native image contract', async (modelId) => {
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: { grsai: { name: 'GRSAI', apiKey: 'fixture-key' } } } }));
+    transportMocks.corsSafeFetch.mockResolvedValueOnce(jsonResponse({ status: 'succeeded', results: [{ url: 'https://cdn.example/image.png' }] }));
+    const result = await generateImagesBatch({ provider: 'grsai', model: `grsai/${modelId}`, prompt: '海报', imageSize: '4K', aspectRatio: '16:9' }, 1);
+    expect(result.results).toHaveLength(1);
+    const [url, init] = transportMocks.corsSafeFetch.mock.calls[0];
+    expect(url).toBe('https://grsai.dakka.com.cn/v1/api/generate');
+    const body = JSON.parse(init.body);
+    expect(body).toMatchObject({ model: modelId, replyType: 'json', images: [] });
+    expect(body).not.toHaveProperty('resolution');
+    if (modelId === 'nano-banana-2-lite') expect(body.imageSize).toBe('1K');
+    else if (modelId === 'nano-banana-2.1') expect(body.imageSize).toBe('4K');
+    else expect(body).toMatchObject({ aspectRatio: modelId === 'gpt-image-2.5' ? '16:9' : '3840x2160', quality: modelId === 'gpt-image-2.5' ? 'auto' : 'medium' });
+  });
   it.each(['DeepSeek-V4.1-Flash', 'GLM-5.3-Flash', 'Qwen3.8-Flash', 'mI MiMo-V2.5',
     'Hy3', 'claude-sonnet-4-6', 'gemini-3.5-flash', 'grok-4.5'])('uses shared OpenAI chat requests for CCC %s in nodes and conversations', async (modelId) => {
     const catalogModel = getProviderDefinition('cccapi')!.models!.find((model) => model.id === modelId)!;

@@ -3,7 +3,7 @@
  */
 import Select from '../shared/Select';
 import { Icon } from '@iconify/react';
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
   GeneralModelCategory,
   ImageReferenceRequestMode,
@@ -22,6 +22,7 @@ import type {
   ModelProtocolResponseType,
   ModelProtocolResultConfig,
   ProtocolJsonValue,
+  VideoModelCapability,
 } from '../../types/aiTypes';
 import {
   executeModelProtocol,
@@ -41,7 +42,7 @@ import {
   getProtocolVariableDescription,
 } from '../../services/ai/modelProtocolVariables';
 import PopupCloseButton from '../shared/PopupCloseButton';
-import { describeProtocolTestRunBlocker, type ProtocolChoice } from './modelProtocolTestRun';
+import { describeProtocolTestRunBlocker, resolveProtocolTestRunDraft, type ProtocolChoice } from './modelProtocolTestRun';
 import { useT } from '../../i18n';
 import { copyText } from '../../services/clipboardService';
 import {
@@ -52,6 +53,8 @@ import {
 } from '../../services/ai/chatApiProtocol';
 import { corsSafeFetch } from '../../services/ai/httpTransport';
 import { parseResponseError } from '../../services/ai/httpUtils';
+import { createSeedanceQuickAdaptTemplate } from '../../services/ai/seedanceModelCapabilities';
+import { createH3QuickAdaptTemplate } from '../../services/ai/h3ModelCapabilities';
 
 type EditorView = 'form' | 'json';
 type JsonFieldKind = 'object' | 'value';
@@ -66,6 +69,7 @@ interface ModelProtocolEditorProps {
   baseUrl: string;
   onChange: (profile: ModelExecutionProfile | undefined) => void;
   onImageReferenceRequestModeChange: (mode: ImageReferenceRequestMode | undefined) => void;
+  onVideoCapabilityChange?: (capability: VideoModelCapability) => void;
   onValidityChange: (valid: boolean) => void;
   onClose: () => void;
 }
@@ -322,22 +326,24 @@ export default function ModelProtocolEditor({
   baseUrl,
   onChange,
   onImageReferenceRequestModeChange,
+  onVideoCapabilityChange,
   onValidityChange,
   onClose,
 }: ModelProtocolEditorProps) {
   const t = useT();
   const simpleEditor = !workflowMode && (model.category === 'image' || model.category === 'text');
-  const initialPreset: ProtocolChoice = model.executionProfile?.preset ?? 'legacy';
+  const videoJsonEditor = !workflowMode && model.category === 'video';
+  const initialPreset: ProtocolChoice = model.executionProfile?.preset ?? (videoJsonEditor ? 'custom' : 'legacy');
   const initialProtocol = model.executionProfile?.preset === 'custom' && model.executionProfile.protocol
     ? parseModelExecutionProtocol(model.executionProfile.protocol)
     : getDefaultCustomProtocol(model.category);
   const [preset, setPreset] = useState<ProtocolChoice>(initialPreset);
   const [protocol, setProtocol] = useState<NormalizedModelExecutionProtocol>(initialProtocol);
-  const [view, setView] = useState<EditorView>(simpleEditor ? 'json' : 'form');
+  const [view, setView] = useState<EditorView>(simpleEditor || videoJsonEditor ? 'json' : 'form');
   const [protocolJson, setProtocolJson] = useState(() => serializeJson(initialProtocol));
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copying' | 'success' | 'error'>('idle');
-  const protocolHelpRef = useRef<HTMLElement>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() => initialPreset === 'custom'
+    ? validateModelExecutionProtocol(initialProtocol)[0] ?? null : null);
   const [formRevision, setFormRevision] = useState(0);
   const [previewVariablesJson, setPreviewVariablesJson] = useState(
     () => serializeJson(initialPreviewVariables ?? createPreviewVariables(model)),
@@ -351,16 +357,31 @@ export default function ModelProtocolEditor({
   const responseSampleErrorId = `${responseSampleId}-error`;
   const protocolJsonId = useId();
   const protocolJsonHelpId = `${protocolJsonId}-help`;
+  const protocolTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const protocolSelectionRef = useRef<{ start: number; end: number } | null>(null);
+  const pendingProtocolCaretRef = useRef<number | null>(null);
   const invalidFormFieldsRef = useRef(new Set<string>());
   const [testRun, setTestRun] = useState<ProtocolTestRunState>({ status: 'idle' });
   const testAbortRef = useRef<AbortController | null>(null);
   useEffect(() => () => testAbortRef.current?.abort(), []);
+  useEffect(() => {
+    onValidityChange(!error && invalidFormFieldsRef.current.size === 0);
+  }, [error, onValidityChange]);
+  useLayoutEffect(() => {
+    const caret = pendingProtocolCaretRef.current;
+    const textarea = protocolTextareaRef.current;
+    if (caret === null || !textarea) return;
+    pendingProtocolCaretRef.current = null;
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(caret, caret);
+    protocolSelectionRef.current = { start: caret, end: caret };
+  }, [protocolJson]);
 
   const publishProtocol = (nextProtocol: NormalizedModelExecutionProtocol) => {
     setProtocol(nextProtocol);
     setProtocolJson(serializeJson(nextProtocol));
     const errors = validateModelExecutionProtocol(nextProtocol);
-    setError(errors[0] ?? null);
+    setError(errors[0] ?? (invalidFormFieldsRef.current.size > 0 ? '请修正表单中的 JSON 错误' : null));
     const valid = errors.length === 0 && invalidFormFieldsRef.current.size === 0;
     onValidityChange(valid);
     if (valid) onChange({ preset: 'custom', protocol: parseModelExecutionProtocol(nextProtocol) });
@@ -376,7 +397,7 @@ export default function ModelProtocolEditor({
     if (fieldError) invalidFormFieldsRef.current.add(fieldId);
     else invalidFormFieldsRef.current.delete(fieldId);
     const protocolErrors = validateModelExecutionProtocol(protocol);
-    setError(protocolErrors[0] ?? null);
+    setError(protocolErrors[0] ?? (invalidFormFieldsRef.current.size > 0 ? '请修正表单中的 JSON 错误' : null));
     onValidityChange(protocolErrors.length === 0 && invalidFormFieldsRef.current.size === 0);
   };
 
@@ -392,16 +413,43 @@ export default function ModelProtocolEditor({
     }
   };
 
+  const rememberProtocolSelection = (textarea: HTMLTextAreaElement) => {
+    protocolSelectionRef.current = { start: textarea.selectionStart, end: textarea.selectionEnd };
+  };
+
+  const insertProtocolVariable = (variable: string) => {
+    const textarea = protocolTextareaRef.current;
+    if (!textarea) return;
+    const selection = protocolSelectionRef.current;
+    const start = Math.min(selection?.start ?? protocolJson.length, protocolJson.length);
+    const end = Math.max(start, Math.min(selection?.end ?? start, protocolJson.length));
+    const token = `{{${variable}}}`;
+    const nextValue = protocolJson.slice(0, start) + token + protocolJson.slice(end);
+    const caret = start + token.length;
+    if (nextValue === protocolJson) {
+      textarea.focus({ preventScroll: true });
+      textarea.setSelectionRange(caret, caret);
+      protocolSelectionRef.current = { start: caret, end: caret };
+      return;
+    }
+    pendingProtocolCaretRef.current = caret;
+    updateCustomJson(nextValue);
+  };
+
   const changeView = (nextView: EditorView) => {
+    protocolSelectionRef.current = null;
+    pendingProtocolCaretRef.current = null;
     invalidFormFieldsRef.current.clear();
-    setError(null);
+    const errors = validateModelExecutionProtocol(protocol);
+    setError(errors[0] ?? null);
     setProtocolJson(serializeJson(protocol));
     setView(nextView);
-    const valid = validateModelExecutionProtocol(protocol).length === 0;
-    onValidityChange(valid);
+    onValidityChange(errors.length === 0);
   };
 
   const changePreset = (nextPreset: ProtocolChoice) => {
+    protocolSelectionRef.current = null;
+    pendingProtocolCaretRef.current = null;
     setPreset(nextPreset);
     setError(null);
     invalidFormFieldsRef.current.clear();
@@ -411,7 +459,7 @@ export default function ModelProtocolEditor({
       return;
     }
     if (nextPreset === 'custom') {
-      if (simpleEditor) setView('json');
+      if (simpleEditor || videoJsonEditor) setView('json');
       const nextProtocol = preset !== 'legacy' && preset !== 'custom'
         && !isNativeTextProtocolPreset(preset)
         ? getModelProtocolPreset(preset)
@@ -435,6 +483,23 @@ export default function ModelProtocolEditor({
       onImageReferenceRequestModeChange(undefined);
     }
     onChange({ preset: nextPreset });
+  };
+
+  const applyVideoJsonTemplate = (templateId: 'sd2.0' | 'sd2.5' | 'h3') => {
+    const template = templateId === 'h3'
+      ? createH3QuickAdaptTemplate('h3-standard', 'apimart')
+      : createSeedanceQuickAdaptTemplate(templateId === 'sd2.0' ? '2.0-standard' : '2.5', 'apimart');
+    testAbortRef.current?.abort();
+    testAbortRef.current = null;
+    setTestRun({ status: 'idle' });
+    protocolSelectionRef.current = null;
+    pendingProtocolCaretRef.current = null;
+    invalidFormFieldsRef.current.clear();
+    setFormRevision((revision) => revision + 1);
+    setPreset('custom');
+    setView('json');
+    onVideoCapabilityChange?.(template.capability);
+    publishProtocol(parseModelExecutionProtocol(template.executionProfile.protocol!));
   };
 
   const changeMode = (mode: ModelExecutionProtocol['mode']) => {
@@ -630,6 +695,7 @@ export default function ModelProtocolEditor({
   const responseResult = protocol.response.result ?? {};
   const pollResponse = poll?.response;
   const pollResult = pollResponse?.result;
+  const submitTaskIdVariable = `submit.${protocol.response.taskIdPath ?? 'task_id'}`;
   const pollRetry = {
     ...getDefaultModelProtocolPollRetryConfig(),
     ...poll?.retry,
@@ -637,12 +703,16 @@ export default function ModelProtocolEditor({
   const previewState = useMemo<ProtocolPreviewState>(() => {
     if (preset !== 'custom') return {};
     try {
+      if (error) throw new Error(error);
       const parsed = JSON.parse(previewVariablesJson) as ProtocolJsonValue;
       if (!isJsonObject(parsed)) throw new Error('示例变量必须是 JSON 对象');
+      const currentProtocol = resolveProtocolTestRunDraft(
+        preset, protocol, protocolJson,
+      );
       return {
         preview: previewModelProtocolRequest({
-          baseUrl: 'https://preview.invalid',
-          protocol,
+          baseUrl: baseUrl.trim() || 'https://preview.invalid',
+          protocol: currentProtocol,
           variables: parsed,
         }),
       };
@@ -651,23 +721,27 @@ export default function ModelProtocolEditor({
         error: previewError instanceof Error ? previewError.message : '请求预览失败',
       };
     }
-  }, [preset, previewVariablesJson, protocol]);
+  }, [preset, previewVariablesJson, protocol, protocolJson, baseUrl, error]);
   const supportsStructuredResponse = protocol.mode === 'async'
     || protocol.response.type === 'json';
   const responsePreviewState = useMemo<ProtocolResponsePreviewState>(() => {
     if (preset !== 'custom' || !supportsStructuredResponse) return {};
     try {
+      if (error) throw new Error(error);
       const parsed = JSON.parse(responseSampleJson) as ProtocolJsonValue;
       if (!isJsonObject(parsed) && !Array.isArray(parsed)) {
         throw new Error('响应示例必须是 JSON 对象或数组');
       }
-      return { entries: previewModelProtocolResponse(protocol, parsed) };
+      const currentProtocol = resolveProtocolTestRunDraft(
+        preset, protocol, protocolJson,
+      );
+      return { entries: previewModelProtocolResponse(currentProtocol, parsed) };
     } catch (previewError) {
       return {
         error: previewError instanceof Error ? previewError.message : '返回值结构预览失败',
       };
     }
-  }, [preset, protocol, responseSampleJson, supportsStructuredResponse]);
+  }, [preset, protocol, protocolJson, responseSampleJson, supportsStructuredResponse, error]);
 
   /**
    * 拿真实凭据把当前协议跑一次。
@@ -677,7 +751,7 @@ export default function ModelProtocolEditor({
    * 所以只在用户点按钮时执行，异步协议会一直轮询到出结果，可随时取消。
    */
   const runProtocolTest = async () => {
-    if (describeProtocolTestRunBlocker(preset, apiKey, baseUrl)) return;
+    if (describeProtocolTestRunBlocker(preset, apiKey, baseUrl, !!error || invalidFormFieldsRef.current.size > 0)) return;
     let variables: ModelProtocolVariables;
     try {
       const parsed = JSON.parse(previewVariablesJson) as ProtocolJsonValue;
@@ -717,7 +791,10 @@ export default function ModelProtocolEditor({
         const payload: unknown = await response.json();
         result = { text: parseChatApiResponse(payload, nativeChatProtocol).text };
       } else {
-        result = await executeModelProtocol({ apiKey, baseUrl, protocol, variables, signal: controller.signal });
+        const currentProtocol = resolveProtocolTestRunDraft(
+          preset, protocol, protocolJson, invalidFormFieldsRef.current.size > 0,
+        );
+        result = await executeModelProtocol({ apiKey, baseUrl, protocol: currentProtocol, variables, signal: controller.signal });
       }
       if (controller.signal.aborted) return;
       const parts = [
@@ -745,14 +822,16 @@ export default function ModelProtocolEditor({
     setTestRun({ status: 'idle' });
   };
 
-  const testRunBlocker = describeProtocolTestRunBlocker(preset, apiKey, baseUrl);
+  const testRunBlocker = describeProtocolTestRunBlocker(preset, apiKey, baseUrl, !!error);
   const testRunDisabledReason = testRunBlocker === 'legacy-preset'
     ? t('「自动兼容」不走声明式协议，无法试跑')
     : testRunBlocker === 'missing-base-url'
       ? t('先填写接口地址')
       : testRunBlocker === 'missing-api-key'
         ? t('先填写 API Key')
-        : '';
+        : testRunBlocker === 'invalid-draft'
+          ? t('先修正当前协议草稿中的错误')
+          : '';
   const showReferenceRequest = model.category === 'image' && !workflowMode
     && (preset === 'openai-image' || preset === 'legacy');
 
@@ -803,6 +882,62 @@ export default function ModelProtocolEditor({
         ) : null}
       </div>
 
+      {preset === 'custom' ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-canvas-text-secondary">
+          <span>{t('按文档配置 → 预览请求与响应 → 试跑验证')}</span>
+          <div className="flex items-center gap-2">
+            <span role="status" className="text-xs text-canvas-text-secondary">
+              {copyStatus === 'success' ? t('已复制') : copyStatus === 'error' ? t('复制失败，请重试') : ''}
+            </span>
+            <button
+              type="button"
+              className="ui-btn ui-btn--sm"
+              disabled={copyStatus === 'copying'}
+              onClick={async () => {
+                setCopyStatus('copying');
+                const instructions = [
+                  '请根据我随后提供的需求和厂商 API 文档，修改下面的 AI Canvas 声明式调用协议。',
+                  `模型：${model.name}；类别：${model.category}`,
+                  '',
+                  '## 修改要求',
+                  '- 返回完整、可直接替换的 JSON，并简要说明修改原因。',
+                  '- 不要编造接口路径、参考素材字段、模型能力或响应结构；信息不足时指出缺少的文档。',
+                  '- 保留与需求无关的现有配置；不要把 API Key、令牌或本地文件路径写入 JSON。鉴权由应用注入。',
+                  '- 仅使用下列当前类别可用的变量；保留双花括号模板，不要替换成示例值。',
+                  '- 多参考素材的 $forEach 仅用于 JSON body 数组元素，格式为 {"$forEach":"{{referenceImageUrls}}","$value":{"image_url":{"url":"{{referenceImageUrls}}"}}}；字段形状必须以厂商文档为准。根变量仅允许 referenceImageUrls/referenceVideoUrls/referenceAudioUrls，并且必须属于下列可用变量。',
+                  '- 可选数组元素使用 {"$whenPresent":"{{imageUrls.0}}","$value":{...}}；条件必须是完整变量模板，禁止表达式或动态键。',
+                  `- 异步任务通过 response.taskIdPath 提取任务 ID，在 poll 中使用 {{${submitTaskIdVariable}}}，不要写死任务编号。`,
+                  `- 异步完成后另行读取二进制时，在 poll.response.result 中配置 download: {"method":"GET","path":"/按厂商文档填写/{{${submitTaskIdVariable}}}/content"} 和 mimeType；不能同时配置 urlPath/textPath/base64Path/fetchUrl。`,
+                  '',
+                  '## 可用参数与变量说明',
+                  '变量可用于 path、query、headers 或 body，调用时替换为节点中的实际值。',
+                  ...availableVariables.map((variable) => `- {{${variable}}}：${getVariableTooltip(variable)}`),
+                  `- {{${submitTaskIdVariable}}}：${SUBMIT_TASK_ID_DESCRIPTION}`,
+                  '',
+                  '## 配置说明',
+                  'version 固定为 2；mode 为 sync 或 async。auth 配置 type、name、prefix，密钥由连接注入。',
+                  'submit 配置同源请求的 method、path、pathMode、query、headers、bodyEncoding 和 body。',
+                  'response 配置首次响应：同步从 result 取结果，异步从 taskIdPath 取任务 ID。',
+                  'poll 配置任务查询、成功/失败状态、结果、查询间隔与重试；生成提交和结果下载不自动重试。',
+                  'download 仅允许 method、path、pathMode、headers、query；method 固定 GET，path/query 必须引用本次提交任务 ID。',
+                  '响应路径支持 data.0.url、data.*.url；仅使用受信变量，禁止脚本或表达式。',
+                  '',
+                  '## 当前 JSON 草稿（可能尚未通过校验，请检查）',
+                  '```json',
+                  protocolJson,
+                  '```',
+                ].join('\n');
+                const safeText = apiKey ? instructions.split(apiKey).join('[REDACTED]') : instructions;
+                setCopyStatus(await copyText(safeText) ? 'success' : 'error');
+              }}
+            >
+              <Icon icon="lucide:copy" width="14" />
+              {t('复制给AI修改')}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="provider-protocol-testrun" aria-live="polite">
         <div className="flex flex-wrap items-center gap-2">
           <button
@@ -826,7 +961,7 @@ export default function ModelProtocolEditor({
           ) : null}
           <small className="text-[11px] text-canvas-text-muted">
             {testRunDisabledReason
-              || t('用上面的示例变量真发一次请求，会产生真实调用与计费')}
+              || t('使用示例变量发送一次真实请求，会产生调用与计费')}
           </small>
         </div>
         {testRun.message ? (
@@ -1204,36 +1339,75 @@ export default function ModelProtocolEditor({
                     <input value={pollResponse?.failureValues.join(', ') ?? ''} onChange={(event) => updatePollResponse({ failureValues: event.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} />
                   </label>
                 </div>
-                <div className="provider-protocol-grid is-three">
-                  <label className="provider-protocol-field">
-                    <span>{t('URL 结果路径')}</span>
-                    <input value={pollResult?.urlPath ?? ''} onChange={(event) => updatePollResult({
-                      urlPath: event.target.value || undefined,
-                    })} />
-                  </label>
-                  <label className="provider-protocol-field">
-                    <span>{t('文本结果路径')}</span>
-                    <input value={pollResult?.textPath ?? ''} onChange={(event) => updatePollResult({
-                      textPath: event.target.value || undefined,
-                    })} />
-                  </label>
-                  <label className="provider-protocol-field">
-                    <span>{t('Base64 结果路径')}</span>
-                    <input value={pollResult?.base64Path ?? ''} onChange={(event) => updatePollResult({
-                      base64Path: event.target.value || undefined,
-                    })} />
-                  </label>
-                  {pollResult?.base64Path ? (
+                <label className="provider-protocol-field">
+                  <span>{t('结果获取方式')}</span>
+                  <Select fixedMenu value={pollResult?.download ? 'download' : 'response'} onChange={(value) => {
+                    const mimeType = pollResult?.mimeType;
+                    updatePollResponse({ result: value === 'download'
+                      ? { mimeType, download: { method: 'GET', path: '' } }
+                      : { mimeType, urlPath: 'url' } });
+                  }}>
+                    <option value="response">{t('从响应字段读取')}</option>
+                    <option value="download">{t('完成后同源下载')}</option>
+                  </Select>
+                </label>
+                {pollResult?.download ? (
+                  <>
+                    <div className="provider-protocol-grid is-request">
+                      <label className="provider-protocol-field provider-protocol-path-field">
+                        <span>{t('结果下载路径（GET）')}</span>
+                        <input value={pollResult.download.path} placeholder={t('按接口文档填写，包含本次任务 ID 变量')}
+                          onChange={(event) => updatePollResult({ download: { ...pollResult.download!, path: event.target.value } })} />
+                      </label>
+                      <label className="provider-protocol-field">
+                        <span>{t('路径基准')}</span>
+                        <Select fixedMenu value={pollResult.download.pathMode ?? 'append'} onChange={(value) => updatePollResult({
+                          download: { ...pollResult.download!, pathMode: value as 'append' | 'origin' },
+                        })}>
+                          <option value="append">{t('连接地址')}</option>
+                          <option value="origin">{t('域名根路径')}</option>
+                        </Select>
+                      </label>
+                    </div>
                     <label className="provider-protocol-field">
-                      <span>{t('Base64 MIME 类型')}</span>
-                      <input
-                        value={pollResult.mimeType ?? ''}
-                        placeholder={model.category === 'video' ? 'video/mp4' : model.category === 'audio' ? 'audio/mpeg' : 'image/png'}
-                        onChange={(event) => updatePollResult({ mimeType: event.target.value || undefined })}
-                      />
+                      <span>{t('备用 MIME 类型')}</span>
+                      <input value={pollResult.mimeType ?? ''} placeholder={model.category === 'audio' ? 'audio/mpeg' : 'video/mp4'}
+                        onChange={(event) => updatePollResult({ mimeType: event.target.value || undefined })} />
                     </label>
-                  ) : null}
-                </div>
+                    <p className="text-xs text-canvas-text-muted">{t('仅在轮询成功后读取，同源校验与鉴权沿用当前连接；高级请求头和 Query 可在 JSON 中配置。')}</p>
+                  </>
+                ) : (
+                  <div className="provider-protocol-grid is-three">
+                    <label className="provider-protocol-field">
+                      <span>{t('URL 结果路径')}</span>
+                      <input value={pollResult?.urlPath ?? ''} onChange={(event) => updatePollResult({
+                        urlPath: event.target.value || undefined,
+                      })} />
+                    </label>
+                    <label className="provider-protocol-field">
+                      <span>{t('文本结果路径')}</span>
+                      <input value={pollResult?.textPath ?? ''} onChange={(event) => updatePollResult({
+                        textPath: event.target.value || undefined,
+                      })} />
+                    </label>
+                    <label className="provider-protocol-field">
+                      <span>{t('Base64 结果路径')}</span>
+                      <input value={pollResult?.base64Path ?? ''} onChange={(event) => updatePollResult({
+                        base64Path: event.target.value || undefined,
+                      })} />
+                    </label>
+                    {pollResult?.base64Path ? (
+                      <label className="provider-protocol-field">
+                        <span>{t('Base64 MIME 类型')}</span>
+                        <input
+                          value={pollResult.mimeType ?? ''}
+                          placeholder={model.category === 'video' ? 'video/mp4' : model.category === 'audio' ? 'audio/mpeg' : 'image/png'}
+                          onChange={(event) => updatePollResult({ mimeType: event.target.value || undefined })}
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+                )}
                 <div className="provider-protocol-grid">
                   <label className="provider-protocol-field">
                     <span>{t('错误路径')}</span>
@@ -1349,45 +1523,6 @@ export default function ModelProtocolEditor({
                 </details>
               </>
             ) : null}
-            {supportsStructuredResponse ? (
-              <details className="provider-protocol-response-preview" open>
-                <summary>{t('响应示例与路径校验')}</summary>
-                <div className="provider-protocol-response-preview-content">
-                  <div className="provider-protocol-field min-w-0">
-                    <label htmlFor={responseSampleId}>{t('响应示例 JSON')}</label>
-                    <textarea
-                      id={responseSampleId}
-                      value={responseSampleJson}
-                      rows={8}
-                      spellCheck={false}
-                      autoComplete="off"
-                      aria-invalid={!!responsePreviewState.error}
-                      aria-describedby={responsePreviewState.error ? responseSampleErrorId : undefined}
-                      onChange={(event) => setResponseSampleJson(event.target.value)}
-                    />
-                    {responsePreviewState.error ? (
-                      <small id={responseSampleErrorId} role="alert">
-                        {responsePreviewState.error}
-                      </small>
-                    ) : null}
-                  </div>
-                  <div className="provider-protocol-response-results" aria-live="polite">
-                    <span>{t('路径解析结果')}</span>
-                    {responsePreviewState.entries?.map((entry) => (
-                      <div key={entry.id} className="provider-protocol-response-result">
-                        <div>
-                          <strong>{entry.label}</strong>
-                          <code>{entry.path}</code>
-                        </div>
-                        <code className={entry.matchCount > 0 ? 'is-matched' : ''}>
-                          {entry.matchCount > 0 ? entry.values.join(' | ') : t('未匹配')}
-                        </code>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </details>
-            ) : null}
           </section>
 
           <details className="provider-protocol-variables">
@@ -1399,11 +1534,134 @@ export default function ModelProtocolEditor({
                 </code>
               ))}
               {protocol.mode === 'async' ? (
-                <code data-tooltip={t(SUBMIT_TASK_ID_DESCRIPTION)}>{'{{submit.task_id}}'}</code>
+                <code data-tooltip={t(SUBMIT_TASK_ID_DESCRIPTION)}>{`{{${submitTaskIdVariable}}}`}</code>
               ) : null}
             </div>
           </details>
+        </div>
+      ) : null}
 
+      {preset === 'custom' && (simpleEditor || view === 'json') ? (
+        <div className="min-w-0 space-y-3">
+          <div className="grid min-w-0 grid-cols-[minmax(200px,0.75fr)_minmax(0,1.5fr)] items-start gap-3 max-[700px]:grid-cols-1">
+            <aside className="provider-protocol-json-variables" aria-label={t('当前模型可用变量')}>
+              <div className="provider-protocol-json-guide-title">
+                <Icon icon="mdi:code-braces" width="13" />
+                <strong>{t('可用变量')}</strong>
+                <span>{t('点击插入，悬浮查看说明')}</span>
+              </div>
+              <p className="m-0 text-xs leading-relaxed text-canvas-text-muted">
+                {t('在 JSON 中定位光标，再点击变量插入；选中内容会被替换。')}
+              </p>
+              <div className="flex max-h-96 flex-wrap items-start gap-1 overflow-y-auto max-[700px]:max-h-48">
+                {[...availableVariables, ...(protocol.mode === 'async' ? [submitTaskIdVariable] : [])].map((variable) => (
+                  <button
+                    key={variable}
+                    type="button"
+                    className="ui-chip min-h-5 max-w-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-canvas-text-muted"
+                    aria-label={`${t('插入变量')} {{${variable}}}`}
+                    aria-controls={protocolJsonId}
+                    data-tooltip={t(variable === submitTaskIdVariable ? SUBMIT_TASK_ID_DESCRIPTION : getVariableTooltip(variable))}
+                    onMouseDown={(event) => { if (event.button === 0) event.preventDefault(); }}
+                    onClick={() => insertProtocolVariable(variable)}
+                  >
+                    <code className="font-mono">{`{{${variable}}}`}</code>
+                  </button>
+                ))}
+              </div>
+            </aside>
+            <div className="provider-protocol-field provider-protocol-full-json">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label htmlFor={protocolJsonId} className="text-xs text-canvas-text-secondary">{t('声明式协议 JSON')}</label>
+                {videoJsonEditor ? (
+                  <div className="flex flex-wrap items-center gap-1" role="group" aria-label={t('视频 JSON 预设')}>
+                    <span className="text-[10px] text-canvas-text-muted">APIMart</span>
+                    {(['sd2.0', 'sd2.5', 'h3'] as const).map((templateId) => (
+                      <button
+                        key={templateId}
+                        type="button"
+                        className="ui-btn ui-btn--sm"
+                        aria-label={t('填入 {name} 视频预设（APIMart）', { name: templateId.toUpperCase() })}
+                        title={t('替换当前 JSON，并应用对应的视频参数能力；保留当前模型 ID')}
+                        onClick={() => applyVideoJsonTemplate(templateId)}
+                      >
+                        {templateId.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+              <textarea
+                ref={protocolTextareaRef}
+                id={protocolJsonId}
+                value={protocolJson}
+                rows={24}
+                spellCheck={false}
+                aria-invalid={!!error}
+                aria-describedby={protocolJsonHelpId}
+                onFocus={(event) => rememberProtocolSelection(event.currentTarget)}
+                onSelect={(event) => rememberProtocolSelection(event.currentTarget)}
+                onBlur={(event) => rememberProtocolSelection(event.currentTarget)}
+                onChange={(event) => {
+                  rememberProtocolSelection(event.currentTarget);
+                  updateCustomJson(event.target.value);
+                }}
+              />
+            </div>
+          </div>
+
+          <details className="text-xs text-canvas-text-secondary">
+            <summary className="cursor-pointer">{t('JSON 字段说明')}</summary>
+          <aside id={protocolJsonHelpId} className="provider-protocol-json-help">
+            <div className="provider-protocol-json-guide-title">
+              <Icon icon="mdi:information-outline" width="13" />
+              <strong>{t('配置说明')}</strong>
+              <span>{simpleEditor
+                ? t('选择预设即可使用；接口不兼容时按文档编辑 JSON。')
+                : t('不确定如何填写时，可先在“表单”模式配置，再切回 JSON 查看结果')}</span>
+            </div>
+            <dl>
+              <div>
+                <dt><code>version</code> / <code>mode</code></dt>
+                <dd>{t('协议版本固定为 2；mode 使用 sync 同步返回或 async 异步轮询。')}</dd>
+              </div>
+              <div>
+                <dt><code>auth</code></dt>
+                <dd>{t('定义 API Key 的注入方式。只配置 type、name、prefix，不要把真实密钥写进 JSON。')}</dd>
+              </div>
+              <div>
+                <dt><code>submit</code></dt>
+                <dd>{t('首次请求规则，包括 method、path、query、headers、bodyEncoding 和 body。')}</dd>
+              </div>
+              <div>
+                <dt><code>response</code></dt>
+                <dd>{t('首次响应的解析规则。同步模式从 result 取结果；异步模式用 taskIdPath 取得任务 ID。')}</dd>
+              </div>
+              <div>
+                <dt><code>poll</code></dt>
+                <dd>{t('仅异步模式需要，定义查询请求、完成/失败状态、结果路径、查询间隔与重试策略。')}</dd>
+              </div>
+              <div>
+                <dt>{t('响应路径')}</dt>
+                <dd>{t('用点号读取嵌套字段，例如 data.0.url；用 data.*.url 读取数组内全部 URL。')}</dd>
+              </div>
+              <div>
+                <dt><code>poll.response.result.download</code></dt>
+                <dd>{t('轮询成功后发送同源 GET 请求下载二进制；path 或 query 必须引用本次提交任务 ID，鉴权由连接注入。与 URL、文本、Base64 和 fetchUrl 映射互斥。')}</dd>
+              </div>
+            </dl>
+            {protocol.mode === 'async' ? (
+              <p>
+                {t('异步流程先按 response.taskIdPath 取得任务 ID，再在 poll 中引用：')} <code>{`{{${submitTaskIdVariable}}}`}</code>
+              </p>
+            ) : null}
+          </aside>
+          </details>
+        </div>
+      ) : null}
+
+      {preset === 'custom' ? (
+        <div className="space-y-3">
           <details className="border-t border-canvas-border pt-2.5 text-[12px] text-canvas-text-muted">
             <summary className="w-fit cursor-pointer select-none text-canvas-text-secondary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-canvas-text-muted">
               {t('本地请求预览')}
@@ -1453,137 +1711,46 @@ export default function ModelProtocolEditor({
               </div>
             </div>
           </details>
-        </div>
-      ) : null}
-
-      {preset === 'custom' && (simpleEditor || view === 'json') ? (
-        <div className="provider-protocol-field provider-protocol-full-json">
-          <details className="text-xs text-canvas-text-secondary" aria-label={t('当前模型可用变量')}>
-            <summary className="cursor-pointer text-xs text-canvas-text-secondary">{t('可用变量与说明')}</summary>
-            <div className="provider-protocol-json-variables">
-            <div className="provider-protocol-json-guide-title">
-              <Icon icon="mdi:code-braces" width="13" />
-              <strong>{t('可用变量')}</strong>
-              <span>{t('可放入 path、query、headers 或 body，调用时会替换为节点中的实际值')}</span>
-              <span>{t('（鼠标在变量上悬浮可查看详细说明）')}</span>
-            </div>
-            <div className="provider-protocol-json-variable-list">
-              {availableVariables.map((variable) => (
-                <code key={variable} data-tooltip={t(getVariableTooltip(variable))}>
-                  {`{{${variable}}}`}
-                </code>
-              ))}
-              {protocol.mode === 'async' ? (
-                <code data-tooltip={t(SUBMIT_TASK_ID_DESCRIPTION)}>{'{{submit.task_id}}'}</code>
-              ) : null}
-            </div>
-            </div>
-          </details>
-
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <label htmlFor={protocolJsonId}>{t('声明式协议 JSON')}</label>
-            <div className="flex items-center gap-2">
-              <span role="status" className="text-xs text-canvas-text-secondary">
-                {copyStatus === 'success' ? t('已复制') : copyStatus === 'error' ? t('复制失败，请重试') : ''}
-              </span>
-              <button
-                type="button"
-                className="ui-btn ui-btn--sm"
-                disabled={copyStatus === 'copying'}
-                onClick={async () => {
-                  setCopyStatus('copying');
-                  const instructions = [
-                    '请根据我随后提供的需求和厂商 API 文档，修改下面的 AI Canvas 声明式调用协议。',
-                    `模型：${model.name}；类别：${model.category}`,
-                    '',
-                    '## 修改要求',
-                    '- 返回完整、可直接替换的 JSON，并简要说明修改原因。',
-                    '- 不要编造接口路径、参考素材字段、模型能力或响应结构；信息不足时指出缺少的文档。',
-                    '- 保留与需求无关的现有配置；不要把 API Key、令牌或本地文件路径写入 JSON。鉴权由应用注入。',
-                    '- 仅使用下列当前类别可用的变量；保留双花括号模板，不要替换成示例值。',
-                    '- 可选的 prepare.upload 是提交前的本地素材准备阶段：只有明确配置并将 enabled 设为 true 时，应用才会读取节点引用的本地图片/音频文件并上传；未配置或 enabled 为 false 时不得隐式上传，已有 HTTP(S)/data URL 直接按原值提交。',
-                    '- prepare.upload 必须是完整 JSON 对象，包含 enabled、method（当前只支持 POST）、url、credentialHeader、fileListField、fileIdField、fileField、responseItemsPath、responseFileIdPath、responseUrlPath；responseStatusPath 可选。不要把凭证值写入 JSON，credentialHeader 只填写 Header 名称，凭证由应用设置注入。',
-                    '- 批量上传使用 multipart/form-data。应用会按顺序为每个素材生成 fileId，并把文件放入 `${fileListField}[索引].${fileField}`，同时把 ID 放入 `${fileListField}[索引].${fileIdField}`；不要把本地路径当作上传接口的 URL 参数，也不要把文件内容改写成普通 JSON 字符串。',
-                    '- 上传响应必须能按 responseItemsPath 读到数组；数组每一项用 responseFileIdPath 与原 fileId 对应，并从 responseUrlPath 读取返回的 HTTP(S) 公网 URL。配置 responseStatusPath 后，返回 status=failed 的项必须视为失败。上传完成后，提交请求中的 imageUrls/videoUrls/audioUrls 使用对应的公网 URL 数组。',
-                    '- 当前 prepare.upload 批量上传适用于图片和音频本地素材；如果厂商还要求上传视频，必须先提供明确的厂商字段和响应文档，不能自行猜字段。',
-                    '- 多参考素材的 $forEach 仅用于 JSON body 数组元素，格式为 {"$forEach":"{{referenceImageUrls}}","$value":{"image_url":{"url":"{{referenceImageUrls}}"}}}；字段形状必须以厂商文档为准。根变量仅允许 referenceImageUrls/referenceVideoUrls/referenceAudioUrls，并且必须属于下列可用变量。',
-                    '- 可选数组元素使用 {"$whenPresent":"{{imageUrls.0}}","$value":{...}}；条件必须是完整变量模板，禁止表达式或动态键。',
-                    '- 异步任务通过 response.taskIdPath 提取任务 ID，在 poll 中使用 {{submit.task_id}}，不要写死任务编号。',
-                    '',
-                    '## 可用参数与变量说明',
-                    '变量可用于 path、query、headers 或 body，调用时替换为节点中的实际值。',
-                    ...availableVariables.map((variable) => `- {{${variable}}}：${getVariableTooltip(variable)}`),
-                    `- {{submit.task_id}}：${SUBMIT_TASK_ID_DESCRIPTION}`,
-                    '',
-                    '## 配置说明',
-                    protocolHelpRef.current?.innerText ?? '',
-                    '',
-                    '## 当前 JSON 草稿（可能尚未通过校验，请检查）',
-                    '```json',
-                    protocolJson,
-                    '```',
-                  ].join('\n');
-                  const safeText = apiKey ? instructions.split(apiKey).join('[REDACTED]') : instructions;
-                  setCopyStatus(await copyText(safeText) ? 'success' : 'error');
-                }}
-              >
-                <Icon icon="lucide:copy" width="14" />
-                {t('复制给AI修改')}
-              </button>
-            </div>
-          </div>
-          <textarea
-            id={protocolJsonId}
-            value={protocolJson}
-            spellCheck={false}
-            aria-invalid={!!error}
-            aria-describedby={protocolJsonHelpId}
-            onChange={(event) => updateCustomJson(event.target.value)}
-          />
-
-          <details className="text-xs text-canvas-text-secondary">
-            <summary className="cursor-pointer">{t('JSON 字段说明')}</summary>
-          <aside ref={protocolHelpRef} id={protocolJsonHelpId} className="provider-protocol-json-help">
-            <div className="provider-protocol-json-guide-title">
-              <Icon icon="mdi:information-outline" width="13" />
-              <strong>{t('配置说明')}</strong>
-              <span>{simpleEditor
-                ? t('选择预设即可使用；接口不兼容时按文档编辑 JSON。')
-                : t('不确定如何填写时，可先在“表单”模式配置，再切回 JSON 查看结果')}</span>
-            </div>
-            <dl>
-              <div>
-                <dt><code>version</code> / <code>mode</code></dt>
-                <dd>{t('协议版本固定为 2；mode 使用 sync 同步返回或 async 异步轮询。')}</dd>
+          {supportsStructuredResponse ? (
+            <details className="provider-protocol-response-preview" open>
+              <summary>{t('响应示例与路径校验')}</summary>
+              <div className="provider-protocol-response-preview-content">
+                <div className="provider-protocol-field min-w-0">
+                  <label htmlFor={responseSampleId}>{t('响应示例 JSON')}</label>
+                  <textarea
+                    id={responseSampleId}
+                    className="flex-1"
+                    value={responseSampleJson}
+                    rows={8}
+                    spellCheck={false}
+                    autoComplete="off"
+                    aria-invalid={!!responsePreviewState.error}
+                    aria-describedby={responsePreviewState.error ? responseSampleErrorId : undefined}
+                    onChange={(event) => setResponseSampleJson(event.target.value)}
+                  />
+                  {responsePreviewState.error ? (
+                    <small id={responseSampleErrorId} role="alert">
+                      {responsePreviewState.error}
+                    </small>
+                  ) : null}
+                </div>
+                <div className="provider-protocol-response-results" aria-live="polite">
+                  <span>{t('路径解析结果')}</span>
+                  {responsePreviewState.entries?.map((entry) => (
+                    <div key={entry.id} className="provider-protocol-response-result">
+                      <div>
+                        <strong>{entry.label}</strong>
+                        <code>{entry.path}</code>
+                      </div>
+                      <code className={entry.matchCount > 0 ? 'is-matched' : ''}>
+                        {entry.matchCount > 0 ? entry.values.join(' | ') : t('未匹配')}
+                      </code>
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div>
-                <dt><code>auth</code></dt>
-                <dd>{t('定义 API Key 的注入方式。只配置 type、name、prefix，不要把真实密钥写进 JSON。')}</dd>
-              </div>
-              <div>
-                <dt><code>submit</code></dt>
-                <dd>{t('首次请求规则，包括 method、path、query、headers、bodyEncoding 和 body。')}</dd>
-              </div>
-              <div>
-                <dt><code>response</code></dt>
-                <dd>{t('首次响应的解析规则。同步模式从 result 取结果；异步模式用 taskIdPath 取得任务 ID。')}</dd>
-              </div>
-              <div>
-                <dt><code>poll</code></dt>
-                <dd>{t('仅异步模式需要，定义查询请求、完成/失败状态、结果路径、查询间隔与重试策略。')}</dd>
-              </div>
-              <div>
-                <dt>{t('响应路径')}</dt>
-                <dd>{t('用点号读取嵌套字段，例如 data.0.url；用 data.*.url 读取数组内全部 URL。')}</dd>
-              </div>
-            </dl>
-            {protocol.mode === 'async' ? (
-              <p>
-                {t('异步流程先按 response.taskIdPath 取得任务 ID，再在 poll 中通过 {{submit.task_id}} 引用。')}
-              </p>
-            ) : null}
-          </aside>
-          </details>
+            </details>
+          ) : null}
         </div>
       ) : null}
 

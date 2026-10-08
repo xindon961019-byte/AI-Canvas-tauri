@@ -1334,8 +1334,8 @@
 }
 
 .provider-dialog {
-  width: min(760px, calc(100vw - 32px));
-  height: min(680px, calc(100vh - 32px));
+  width: min(900px, 90vw);
+  height: min(940px, 90vh);
   border-radius: 8px;
   background: var(--theme-surface);
 }
@@ -2082,6 +2082,10 @@
   font-size: 12px;
   line-height: 1.4;
 }
+.provider-protocol-json-variables .ui-chip {
+  padding: 2px 6px;
+  font-size: 10px;
+}
 .provider-protocol-json-guide-title svg {
   flex: 0 0 auto;
   color: var(--brand-light);
@@ -2316,10 +2320,6 @@
 }
 
 @media (max-width: 700px) {
-  .provider-dialog {
-    width: calc(100vw - 20px);
-    height: calc(100vh - 20px);
-  }
   .provider-picker-grid,
   .provider-fields-grid {
     grid-template-columns: minmax(0, 1fr);

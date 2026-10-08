@@ -7,6 +7,7 @@ import { Icon } from '@iconify/react';
 import type { SettingsTab } from '../../store/store.ui';
 import AnimatedButton from '../shared/AnimatedButton';
 import { useT } from '../../i18n';
+import { useAppVersion } from '../../hooks/useAppVersion';
 
 const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: 'general', label: '常规' },
@@ -81,6 +82,7 @@ export default function SettingsNavigation({
   onSelect: (tab: SettingsTab) => void;
 }) {
   const t = useT();
+  const appVersion = useAppVersion();
   return (
     <aside className="w-60 settings-sidebar p-2.5 pb-0 flex flex-col justify-between shrink-0 select-none">
       <nav aria-label={t('设置菜单')} className="space-y-1">
@@ -104,7 +106,7 @@ export default function SettingsNavigation({
       </nav>
 
       <div className="settings-sidebar-footer px-3 py-2 text-[11px] flex items-center justify-between">
-        <span>v0.9.21 Pro</span>
+        <span>v{appVersion} Pro</span>
         <span className="inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
           {t('运行正常')}

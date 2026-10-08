@@ -169,6 +169,15 @@ export function clearTextPreviewCache(): void {
   textPreviewCache.clear();
 }
 
+/** 保存文本后刷新等尺寸文件的已挂载缩略内容。 */
+export const ASSET_TEXT_UPDATED_EVENT = 'asset-text-updated';
+export function invalidateTextPreview(filePath: string): void {
+  for (const key of textPreviewCache.keys()) {
+    if (key.startsWith(`${filePath}:`)) textPreviewCache.delete(key);
+  }
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(ASSET_TEXT_UPDATED_EVENT, { detail: filePath }));
+}
+
 function setPreviewCache(key: string, val: string): void {
   if (textPreviewCache.size >= TEXT_PREVIEW_CACHE_MAX) {
     const firstKey = textPreviewCache.keys().next().value;

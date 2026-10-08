@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager, Runtime, Webview};
@@ -59,6 +59,39 @@ const SUPPORTED_PERMISSIONS: [&str; 11] = [
 ];
 
 static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
+
+// 这里只缓存校验过的不可变字节，不缓存权限；每次分段读取仍先检查活动 revision。
+const MAX_VERIFIED_RESOURCE_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_VERIFIED_RESOURCE_CACHE_ENTRIES: usize = 16;
+#[derive(Default)]
+struct VerifiedResourceCache {
+    entries: VecDeque<VerifiedResourceEntry>,
+    bytes: usize,
+}
+struct VerifiedResourceEntry {
+    plugin_id: String,
+    path: PathBuf,
+    revision_digest: String,
+    resource_digest: String,
+    modified: SystemTime,
+    created: Option<SystemTime>,
+    bytes: Arc<[u8]>,
+}
+static VERIFIED_RESOURCE_CACHE: OnceLock<Mutex<VerifiedResourceCache>> = OnceLock::new();
+
+fn verified_resource_cache() -> &'static Mutex<VerifiedResourceCache> {
+    VERIFIED_RESOURCE_CACHE.get_or_init(|| Mutex::new(VerifiedResourceCache::default()))
+}
+
+fn revoke_verified_resources(plugin_id: Option<&str>) {
+    let mut cache = verified_resource_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .entries
+        .retain(|entry| plugin_id.is_some_and(|id| entry.plugin_id != id));
+    cache.bytes = cache.entries.iter().map(|entry| entry.bytes.len()).sum();
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1454,6 +1487,79 @@ fn read_verified_resource_at(
     Ok(bytes)
 }
 
+// 命中也核对文件类型、大小和版本；磁盘变化后重新读取并验证 SHA-256。
+fn read_cached_resource_at(
+    private_dir: &Path,
+    plugin_id: &str,
+    revision: &PluginRevision,
+    resource_id: &str,
+    cache: &mut VerifiedResourceCache,
+) -> Result<Arc<[u8]>, String> {
+    let resource = revision
+        .resources
+        .iter()
+        .find(|resource| resource.id == resource_id)
+        .ok_or_else(|| "插件包资源未在当前 revision 声明".to_string())?;
+    let path = resource_snapshot_path(private_dir, plugin_id, revision, resource_id);
+    let metadata = fs::symlink_metadata(&path).map_err(|_| "插件包资源快照不存在".to_string())?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() as usize != resource.bytes
+    {
+        return Err("插件包资源快照不安全或大小不匹配".to_string());
+    }
+    let modified = metadata.modified().ok();
+    let created = metadata.created().ok();
+    if let Some(index) = cache.entries.iter().position(|entry| {
+        entry.path == path
+            && entry.revision_digest == revision.revision_digest
+            && entry.resource_digest == resource.digest
+    }) {
+        let entry = cache.entries.remove(index).expect("cached resource index");
+        if modified == Some(entry.modified)
+            && created == entry.created
+            && entry.bytes.len() == resource.bytes
+        {
+            let bytes = Arc::clone(&entry.bytes);
+            cache.entries.push_back(entry);
+            return Ok(bytes);
+        }
+        cache.bytes -= entry.bytes.len();
+    }
+    let bytes: Arc<[u8]> =
+        read_verified_resource_at(private_dir, plugin_id, revision, resource_id)?.into();
+    // 时间戳不可用或读取过程中有变化时，仅返回已验证内容，不缓存不稳定的文件版本。
+    let after = fs::symlink_metadata(&path).map_err(|_| "插件包资源快照不存在".to_string())?;
+    if let Some(modified) = modified.filter(|modified| {
+        after.modified().ok() == Some(*modified)
+            && after.created().ok() == created
+            && after.len() == metadata.len()
+            && after.file_type().is_file()
+            && !after.file_type().is_symlink()
+    }) {
+        while cache.entries.len() >= MAX_VERIFIED_RESOURCE_CACHE_ENTRIES
+            || cache.bytes + bytes.len() > MAX_VERIFIED_RESOURCE_CACHE_BYTES
+        {
+            if let Some(entry) = cache.entries.pop_front() {
+                cache.bytes -= entry.bytes.len();
+            } else {
+                break;
+            }
+        }
+        cache.bytes += bytes.len();
+        cache.entries.push_back(VerifiedResourceEntry {
+            plugin_id: plugin_id.to_string(),
+            path,
+            revision_digest: revision.revision_digest.clone(),
+            resource_digest: resource.digest.clone(),
+            modified,
+            created,
+            bytes: Arc::clone(&bytes),
+        });
+    }
+    Ok(bytes)
+}
+
 /// UI 产物按摘要内容寻址，与入口源码目录彻底分离。
 /// 这样「仅更新 UI、主源码不变」时不会覆盖活动版本的 UI 文件，也不会让
 /// active/previous/staged 因共享 source_digest 而产生回滚歧义。
@@ -1817,6 +1923,7 @@ fn activation_requires_cancel(
 /// `cancel_plugin_invocations` 只短暂持有 invocation map；Python 注册流程释放该 map 后才会
 /// 再读取注册表，因此这里采用 registry -> invocation 的锁顺序不会形成反向等待。
 fn cancel_committed_plugin_invocations(plugin_id: &str) {
+    revoke_verified_resources(Some(plugin_id));
     crate::plugin_runtime::cancel_plugin_invocations(plugin_id);
     crate::plugin_host_effects::cancel_plugin_requests(Some(plugin_id));
     crate::plugin_window::revoke_plugin_sessions(plugin_id);
@@ -2316,6 +2423,7 @@ pub async fn repair_plugin_registry(app: AppHandle, webview: Webview) -> Result<
         repair_corrupt_registry_at(&private_dir)?
     };
     if repaired {
+        revoke_verified_resources(None);
         crate::plugin_runtime::cancel_all_plugin_invocations();
         crate::plugin_host_effects::cancel_plugin_requests(None);
         crate::plugin_window::revoke_all_sessions_for_registry_repair();
@@ -2458,37 +2566,47 @@ pub async fn read_plugin_package_resource(
         return Err("插件包资源单次读取不能超过 256 KiB".to_string());
     }
     let private_dir = plugin_private_dir(&app)?;
-    let _guard = REGISTRY_LOCK
-        .lock()
-        .map_err(|_| "插件信任注册表锁异常".to_string())?;
-    let registry = read_registry_at(&private_dir)?;
-    let record = registry
-        .plugins
-        .get(&plugin_id)
-        .ok_or_else(|| "插件未注册或已移除".to_string())?;
-    if !record.enabled {
-        return Err("插件已停用".to_string());
-    }
-    let revision = record
-        .active
-        .as_ref()
-        .filter(|revision| {
-            revision.source_digest == source_digest && revision.revision_digest == revision_digest
-        })
-        .ok_or_else(|| "插件活动 revision 摘要不匹配".to_string())?;
-    if !revision
-        .permissions
-        .iter()
-        .any(|permission| permission == "plugin.resources.read")
-    {
-        return Err("插件未声明 plugin.resources.read 权限".to_string());
-    }
-    let bytes = read_verified_resource_at(&private_dir, &plugin_id, revision, &resource_id)?;
-    let end = offset
-        .checked_add(length)
-        .filter(|end| *end <= bytes.len())
-        .ok_or_else(|| "插件包资源读取范围无效".to_string())?;
-    Ok(bytes[offset..end].to_vec())
+    // 锁等待、磁盘读取和哈希都放到阻塞池，避免占住异步运行线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = REGISTRY_LOCK
+            .lock()
+            .map_err(|_| "插件信任注册表锁异常".to_string())?;
+        let registry = read_registry_at(&private_dir)?;
+        let record = registry
+            .plugins
+            .get(&plugin_id)
+            .ok_or_else(|| "插件未注册或已移除".to_string())?;
+        if !record.enabled {
+            return Err("插件已停用".to_string());
+        }
+        let revision = record
+            .active
+            .as_ref()
+            .filter(|revision| {
+                revision.source_digest == source_digest
+                    && revision.revision_digest == revision_digest
+            })
+            .ok_or_else(|| "插件活动 revision 摘要不匹配".to_string())?;
+        if !revision
+            .permissions
+            .iter()
+            .any(|permission| permission == "plugin.resources.read")
+        {
+            return Err("插件未声明 plugin.resources.read 权限".to_string());
+        }
+        let mut cache = verified_resource_cache()
+            .lock()
+            .map_err(|_| "插件资源缓存锁异常".to_string())?;
+        let bytes =
+            read_cached_resource_at(&private_dir, &plugin_id, revision, &resource_id, &mut cache)?;
+        let end = offset
+            .checked_add(length)
+            .filter(|end| *end <= bytes.len())
+            .ok_or_else(|| "插件包资源读取范围无效".to_string())?;
+        Ok(bytes[offset..end].to_vec())
+    })
+    .await
+    .map_err(|_| "插件包资源读取任务失败".to_string())?
 }
 
 #[cfg(test)]
@@ -2718,6 +2836,171 @@ mod tests {
             read_verified_resource_at(&directory, &plugin_id, &revision, "template")
                 .unwrap_err()
                 .contains("摘要不匹配")
+        );
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn cached_resources_reuse_verified_bytes_and_reject_changed_or_missing_files() {
+        let directory = temporary_directory("cached-resources");
+        let bytes = b"ABC".to_vec();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let mut value = manifest("javascript");
+        value["permissions"] = json!(["plugin.resources.read"]);
+        value["resources"] = json!([{
+            "id": "template", "path": "resources/template.txt",
+            "integrity": digest, "mediaType": "text/plain", "bytes": bytes.len()
+        }]);
+        let payloads = vec![PluginPackageResourcePayload {
+            id: "template".into(),
+            bytes: bytes.clone(),
+        }];
+        let (id, revision) =
+            parse_revision_with_resources(&value, "definePlugin({ tools: {} });", None, &payloads)
+                .unwrap();
+        write_resource_snapshots_at(&directory, &id, &revision, &payloads).unwrap();
+        let mut cache = VerifiedResourceCache::default();
+        let first =
+            read_cached_resource_at(&directory, &id, &revision, "template", &mut cache).unwrap();
+        for _ in 0..64 {
+            let next = read_cached_resource_at(&directory, &id, &revision, "template", &mut cache)
+                .unwrap();
+            assert!(Arc::ptr_eq(&first, &next));
+        }
+        assert_eq!(cache.bytes, bytes.len());
+        let path = resource_snapshot_path(&directory, &id, &revision, "template");
+        fs::write(&path, b"ABD").unwrap();
+        fs::File::open(&path)
+            .unwrap()
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(
+            read_cached_resource_at(&directory, &id, &revision, "template", &mut cache)
+                .unwrap_err()
+                .contains("摘要不匹配")
+        );
+        fs::remove_file(&path).unwrap();
+        assert!(
+            read_cached_resource_at(&directory, &id, &revision, "template", &mut cache).is_err()
+        );
+        // 缓存持有的是先前已验证的不可变内容，磁盘篡改不会改变它。
+        assert_eq!(first.as_ref(), bytes.as_slice());
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn cached_resources_evict_lru_at_byte_budget() {
+        let directory = temporary_directory("resource-cache-byte-budget");
+        let payloads: Vec<_> = (0..3)
+            .map(|index| PluginPackageResourcePayload {
+                id: format!("resource-{index}"),
+                bytes: vec![index as u8; MAX_PACKAGE_RESOURCE_BYTES],
+            })
+            .collect();
+        let resources: Vec<_> = payloads
+            .iter()
+            .map(|payload| {
+                json!({
+                    "id": payload.id, "path": format!("resources/{}.bin", payload.id),
+                    "integrity": format!("{:x}", Sha256::digest(&payload.bytes)),
+                    "mediaType": "application/octet-stream", "bytes": payload.bytes.len()
+                })
+            })
+            .collect();
+        let mut value = manifest("javascript");
+        value["permissions"] = json!(["plugin.resources.read"]);
+        value["resources"] = json!(resources);
+        let (id, revision) =
+            parse_revision_with_resources(&value, "definePlugin({ tools: {} });", None, &payloads)
+                .unwrap();
+        write_resource_snapshots_at(&directory, &id, &revision, &payloads).unwrap();
+        let mut cache = VerifiedResourceCache::default();
+        let first =
+            read_cached_resource_at(&directory, &id, &revision, "resource-0", &mut cache).unwrap();
+        read_cached_resource_at(&directory, &id, &revision, "resource-1", &mut cache).unwrap();
+        assert_eq!(cache.bytes, MAX_VERIFIED_RESOURCE_CACHE_BYTES);
+        assert_eq!(cache.entries.len(), 2);
+        let reused =
+            read_cached_resource_at(&directory, &id, &revision, "resource-0", &mut cache).unwrap();
+        assert!(Arc::ptr_eq(&first, &reused));
+        // 命中 0 后应淘汰更久没读的 1；这次触及的是字节上限，而非条目上限。
+        read_cached_resource_at(&directory, &id, &revision, "resource-2", &mut cache).unwrap();
+        assert_eq!(cache.bytes, MAX_VERIFIED_RESOURCE_CACHE_BYTES);
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(
+            cache
+                .entries
+                .iter()
+                .map(|entry| entry.path.file_name().unwrap().to_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["resource-0.bin", "resource-2.bin"]
+        );
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn cached_resources_are_bounded_and_plugin_revocation_releases_them() {
+        let directory = temporary_directory("bounded-resource-cache");
+        let payloads: Vec<_> = (0..17)
+            .map(|index| PluginPackageResourcePayload {
+                id: format!("resource-{index}"),
+                bytes: vec![index as u8; 64],
+            })
+            .collect();
+        let resources: Vec<_> = payloads
+            .iter()
+            .map(|payload| {
+                json!({
+                    "id": payload.id, "path": format!("resources/{}.bin", payload.id),
+                    "integrity": format!("{:x}", Sha256::digest(&payload.bytes)),
+                    "mediaType": "application/octet-stream", "bytes": payload.bytes.len()
+                })
+            })
+            .collect();
+        let mut value = manifest("javascript");
+        value["permissions"] = json!(["plugin.resources.read"]);
+        value["resources"] = json!(resources);
+        let (id, revision) =
+            parse_revision_with_resources(&value, "definePlugin({ tools: {} });", None, &payloads)
+                .unwrap();
+        write_resource_snapshots_at(&directory, &id, &revision, &payloads).unwrap();
+        let mut cache = VerifiedResourceCache::default();
+        for payload in &payloads {
+            read_cached_resource_at(&directory, &id, &revision, &payload.id, &mut cache).unwrap();
+        }
+        assert_eq!(cache.entries.len(), MAX_VERIFIED_RESOURCE_CACHE_ENTRIES);
+        assert_eq!(cache.bytes, 16 * 64);
+        assert!(cache.bytes <= MAX_VERIFIED_RESOURCE_CACHE_BYTES);
+        assert!(cache
+            .entries
+            .iter()
+            .all(|entry| !entry.path.ends_with("resource-0.bin")));
+        // 使用独立插件 ID，不影响并行执行的其他测试缓存。
+        let revoked_id = format!(
+            "cached-{}",
+            directory.file_name().unwrap().to_string_lossy()
+        );
+        for entry in &mut cache.entries {
+            entry.plugin_id = revoked_id.clone();
+        }
+        {
+            let mut shared = verified_resource_cache().lock().unwrap();
+            shared.bytes += cache.bytes;
+            shared.entries.extend(cache.entries);
+        }
+        revoke_verified_resources(Some(&revoked_id));
+        let shared = verified_resource_cache().lock().unwrap();
+        assert!(shared
+            .entries
+            .iter()
+            .all(|entry| entry.plugin_id != revoked_id));
+        assert_eq!(
+            shared.bytes,
+            shared
+                .entries
+                .iter()
+                .map(|entry| entry.bytes.len())
+                .sum::<usize>()
         );
         fs::remove_dir_all(directory).ok();
     }

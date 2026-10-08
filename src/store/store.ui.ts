@@ -125,7 +125,9 @@ export const createUISlice: StateCreator<AppState, [], [], UISlice> = (set) => (
   },
   saveAssetImageDetails: async (file, input, options) => {
     const { saveAssetImageMetadata } = await import('../services/fs/assetImageMetadata');
-    return saveAssetImageMetadata(file, input, options);
+    const record = await saveAssetImageMetadata(file, input, options);
+    if (input.tagReplacement) set((state) => ({ recentAssetsRevision: state.recentAssetsRevision + 1 }));
+    return record;
   },
   settingsOpen: false,
   settingsInitialTab: null,

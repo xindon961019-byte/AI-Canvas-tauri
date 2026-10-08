@@ -135,6 +135,10 @@ export async function generateImagesBatch(
   const providerConfig = config.providers[connectionId];
   const modelName = generalModel?.modelId ?? extractModelName(model, provider);
   const providerDefinition = getProviderDefinition(connectionId, providerConfig);
+  if (providerDefinition?.id === 'cccapi' && !providerConfig?.apiKey?.trim()) {
+    const group = providerConfig?.cccGroup ? `「${providerConfig.cccGroup}」分组` : '连接';
+    throw new Error(`未配置 CCC API ${group}的 API Key\n请在「设置 → API Key」中配置对应连接`);
+  }
   const catalogModel = providerDefinition?.models?.find((item) => item.id === modelName);
   // 已确认的内置合同优先，未知模型、自定义连接与工作流保持自己的协议。
   const builtInContract = params.workflowId ? undefined

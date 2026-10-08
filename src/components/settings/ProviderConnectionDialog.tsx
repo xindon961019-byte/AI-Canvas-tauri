@@ -8,6 +8,7 @@ import { Icon } from '@iconify/react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type {
+  ApiProviderConfig,
   ChatApiProtocol,
   GeneralModelCategory,
   ImageReferenceRequestMode,
@@ -42,7 +43,7 @@ import { useT } from '../../i18n';
 import AnimatedButton from '../shared/AnimatedButton';
 import ModalOverlay from '../shared/ModalOverlay';
 import PopupCloseButton from '../shared/PopupCloseButton';
-import ProviderConnectionForm from './providerConnection/ProviderConnectionForm';
+import ProviderConnectionForm, { CccGroupConnectionsForm } from './providerConnection/ProviderConnectionForm';
 import ProviderModelSection from './providerConnection/ProviderModelSection';
 import ProviderWorkflowSection from './providerConnection/ProviderWorkflowSection';
 import type { WorkflowApiDraft } from '../../types/workflowApi';
@@ -83,7 +84,8 @@ export default function ProviderConnectionDialog({
   onDreaminaLogin,
   onClose,
   onSave,
-}: ProviderConnectionDialogProps) {
+  onSaveCccGroups,
+}: ProviderConnectionDialogProps & { onSaveCccGroups: (connections: Record<string, ApiProviderConfig>) => Promise<void> }) {
   const t = useT();
   const editing = !!connectionId && !!initialConfig;
   const initialDefinitionId = initialConfig?.catalogId || connectionId || '';
@@ -154,6 +156,7 @@ export default function ProviderConnectionDialog({
       return item.id === 'tavily' && (!hasWebSearchConnection || isWebSearchProvider);
     }
     return item.id === 'custom-openai'
+      || item.id === 'cccapi'
       || item.kind === 'workflow-api'
       || item.id === initialDefinitionId
       || !connectedProviderIds.includes(item.id);
@@ -213,6 +216,7 @@ export default function ProviderConnectionDialog({
   const workflowOnlyConnection = definition?.id === 'runninghub-model' && !!workflowApiKey.trim() && !apiKey.trim();
 
   const chooseDefinition = (nextDefinition: ProviderDefinition) => {
+    abortRef.current?.abort();
     const savedConfig = nextDefinition.kind === 'web-search'
       ? providerConfigs[nextDefinition.id]
       : undefined;
@@ -223,7 +227,7 @@ export default function ProviderConnectionDialog({
     setBaseUrl(savedConfig?.baseUrl || nextDefinition.defaultBaseUrl || '');
     setAssetLibraryConfig(savedConfig?.assetLibrary);
     setWorkflowApiKey('');
-    const localModels = fallbackModels[nextDefinition.id] || [];
+    const localModels = nextDefinition.id === 'cccapi' ? [] : fallbackModels[nextDefinition.id] || [];
     setModels(localModels);
     setSelectedIds(new Set());
     setCatalogStatus(localModels.length > 0 ? 'ready' : 'idle');
@@ -278,9 +282,23 @@ export default function ProviderConnectionDialog({
         fallbackModels: fallbackModels[definition.id] || [],
         signal: controller.signal,
       });
+      if (controller.signal.aborted) return;
       const resolvedBaseUrl = result.resolvedBaseUrl || baseUrl;
-      setModels((current) => mergeModels(current, result.models)
+      const remoteIds = new Set(result.models.map((model) => model.id));
+      setModels((current) => mergeModels(
+        definition.id === 'cccapi' ? current.filter((model) => remoteIds.has(model.id)) : current,
+        result.models,
+      )
         .map((model) => applyKnownVideoTemplateDefaults(model, resolvedBaseUrl)));
+      if (definition.id === 'cccapi') {
+        setSelectedIds((current) => new Set([...current].filter((id) => remoteIds.has(id))));
+        if (protocolModelId && !remoteIds.has(protocolModelId)) {
+          setProtocolModelId(null);
+          setProtocolValid(true);
+        }
+        if (videoCapabilityModelId && !remoteIds.has(videoCapabilityModelId)) setVideoCapabilityModelId(null);
+        if (categoryEditModelId && !remoteIds.has(categoryEditModelId)) setCategoryEditModelId(null);
+      }
       setCatalogStatus(result.warning ? 'warning' : 'ready');
       const corrected = adoptResolvedBaseUrl(result.resolvedBaseUrl);
       setCatalogMessage(
@@ -293,7 +311,7 @@ export default function ProviderConnectionDialog({
           : t('已获取 {count} 个模型', { count: result.models.length })),
       );
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return;
+      if (controller.signal.aborted || error instanceof DOMException && error.name === 'AbortError') return;
       setCatalogStatus('error');
       setCatalogMessage(error instanceof Error ? error.message : t('模型列表拉取失败'));
     }
@@ -313,6 +331,11 @@ export default function ProviderConnectionDialog({
 
   const handleTestConnection = async () => {
     if (!definition || missingCredentials) return;
+    if (definition.id === 'cccapi') {
+      // 用该 Key 的模型目录验证分组连接，同时刷新它自己的可选模型。
+      await handleFetchModels();
+      return;
+    }
     setCatalogStatus('loading');
     setCatalogMessage(t('正在验证 {name} 连接...', { name: definition.name }));
     if (definition.id === 'runninghub-model') {
@@ -423,6 +446,11 @@ export default function ProviderConnectionDialog({
     setSelectedIds((current) => new Set(current).add(id));
     setManualModelId('');
     setManualModelName('');
+    if (definition.id === 'custom-openai' && model.category === 'video') {
+      setProtocolModelId(id);
+      setVideoCapabilityModelId(null);
+      setProtocolValid(true);
+    }
   };
 
   const updateModelCategory = (modelId: string, nextCategory: GeneralModelCategory) => {
@@ -559,12 +587,14 @@ export default function ProviderConnectionDialog({
   };
 
   const closeDialog = () => {
+    abortRef.current?.abort();
     setProtocolImportOpen(false);
     setProtocolImportSnapshot(null);
     onClose();
   };
 
   const returnToDefinitionPicker = () => {
+    abortRef.current?.abort();
     setProtocolImportOpen(false);
     setProtocolImportSnapshot(null);
     setDefinitionId('');
@@ -688,6 +718,9 @@ export default function ProviderConnectionDialog({
             ))}
           </div>
         </div>
+      ) : definition.id === 'cccapi' ? (
+        <CccGroupConnectionsForm providerConfigs={providerConfigs} presetModels={fallbackModels.cccapi || []}
+          onSave={onSaveCccGroups} onClose={closeDialog} onReturnToPicker={editing ? undefined : returnToDefinitionPicker} />
       ) : (
         <>
           <div className="provider-dialog-body">

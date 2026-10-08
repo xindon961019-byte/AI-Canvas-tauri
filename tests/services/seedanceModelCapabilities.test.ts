@@ -66,10 +66,12 @@ describe('Seedance capability templates', () => {
   it('keeps APIMart transport limits and field names as a provider overlay', () => {
     const template = createSeedanceQuickAdaptTemplate('2.5', 'apimart');
     expect(template.capability).toMatchObject({
-      resolutions: ['480p', '720p'],
+      resolutions: ['480p', '720p', '1080p'],
       defaultDuration: 5,
     });
-    expect(template.capability).not.toHaveProperty('automaticDurationValue');
+    expect(template.capability.automaticDurationValue).toBe(-1);
+    expect(template.capability).not.toHaveProperty('operationCapabilities');
+    expect(getOfficialSeedanceCapability('2.5').operationCapabilities?.['video-to-video']?.automaticDurationOnly).toBe(true);
     expect(template.executionProfile.protocol?.submit).toMatchObject({
       path: '/videos/generations',
       body: {

@@ -110,6 +110,10 @@ export interface ModelProtocolResultConfig {
   };
   /** 使用当前协议鉴权下载同源 URL，并将结果归一化为 data URL。 */
   fetchUrl?: boolean;
+  /** 异步任务完成后按提交任务 ID 读取二进制结果；与响应字段映射互斥。 */
+  download?: Pick<ModelProtocolRequestTemplate, 'path' | 'pathMode' | 'headers' | 'query'> & {
+    method: 'GET';
+  };
 }
 
 export interface ModelProtocolResponseConfig {
@@ -375,6 +379,8 @@ export interface ResolvedModelProtocolPoll {
   resultMimeType?: string;
   resultBase64Transform?: ModelProtocolResultConfig['base64Transform'];
   resultFetchUrl?: boolean;
+  /** 已绑定本次任务的下载请求，不包含 API Key 或完整提交响应。 */
+  resultDownload?: { url: string; headers?: Record<string, string> };
   errorPath?: string;
   progressPath?: string;
   intervalMs: number;

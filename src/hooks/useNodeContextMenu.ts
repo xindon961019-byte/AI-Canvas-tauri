@@ -115,15 +115,15 @@ export function useNodeContextMenu() {
 
   // ── Copy ──
   const handleCopy = useCallback(() => {
-    copySelectedNodes();
+    const copied = copySelectedNodes();
     closeMenu();
-    useAppStore.getState().showToast(t('节点已复制'));
+    if (copied) useAppStore.getState().showToast(t('节点已复制'));
   }, [copySelectedNodes, closeMenu, t]);
 
   // ── Cut: copy + delete ──
   const handleCut = useCallback(() => {
     if (!menu.nodeId) return;
-    copySelectedNodes();
+    if (!copySelectedNodes()) { closeMenu(); return; }
     deleteNode(menu.nodeId);
     closeMenu();
     useAppStore.getState().showToast(t('节点已剪切'));
@@ -158,7 +158,7 @@ export function useNodeContextMenu() {
     if (!menu.nodeId) return;
     const source = nodes.find((n) => n.id === menu.nodeId);
     if (!source) return;
-    copySelectedNodes();
+    if (!copySelectedNodes()) { closeMenu(); return; }
     pasteNodes({ x: source.position.x + 30, y: source.position.y + 30 });
     closeMenu();
     useAppStore.getState().showToast(t('节点已创建副本'));

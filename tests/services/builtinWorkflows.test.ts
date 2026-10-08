@@ -28,7 +28,7 @@ vi.mock('../../src/services/nodeReferenceService', () => ({
 }));
 
 import { pendingBuiltInWorkflows, resetBuiltInWorkflows, withBuiltInEditableContent } from '../../src/services/builtinWorkflows';
-import { executeComfyUIAudioGenerate, executeComfyUIVideoGenerate } from '../../src/services/comfyWorkflowService';
+import { executeComfyUIGenerate, executeComfyUIAudioGenerate, executeComfyUIVideoGenerate } from '../../src/services/comfyWorkflowService';
 import { extractComfyUIIONodes } from '../../src/services/comfyUIWindowService';
 import { resolveVideoSubmissionControls } from '../../src/services/ai/videoRequestResolver';
 import type { WorkflowDefinition } from '../../src/types';
@@ -75,10 +75,11 @@ beforeEach(() => {
 });
 
 describe('内置 MiniMax H3 工作流', () => {
-  it('首次启动播种十个视频与七个音频工作流，之后不再重复添加', () => {
+  it('首次启动播种一个图片、十一个视频与七个音频工作流，之后不再重复添加', () => {
     const first = pendingBuiltInWorkflows([]);
-    expect(first).toHaveLength(17);
-    expect(first.filter((workflow) => workflow.category === 'ai-video')).toHaveLength(10);
+    expect(first).toHaveLength(19);
+    expect(first.filter((workflow) => workflow.category === 'ai-image')).toHaveLength(1);
+    expect(first.filter((workflow) => workflow.category === 'ai-video')).toHaveLength(11);
     expect(first.filter((workflow) => workflow.category === 'ai-audio')).toHaveLength(7);
     expect(pendingBuiltInWorkflows([])).toHaveLength(0);
   });
@@ -90,7 +91,7 @@ describe('内置 MiniMax H3 工作流', () => {
     );
     const pending = pendingBuiltInWorkflows([]);
     expect(pending.map((workflow) => workflow.id)).not.toContain('builtin-minimax-h3-t2v');
-    expect(pending).toHaveLength(16);
+    expect(pending).toHaveLength(18);
   });
 
   it('默认 IO 节点都能在工作流 JSON 里找到对应的输入', () => {
@@ -283,7 +284,7 @@ describe('内置 AuK 音频工作流', () => {
     expect(pending.map((workflow) => workflow.id)).toEqual(['builtin-auk-tts', 'builtin-auk-voice-cloning']);
     expect(existing[0].name).toBe('用户修改的名字');
     expect(pendingBuiltInWorkflows(existing)).toEqual([]);
-    expect(resetBuiltInWorkflows()).toHaveLength(17);
+    expect(resetBuiltInWorkflows()).toHaveLength(19);
   });
 
   it.each(['builtin-auk-tts', 'builtin-auk-voice-cloning'])('%s 保留可编辑布局、模型、采样参数和全部执行连线', (id) => {
@@ -419,6 +420,121 @@ describe('内置 AuK 音频工作流', () => {
 
 });
 
+describe('内置 DLSS5 材质增强工作流', () => {
+  const ids = ['builtin-dlss5-image-enhance', 'builtin-dlss5-video-enhance'];
+
+  function install(id: string) {
+    const workflows = pendingBuiltInWorkflows([]);
+    mocks.storeState.workflows = workflows as unknown as Array<Record<string, unknown>>;
+    return workflows.find((workflow) => workflow.id === id)!;
+  }
+
+  beforeEach(() => {
+    mocks.corsSafeFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/upload/image')) {
+        const file = (init?.body as FormData).get('image') as File;
+        return jsonResponse({ name: file.type.startsWith('video/') ? 'dlss5-input.mp4' : 'dlss5-input.png', subfolder: '', type: 'input' });
+      }
+      if (url.endsWith('/prompt')) return jsonResponse({ prompt_id: 'prompt-dlss5' });
+      if (url.includes('/history/')) return jsonResponse({
+        'prompt-dlss5': { status: { completed: true }, outputs: {
+          '4': { images: [{ filename: 'enhanced.png', subfolder: '', type: 'output' }] },
+          '6': { images: [{ filename: 'enhanced.mp4', subfolder: '', type: 'output' }] },
+        } },
+      });
+      if (url.includes('/object_info/')) return jsonResponse({});
+      throw new Error(`未预期的请求：${url}`);
+    });
+  });
+
+  it('从原十七项增量添加两项，保留用户编辑、删除记录及同名导入项', () => {
+    const all = resetBuiltInWorkflows();
+    const existing = all.filter((workflow) => !ids.includes(workflow.id));
+    expect(existing).toHaveLength(17);
+    localStorage.setItem('aicanvas.builtinWorkflows.seededIds', JSON.stringify(existing.map((workflow) => workflow.id)));
+    existing.pop();
+    existing[0].name = '用户编辑';
+    existing.push({ ...all[0], id: 'wf-user-dlss5', fileContent: '{"user":"edited"}' });
+    const before = JSON.stringify(existing);
+    const pending = pendingBuiltInWorkflows(existing);
+    expect(pending.map((workflow) => workflow.id)).toEqual(ids);
+    expect(pending.map((workflow) => workflow.category)).toEqual(['ai-image', 'ai-video']);
+    expect(JSON.stringify(existing)).toBe(before);
+    expect(pendingBuiltInWorkflows(existing)).toEqual([]);
+    expect(resetBuiltInWorkflows().filter((workflow) => ids.includes(workflow.id))).toHaveLength(2);
+  });
+
+  it.each(ids)('%s 保留编辑布局、增强参数和全部连线，执行图不包含说明或上传控件', (id) => {
+    const workflow = install(id);
+    const api = JSON.parse(workflow.fileContent);
+    const ui = JSON.parse(workflow.editableContent!);
+    const isImage = id === ids[0];
+    const type = isImage ? 'image' : 'video';
+    expect(workflow.defaultNodes).toEqual({ [type]: '1' });
+    expect(workflow.ioNodes).toEqual([{ nodeId: '1', title: isImage ? 'LoadImage' : '① 选择/上传视频', type }]);
+    expect(Object.keys(api)).toHaveLength(isImage ? 4 : 5);
+    expect(api['5']).toBeUndefined();
+    expect(ui.nodes.find((node: { type: string }) => node.type === 'MarkdownNote')).toBeTruthy();
+    for (const node of ui.nodes.filter((node: { type: string }) => node.type !== 'MarkdownNote')) {
+      expect(api[String(node.id)].class_type).toBe(node.type);
+      expect(node.pos).toHaveLength(2);
+    }
+    for (const [, sourceId, slot, targetId, inputIndex] of ui.links) {
+      const target = ui.nodes.find((node: { id: number }) => node.id === targetId);
+      expect(api[String(targetId)].inputs[target.inputs[inputIndex].name]).toEqual([String(sourceId), slot]);
+    }
+    expect(api['2'].inputs).toEqual({
+      upscaling_mode: '1x (DLAA / native)', nr_preset: 'Default', nr_style: 'Natural', nr_intensity: 1,
+      local_tone_strength: 1, local_structure_strength: 1.5, skin_structure_strength: 2,
+      automatic_mask: true, dlss_model_preset: 'M', motion: 'auto', scene_change_threshold: 0.24,
+      warmup_frames: 0, runtime_dir: '',
+    });
+    expect(api['3'].inputs.verify_neural_rendering).toBe(true);
+    expect(api['1'].inputs[type]).toBe('');
+    if (isImage) {
+      expect(ui.nodes.find((node: { id: number }) => node.id === 1).widgets_values[0]).toBe('');
+      expect(api['4'].inputs.filename_prefix).toBe('DLSS5_NR');
+      expect(api['1'].inputs).toEqual({ image: '' });
+    } else {
+      expect(api['1'].inputs).not.toHaveProperty('videopreview');
+      expect(api['1'].inputs).not.toHaveProperty('choose video to upload');
+      expect(api['4'].inputs).toMatchObject({ audio: ['1', 2], fps: 24, bit_depth: 10 });
+      expect(api['6'].inputs).toEqual({ video: ['4', 0], filename_prefix: 'DLSS5_NR_video', format: 'auto', codec: 'auto' });
+    }
+    expect(withBuiltInEditableContent(workflow)).toBeNull();
+    expect(withBuiltInEditableContent({ ...workflow, editableContent: undefined })?.editableContent).toBe(workflow.editableContent);
+  });
+
+  it('图片引用上传到默认输入，取回图片且不修改源图', async () => {
+    const workflow = install(ids[0]);
+    const original = workflow.fileContent;
+    const result = await executeComfyUIGenerate({ prompt: '', model: 'wf', provider: 'comfyui', workflowId: workflow.id },
+      undefined, ['data:image/png;base64,RExTUzU=']);
+    const graph = submittedWorkflow();
+    expect(graph['1'].inputs.image).toBe('dlss5-input.png');
+    expect(graph['3'].inputs).toMatchObject({ images: ['1', 0], settings: ['2', 0] });
+    expect(graph['2']).toEqual(JSON.parse(original)['2']);
+    expect(result.url).toContain('enhanced.png');
+    expect(workflow.fileContent).toBe(original);
+  });
+
+  it('视频引用上传到默认输入，保留音轨和整段加载参数，取回视频且不修改源图', async () => {
+    const workflow = install(ids[1]);
+    const original = workflow.fileContent;
+    const result = await executeComfyUIVideoGenerate({
+      prompt: '', model: 'wf', provider: 'comfyui', workflowId: workflow.id, videoFps: 30,
+      videoResolution: 1280, seedanceDuration: 5,
+    }, undefined, [], { videoUrls: ['data:video/mp4;base64,RExTUzU='] });
+    const graph = submittedWorkflow();
+    expect(graph['1'].inputs).toMatchObject({ video: 'dlss5-input.mp4', force_rate: 0, custom_width: 0,
+      custom_height: 0, frame_load_cap: 0, skip_first_frames: 0, select_every_nth: 1, format: 'AnimateDiff' });
+    expect(graph['4'].inputs).toEqual({ images: ['3', 0], audio: ['1', 2], fps: 30, bit_depth: 10 });
+    expect(graph['2']).toEqual(JSON.parse(original)['2']);
+    expect(result.url).toContain('enhanced.mp4');
+    expect(workflow.fileContent).toBe(original);
+  });
+});
+
 describe('内置 Qwen3 音频工作流', () => {
   const ids = ['builtin-qwen3-voice-clone', 'builtin-qwen3-voice-design', 'builtin-qwen3-reference-voice-design'];
   const reference = 'data:audio/wav;base64,UXdlbi1yZWZlcmVuY2U=';
@@ -446,7 +562,7 @@ describe('内置 Qwen3 音频工作流', () => {
 
   it('已有其他项的用户只补三个 Qwen3 工作流，保留修改且不重复播种', () => {
     const existing = resetBuiltInWorkflows().filter((workflow) => !ids.includes(workflow.id));
-    expect(existing).toHaveLength(14);
+    expect(existing).toHaveLength(16);
     existing[0].name = '自定义 AuK';
     localStorage.setItem('aicanvas.builtinWorkflows.seededIds', JSON.stringify(existing.map((workflow) => workflow.id)));
     const pending = pendingBuiltInWorkflows(existing);
@@ -620,7 +736,7 @@ describe('内置 H3 PDD 与 Breeze TTS 2', () => {
 
   it('已有其他项时补齐四项单图PDD与Breeze，保留用户修改和删除记录', () => {
     const existing = resetBuiltInWorkflows().filter((workflow) => !ids.includes(workflow.id));
-    expect(existing).toHaveLength(13);
+    expect(existing).toHaveLength(15);
     const seeded = existing.map((workflow) => workflow.id);
     const removedId = existing.pop()!.id;
     existing[0].name = '用户自定义';
@@ -740,7 +856,7 @@ describe('内置 H3 PDD 自由参考', () => {
   it('已有项只补缺少的自由参考，不覆盖用户修改、删除记录及同名 MCP 导入项', () => {
     const all = resetBuiltInWorkflows();
     const existing = all.filter((workflow) => workflow.id !== id);
-    expect(existing).toHaveLength(16);
+    expect(existing).toHaveLength(18);
     localStorage.setItem('aicanvas.builtinWorkflows.seededIds', JSON.stringify(existing.map((workflow) => workflow.id)));
     const removed = existing.pop()!.id;
     existing[0].name = '保留用户修改';

@@ -16,7 +16,9 @@ import { CATEGORY_TO_NODE_TYPES, GENERAL_MODEL_CATEGORY_LABELS } from '../../../
 import { RUNNINGHUB_MODEL_MANIFEST, isLegacyRunningHubModel, getRunningHubModel, normalizeRunningHubModelId } from '../../../services/ai/providers/runninghubModelManifest';
 import { isRunningHubWorkflow, workflowExecution } from '../../../services/workflowExecutionService';
 import { DREAMINA_IMAGE_MODELS, DREAMINA_VIDEO_MODELS } from '../../../services/ai/dreaminaModels';
-import { APIMART_OMNI_MODELS, isLegacyApimartOmni, replaceLegacyApimartOmni } from '../../../services/ai/apimartVideoModels';
+import { APIMART_OMNI_MODELS, APIMART_UPDATED_VIDEO_MODELS, isLegacyApimartOmni, replaceLegacyApimartOmni } from '../../../services/ai/apimartVideoModels';
+import { GRSAI_ADDED_MODELS } from '../../../services/ai/grsaiModels';
+import { cccConnectionName } from '../../../services/ai/cccProviderGroups';
 
 export type MediaModelKind = 'image' | 'video' | 'audio';
 
@@ -55,6 +57,14 @@ export const defaultModelGroups: ModelGroup[] = [
     badgeText: 'AM',
     models: [
       // ── 文本模型 ──
+      ...[
+        ['claude-opus-4-8', 'Claude Opus 4.8'],
+        ['deepseek-v4-flash', 'DeepSeek V4 Flash'],
+        ['qwen3.8-max', 'Qwen 3.8 Max'],
+      ].map(([id, label]): ModelOption => ({
+        value: `apimart/${id}`, provider: 'apimart', label,
+        description: 'APIMart OpenAI 兼容文本模型', iconType: 'badge', badgeText: 'AM', nodeTypes: ['ai-text'],
+      })),
       {
         value: 'apimart/gpt-5.4',
         provider: 'apimart',
@@ -182,6 +192,24 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-text'],
       },
       // ── 图片模型 ──
+      ...[
+        ['gemini-3.1-flash-lite-image', 'Nano Banana Lite', '仅 1K，最多 14 张参考图'],
+        ['gemini-3.1-flash-lite-image-ext', 'Nano Banana Lite Ext', '仅 1K，最多 14 张参考图'],
+        ['gemini-3.1-flash-image-preview-official', 'Nano Banana 2 官方渠道', '最高 4K，支持极端比例与参考图'],
+        ['gemini-3-pro-image-preview-official', 'Nano Banana Pro 官方渠道', '1K/2K/4K，支持参考图'],
+        ['gpt-image-2-official', 'GPT Image 2 官方渠道', '1K/2K/4K，最多 16 张参考图'],
+        ['gpt-image-2.5-ext', 'GPT Image 2.5 Ext (Flare)', '1K/2K/4K，最多 16 张参考图'],
+        ['seedream-5-0-pro', 'Seedream 5.0 Pro', '1K/1.5K/2K，最多 10 张参考图'],
+        ['seedream-5-0-flash', 'Seedream 5.0 Flash', '1K/1.5K/2K，最多 10 张参考图'],
+        ['qwen-image-3.0', 'Qwen Image 3.0', '1K/2K，最多 3 张参考图，批量最多 6 张'],
+        ['qwen-image-3.0-pro', 'Qwen Image 3.0 Pro', '增强图文排版，最多 3 张参考图'],
+        ['grok-imagine-1.5-apimart', 'Grok Imagine 1.5', '支持最多 5 张参考图编辑'],
+        ['grok-imagine-2.0-ext', 'Grok Imagine 2.0 Ext', '仅文生图，单次最多 12 张'],
+        ['grok-imagine-image-2.0', 'Grok Imagine Image 2.0 官方', '1K/2K，最多 3 张参考图'],
+      ].map(([id, label, description]): ModelOption => ({
+        value: `apimart/${id}`, provider: 'apimart', label, description,
+        iconType: 'badge', badgeText: 'AM', nodeTypes: ['ai-image'],
+      })),
       {
         value: 'apimart/gemini-3.1-flash-image-preview',
         provider: 'apimart',
@@ -328,7 +356,7 @@ export const defaultModelGroups: ModelGroup[] = [
       },
       // ── 视频模型 ──
       {
-        value: 'apimart/doubao-seedance-2.0-fast',
+        value: 'apimart/seedance-2.0-fast',
         provider: 'apimart',
         label: '豆包视频 2.0 Fast',
         description: 'Seedance 2.0 快速视频生成',
@@ -337,7 +365,7 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-video'],
       },
       {
-        value: 'apimart/doubao-seedance-2.0',
+        value: 'apimart/seedance-2.0',
         provider: 'apimart',
         label: '豆包视频 2.0',
         description: 'Seedance 2.0 高质量视频生成',
@@ -346,7 +374,7 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-video'],
       },
       {
-        value: 'apimart/doubao-seedance-2.0-mini',
+        value: 'apimart/seedance-2.0-mini',
         provider: 'apimart',
         label: '豆包视频 2.0 Mini',
         description: 'Seedance 2.0 轻量视频生成',
@@ -355,7 +383,7 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-video'],
       },
       {
-        value: 'apimart/doubao-seedance-2.5',
+        value: 'apimart/seedance-2.5',
         provider: 'apimart',
         label: '豆包视频 2.5',
         description: 'Seedance 2.5 视频生成，4-30s，多模态/编辑/延长/首尾帧，480p/720p',
@@ -466,6 +494,10 @@ export const defaultModelGroups: ModelGroup[] = [
         value: `apimart/${model.id}`, provider: 'apimart', label: model.name,
         description: model.description, iconType: 'badge', badgeText: 'GO', nodeTypes: ['ai-video'],
       })),
+      ...APIMART_UPDATED_VIDEO_MODELS.map((model): ModelOption => ({
+        value: `apimart/${model.id}`, provider: 'apimart', label: model.name, description: model.description,
+        iconType: 'badge', badgeText: 'AM', nodeTypes: ['ai-video'],
+      })),
       // ── 音频模型 ──
       {
         value: 'apimart/gpt-4o-mini-tts',
@@ -487,6 +519,14 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-audio'],
         audioPurpose: 'music',
       },
+      ...[
+        ['flowmusic-lyria-3.5', 'Lyria 3.5'],
+        ['suno-v6', 'Suno V6'], ['suno-v6-wild', 'Suno V6 Wild'], ['suno-v6-mini', 'Suno V6 Mini'],
+      ].map(([id, label]): ModelOption => ({
+        value: `apimart/${id}`, provider: 'apimart', label,
+        description: '风格提示或自定义歌词生成音乐', iconType: 'badge', badgeText: 'AM',
+        nodeTypes: ['ai-audio'], audioPurpose: 'music',
+      })),
     ],
   },
   {
@@ -627,10 +667,14 @@ export const defaultModelGroups: ModelGroup[] = [
   {
     id: 'grsai',
     name: 'GRSAI',
-    description: '图像生成与多模态文本模型服务',
+    description: '图像、视频与多模态文本模型服务',
     iconType: 'badge',
     badgeText: 'GR',
     models: [
+      ...GRSAI_ADDED_MODELS.map((model): ModelOption => ({
+        value: `grsai/${model.id}`, provider: 'grsai', label: model.name, description: model.description,
+        iconType: 'badge', badgeText: 'GR', nodeTypes: CATEGORY_TO_NODE_TYPES[model.category],
+      })),
       // --- 图片模型 ---
       {
         value: 'grsai/gpt-image-2',
@@ -750,15 +794,6 @@ export const defaultModelGroups: ModelGroup[] = [
         nodeTypes: ['ai-image'],
       },
       // --- 文本模型 ---
-      {
-        value: 'grsai/gpt-5.4',
-        provider: 'grsai',
-        label: 'GPT-5.4',
-        description: 'OpenAI 文本生成与推理模型',
-        iconType: 'badge',
-        badgeText: 'GR',
-        nodeTypes: ['ai-text'],
-      },
       {
         value: 'grsai/gpt-5.5',
         provider: 'grsai',
@@ -1155,20 +1190,26 @@ function dedicatedGeneralModelGroup(
   if (catalogId === 'cccapi') {
     return {
       id: `general-provider-${model.providerConfigId}`,
-      name: 'CCC API',
-      description: 'OpenAI 兼容文本与图片模型',
+      name: cccConnectionName(provider),
+      description: provider?.cccGroup ? '使用此分组连接的 API Key' : 'OpenAI 兼容文本与图片模型',
       badgeText: 'CCC',
     };
   }
   return null;
 }
 
-function createGeneralModelOption(model: GeneralModelConfig): ModelOption {
+function generalModelLabel(model: GeneralModelConfig, config?: ProviderModelVisibilityConfig): string {
+  const provider = config?.providers[model.providerConfigId];
+  return provider?.catalogId === 'cccapi' && provider.cccGroup?.trim()
+    ? `${model.name} · ${provider.cccGroup.trim()}` : model.name;
+}
+
+function createGeneralModelOption(model: GeneralModelConfig, config?: ProviderModelVisibilityConfig): ModelOption {
   return {
     value: `general/${model.id}`,
     provider: 'general',
-    label: model.name,
-    description: `ID: ${model.modelId}`,
+    label: generalModelLabel(model, config),
+    description: describeGeneralModel(model, config),
     inputModalities: model.inputModalities,
     iconType: 'badge',
     badgeText: GENERAL_MODEL_CATEGORY_LABELS[model.category].slice(0, 2),
@@ -1189,7 +1230,7 @@ export function getGeneralModelGroups(
       !CATEGORY_TO_NODE_TYPES[model.category].includes(nodeType)
       || !isProviderCategoryVisible(config, model.providerConfigId, model.category)
     ) continue;
-    const option = createGeneralModelOption(model);
+    const option = createGeneralModelOption(model, config);
     const presentation = dedicatedGeneralModelGroup(model, config);
     if (!presentation) {
       genericModels.push(option);
@@ -1265,7 +1306,7 @@ export function getMediaModelOptions(
       return {
         value: `general/${model.id}`,
         provider: 'general',
-        label: model.name,
+        label: generalModelLabel(model, config),
         description: describeGeneralModel(model, config),
         inputModalities: model.inputModalities,
         iconType: 'badge',

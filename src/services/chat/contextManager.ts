@@ -145,6 +145,31 @@ const SYSTEM_PROMPT_OVERHEAD_ESTIMATE = 1_200;
 
 type UsageMessage = Pick<ChatMessage, 'role' | 'content' | 'status' | 'timestamp' | 'sources'>;
 
+// 消息离开内存后缓存也会释放；只缓存这条消息的贡献，摘要和模型预算仍按本次参数计算。
+const conversationUsageCache = new WeakMap<UsageMessage, {
+  content: string;
+  sources: Pick<NonNullable<UsageMessage['sources']>[number], 'citationId' | 'title' | 'url'>[];
+  tokens: number;
+}>();
+
+function estimateUsageMessageTokens(message: UsageMessage): number {
+  const cached = conversationUsageCache.get(message);
+  const sources = message.sources;
+  // 来源可能在原数组里补齐，比较实际参与拼接的字段，不只比较数组引用。
+  if (cached?.content === message.content && cached.sources.length === (sources?.length ?? 0)
+    && cached.sources.every((source, index) => source.citationId === sources![index].citationId
+      && source.title === sources![index].title && source.url === sources![index].url)) {
+    return cached.tokens;
+  }
+  const tokens = PER_MESSAGE_OVERHEAD + estimateTokens(messageContentWithSources(message));
+  conversationUsageCache.set(message, {
+    content: message.content,
+    sources: sources?.map(({ citationId, title, url }) => ({ citationId, title, url })) ?? [],
+    tokens,
+  });
+  return tokens;
+}
+
 /**
  * 估算会话上下文占用（用于头部指示器）。
  * 被摘要覆盖的消息按摘要 token 计，之后的消息按原文计。
@@ -161,7 +186,7 @@ export function estimateConversationUsage(
     if (message.role !== 'user' && message.role !== 'assistant') continue;
     if (!message.content) continue;
     if (contextSummary && message.timestamp <= contextSummary.coveredUntilTimestamp) continue;
-    estimatedTokens += PER_MESSAGE_OVERHEAD + estimateTokens(messageContentWithSources(message));
+    estimatedTokens += estimateUsageMessageTokens(message);
   }
   return {
     estimatedTokens,

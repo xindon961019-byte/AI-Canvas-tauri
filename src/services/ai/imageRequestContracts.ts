@@ -5,6 +5,7 @@
 import type { NormalizedModelExecutionProtocol } from '../../types/aiTypes';
 import type { ProviderDefinition } from './providerCatalogService';
 import { mapImageDimensions } from '../aiDimensions';
+import { getGrsaiImageCapability } from './grsaiModels';
 
 export type BuiltInImageRequestContract = {
   kind: 'standard';
@@ -18,7 +19,7 @@ export type BuiltInImageRequestContract = {
 
 // https://qmy27nhsd9.apifox.cn/452392911e0
 const GRSAI_NANO_MODELS = new Set([
-  'nano-banana', 'nano-banana-fast', 'nano-banana-2', 'nano-banana-2-cl',
+  'nano-banana', 'nano-banana-fast', 'nano-banana-2', 'nano-banana-2.1', 'nano-banana-2-lite', 'nano-banana-2-cl',
   'nano-banana-2-2k-cl', 'nano-banana-2-4k-cl', 'nano-banana-pro',
   'nano-banana-pro-vt', 'nano-banana-pro-cl', 'nano-banana-pro-vip', 'nano-banana-pro-4k-vip',
 ]);
@@ -74,14 +75,17 @@ export function resolveBuiltInImageRequestContract(
   const isNano = GRSAI_NANO_MODELS.has(modelId);
   if (!isNano && !GRSAI_GPT_MODELS.has(modelId)) return undefined;
 
-  const normalizedSize = imageSize === '720p' ? '1K' : imageSize;
+  const requestedSize = imageSize === '720p' ? '1K' : imageSize;
+  if (!['1K', '2K', '4K'].includes(requestedSize)) throw new Error(`GRSAI 不支持图片档位 ${imageSize}`);
+  const capability = getGrsaiImageCapability(modelId);
+  const normalizedSize = capability && !capability.resolutions?.includes(requestedSize)
+    ? capability.defaultResolution! : requestedSize;
   const sizeIndex = ['1K', '2K', '4K'].indexOf(normalizedSize);
-  if (sizeIndex < 0) throw new Error(`GRSAI 不支持图片档位 ${imageSize}`);
   let dimensions = mapImageDimensions(normalizedSize, aspectRatio);
   let sizeFields: Record<string, string>;
   if (isNano) {
     const supportsRatio = GRSAI_NANO_RATIOS.has(aspectRatio)
-      || (modelId.startsWith('nano-banana-2') && GRSAI_NANO_2_EXTRA_RATIOS.has(aspectRatio));
+      || (modelId.startsWith('nano-banana-2') && modelId !== 'nano-banana-2-lite' && GRSAI_NANO_2_EXTRA_RATIOS.has(aspectRatio));
     if (!supportsRatio) throw new Error(`GRSAI ${modelId} 不支持比例 ${aspectRatio}`);
     sizeFields = { aspectRatio, imageSize: normalizedSize };
   } else {

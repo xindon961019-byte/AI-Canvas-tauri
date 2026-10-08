@@ -41,6 +41,7 @@ import { queryBillingRuns } from '../../services/billing/volcengineBillingServic
 import { saveAutodlWorkflowTemplate, saveWorkflowApiDrafts } from '../../services/workflowApi/workflowApiConfig';
 import { invoke } from '@tauri-apps/api/core';
 import { useT } from '../../i18n';
+import { cccConnectionName } from '../../services/ai/cccProviderGroups';
 
 interface ProviderListItem {
   id: string;
@@ -152,7 +153,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       const definition = getProviderDefinition(id, providerConfig);
       if (!definition) continue;
       if (definition.kind === 'web-search' && id !== activeWebSearchProviderId) continue;
-      if (!shouldListProviderConnection(providerConfig, definition.authType, config.providers.runninghub?.apiKey)) continue;
+      if (definition.id !== 'cccapi' && !shouldListProviderConnection(providerConfig, definition.authType, config.providers.runninghub?.apiKey)) continue;
       items.push({ id, config: providerConfig });
     }
     if (config.providers.runninghub?.apiKey && !config.providers['runninghub-model']) {
@@ -222,7 +223,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     : dialog.revision;
 
   const editingConfig = editingConnectionId
-    ? providerItems.find((item) => item.id === editingConnectionId)?.config
+    ? config.providers[editingConnectionId] ?? providerItems.find((item) => item.id === editingConnectionId)?.config
     : undefined;
 
   const tauriInvoke = useCallback(
@@ -523,6 +524,12 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     closeConnectionDialog();
   };
 
+  const handleSaveCccGroups = async (connections: Record<string, ApiProviderConfig>) => {
+    // 先同步所有组的模型身份，再一次提交配置与凭据；单组失败不提前关闭编辑器。
+    for (const [id, providerConfig] of Object.entries(connections)) saveProviderConfig(id, providerConfig);
+    await saveConfig({ throwOnError: true });
+  };
+
   const handleRemoveConnection = async (connectionId: string) => {
     try {
       const providerConfig = useAppStore.getState().config.providers[connectionId];
@@ -670,7 +677,8 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                 ? t('联网搜索')
                 : definition.id === 'custom-openai'
                   ? item.config.name.trim() || definition.name
-                  : isWorkflowApi ? item.config.name.trim() || t(definition.name) : definition.name;
+                  : definition.id === 'cccapi' ? cccConnectionName(item.config)
+                    : isWorkflowApi ? item.config.name.trim() || t(definition.name) : definition.name;
               const statusLabel = isDreamina
                 ? t('OAuth 已连接')
                 : isRunningHub
@@ -836,6 +844,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         onDreaminaLogin={() => void handleDreaminaLogin(!!dreaminaAuth?.loggedIn)}
         onClose={closeConnectionDialog}
         onSave={handleSaveConnection}
+        onSaveCccGroups={handleSaveCccGroups}
       />
 
       <DreaminaLoginModal

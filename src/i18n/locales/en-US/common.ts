@@ -47,6 +47,7 @@ const common = {
   '生成图像': 'Generate Image',
   '生成视频': 'Generate Video',
   '生成音频': 'Generate Audio',
+  '帧动画': 'Frame Animation',
   '生成动画': 'Generate Animation',
   '生成360全景': 'Generate 360° Panorama',
   '宫格分镜': 'Storyboard Grid',

@@ -7,6 +7,7 @@ import {
   savePendingTask,
 } from '../../src/services/pollManager';
 import { useAppStore } from '../../src/store/useAppStore';
+import * as fileService from '../../src/services/fileService';
 
 beforeEach(() => {
   localStorage.clear();
@@ -15,6 +16,45 @@ beforeEach(() => {
 });
 
 describe('pending generation task recovery', () => {
+  it('resumes binary result downloads without submitting another generation', async () => {
+    const persistMedia = vi.spyOn(fileService, 'persistMediaUrlToProjectData').mockResolvedValue({
+      mediaUrl: 'asset://recovered-video.mp4', sourceUrl: 'asset://recovered-video.mp4',
+    });
+    useAppStore.setState((state) => ({
+      config: { ...state.config, providers: { ...state.config.providers,
+        'custom-video': { name: 'Video', apiKey: 'current-provider-key',
+          baseUrl: 'https://gateway.example/v1', catalogId: 'custom-openai' },
+      } },
+      nodes: [{ id: 'download-node', type: 'ai-video', position: { x: 0, y: 0 },
+        data: { label: 'Video', type: 'ai-video', status: 'loading', prompt: 'test' } satisfies BaseNodeData }],
+    }));
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ status: 'completed' }), {
+      headers: { 'Content-Type': 'application/json' },
+    })).mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), {
+      headers: { 'Content-Type': 'video/mp4' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    savePendingTask({
+      nodeId: 'download-node', projectId: 'project-1', nodeType: 'ai-video', provider: 'general',
+      providerConfigId: 'custom-video', taskId: 'video-1', taskType: 'custom-protocol', submitted: true,
+      protocolPoll: {
+        method: 'GET', url: 'https://gateway.example/v1/videos/video-1',
+        statusPath: 'status', successValues: ['completed'], failureValues: ['failed'], intervalMs: 3000,
+        resultDownload: { url: 'https://gateway.example/v1/videos/video-1/content', headers: { Accept: 'video/mp4' } },
+        resultMimeType: 'video/mp4',
+      },
+    });
+    await resumePendingTasks('project-1');
+    await vi.waitFor(() => expect(useAppStore.getState().nodes[0].data).toMatchObject({
+      status: 'success', videoUrl: 'asset://recovered-video.mp4',
+    }));
+    expect(persistMedia).toHaveBeenCalledWith('data:video/mp4;base64,AQID', 'project-1', 'ai-video', 'Video');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenLastCalledWith('https://gateway.example/v1/videos/video-1/content',
+      expect.objectContaining({ method: 'GET', headers: { Accept: 'video/mp4', Authorization: 'Bearer current-provider-key' } }));
+    expect(getPendingTasksForProject('project-1')).toEqual([]);
+  });
+
   it('keeps loading placeholders covered by a resumable image batch task', () => {
     const nodes = [
       {

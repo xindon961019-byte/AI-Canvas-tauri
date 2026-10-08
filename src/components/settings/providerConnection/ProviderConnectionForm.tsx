@@ -1,17 +1,174 @@
 /**
  * settings/providerConnection/ProviderConnectionForm — 连接信息区块。
- * 负责凭证字段、OAuth 登录态、重复地址提示与「验证连接」，模型选择不在这里。
+ * 通用连接信息与 CCC 多分组配置；CCC 各分组的凭证及模型在同一表单编辑。
  */
 import Select from '../../shared/Select';
 import { Icon } from '@iconify/react';
-import type { Dispatch, SetStateAction } from 'react';
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { useT } from '../../../i18n';
-import type { ChatApiProtocol } from '../../../types';
+import type { ApiProviderConfig, ChatApiProtocol, ProviderModelSelection } from '../../../types';
 import { CHAT_API_PROTOCOL_LABELS } from '../../../services/ai/chatApiProtocol';
+import { CCCAPI_BASE_URL } from '../../../constants/api';
 import { normalizeBaseUrl } from '../../../services/ai/providerBaseUrl';
-import type { ProviderDefinition } from '../../../services/ai/providerCatalogService';
+import { CCC_PROVIDER_GROUPS, cccConnectionName, getCccGroupPresetModels } from '../../../services/ai/cccProviderGroups';
+import { capCatalogModels, createConnectionId, fetchProviderModelCatalog, type ProviderDefinition } from '../../../services/ai/providerCatalogService';
 import AnimatedButton from '../../shared/AnimatedButton';
 import { PROVIDER_LINKS, openExternal, type CatalogStatus } from './providerConnectionShared';
+import { materializeLegacyImageProtocolDefault, mergeModels } from './providerConnectionModels';
+
+interface CccGroupDraft {
+  id: string;
+  config: ApiProviderConfig;
+  models: ProviderModelSelection[];
+  selectedIds: Set<string>;
+  selectionEdited: boolean;
+  existing: boolean;
+  status: CatalogStatus;
+  message: string;
+}
+
+/** 所有分组同时编辑；凭据仍按独立连接保存，不引入嵌套 Key 持久化。 */
+export function CccGroupConnectionsForm({ providerConfigs, presetModels, onSave, onClose, onReturnToPicker }: {
+  providerConfigs: Record<string, ApiProviderConfig>;
+  presetModels: ProviderModelSelection[];
+  onSave: (connections: Record<string, ApiProviderConfig>) => Promise<void>;
+  onClose: () => void;
+  onReturnToPicker?: () => void;
+}) {
+  const t = useT();
+  const [rows, setRows] = useState<CccGroupDraft[]>(() => {
+    const connections = Object.entries(providerConfigs).filter(([id, config]) => id === 'cccapi' || config.catalogId === 'cccapi');
+    const used = new Set<string>();
+    const makeRow = (group?: string, saved?: [string, ApiProviderConfig]): CccGroupDraft => {
+      const [id, original] = saved || [createConnectionId('cccapi'), { name: cccConnectionName({ cccGroup: group }), apiKey: '', catalogId: 'cccapi', cccGroup: group }];
+      used.add(id);
+      const config = { ...original };
+      const models = mergeModels(config.catalogModels?.length ? config.catalogModels : getCccGroupPresetModels(presetModels, group), materializeLegacyImageProtocolDefault(config.selectedModels || [], config));
+      return { id, config, models, selectedIds: new Set(config.selectedModels?.map((model) => model.id) || []), selectionEdited: false, existing: !!saved,
+        status: 'idle', message: config.catalogModels?.length ? t('已加载该分组保存的模型目录') : t('分组预置模型，拉取后以该 Key 返回为准。') };
+    };
+    const groups = CCC_PROVIDER_GROUPS.map((group) => makeRow(group.name, connections.find(([, config]) => config.cccGroup === group.name)));
+    // 旧连接、重复分组与未收录分组都保留原身份，不猜测 Key 的远端分组。
+    return [...groups, ...connections.filter(([id]) => !used.has(id)).map((saved) => makeRow(saved[1].cccGroup, saved))];
+  });
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const requests = useRef(new Map<string, AbortController>());
+  useEffect(() => {
+    const controllers = requests.current;
+    return () => controllers.forEach((controller) => controller.abort());
+  }, []);
+
+  const updateKey = (id: string, value: string) => {
+    requests.current.get(id)?.abort();
+    setRows((current) => current.map((row) => row.id === id ? { ...row, config: { ...row.config, apiKey: value }, status: 'idle',
+      message: t('Key 已修改，保存后使用此 Key；可拉取模型验证权限。') } : row));
+  };
+  const toggleModel = (id: string, modelId: string) => setRows((current) => current.map((row) => {
+    if (row.id !== id) return row;
+    const selectedIds = new Set(row.selectedIds);
+    if (selectedIds.has(modelId)) selectedIds.delete(modelId); else selectedIds.add(modelId);
+    return { ...row, selectedIds, selectionEdited: true };
+  }));
+  const fetchModels = async (id: string) => {
+    const row = rows.find((item) => item.id === id);
+    if (!row?.config.apiKey.trim() || saving) return;
+    requests.current.get(id)?.abort();
+    const controller = new AbortController();
+    requests.current.set(id, controller);
+    setRows((current) => current.map((item) => item.id === id ? { ...item, status: 'loading', message: '' } : item));
+    try {
+      const result = await fetchProviderModelCatalog({ providerId: id, config: { ...row.config, apiKey: row.config.apiKey.trim() }, fallbackModels: presetModels, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      const ids = new Set(result.models.map((model) => model.id));
+      setRows((current) => current.map((item) => item.id === id ? { ...item,
+        models: mergeModels(item.models.filter((model) => ids.has(model.id)), result.models),
+        selectedIds: new Set([...item.selectedIds].filter((modelId) => ids.has(modelId))),
+        config: { ...item.config, catalogUpdatedAt: Date.now(), ...(result.resolvedBaseUrl ? { baseUrl: result.resolvedBaseUrl } : {}) },
+        status: result.warning ? 'warning' : 'ready', message: result.warning || t('已获取 {count} 个模型', { count: result.models.length }) } : item));
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setRows((current) => current.map((item) => item.id === id ? { ...item, status: 'error', message: error instanceof Error ? error.message : t('模型列表拉取失败') } : item));
+    }
+  };
+  const save = async () => {
+    if (saving) return;
+    const connections: Record<string, ApiProviderConfig> = {};
+    for (const row of rows) {
+      // 空白分组始终显示；填写 Key 或选择模型后才创建对应连接。
+      if (!row.existing && !row.config.apiKey.trim() && !row.selectedIds.size) continue;
+      connections[row.id] = { ...row.config, name: cccConnectionName(row.config), catalogId: 'cccapi', apiKey: row.config.apiKey.trim(),
+        baseUrl: row.config.baseUrl?.trim() || CCCAPI_BASE_URL,
+        selectedModels: row.existing && row.config.selectedModels === undefined && !row.selectionEdited
+          ? undefined
+          : row.models.filter((model) => row.selectedIds.has(model.id)).map((model) => ({ ...model, provider: row.id })),
+        catalogModels: capCatalogModels(row.models, row.selectedIds).map((model) => ({ ...model, provider: row.id })),
+      };
+    }
+    setSaving(true); setSaveError('');
+    requests.current.forEach((controller) => controller.abort());
+    setRows((current) => current.map((row) => row.status === 'loading' ? { ...row, status: 'idle', message: t('模型目录拉取已取消') } : row));
+    try { await onSave(connections); onClose(); }
+    catch (error) { setSaveError(error instanceof Error ? error.message : t('保存失败')); }
+    finally { setSaving(false); }
+  };
+
+  return <>
+    <div className="provider-dialog-body">
+      <div className="flex items-start justify-between gap-2 mb-3">
+        <p className="ui-hint">{t('各分组的 Key 和模型同时保留。配置并保存后，选择模型即可自动使用所属分组的 Key，无需切换分组。')}</p>
+        {onReturnToPicker && <button type="button" className="ui-btn ui-btn--sm ui-btn--ghost shrink-0" disabled={saving} onClick={onReturnToPicker}>{t('更换厂商')}</button>}
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {rows.map((row) => {
+          const group = row.config.cccGroup || t('旧连接（未指定分组）');
+          return <section key={row.id} className="ui-card min-w-0" aria-label={group}>
+            <div className="ui-card__header">
+              <h4 className="ui-card__title break-words">{group}</h4>
+              <span className={`ui-badge ml-auto shrink-0 ${row.config.apiKey.trim() ? 'ui-badge--success' : 'ui-badge--outline'}`}>{row.config.apiKey.trim() ? t('已填写 Key') : t('未填写 Key')}</span>
+            </div>
+            <div className="ui-card__body space-y-2">
+              <p className="ui-hint">{CCC_PROVIDER_GROUPS.find((item) => item.name === group)?.description || t('保留已有连接与模型配置')}</p>
+              <label className="ui-field block">
+                <span className="ui-label">API Key</span>
+                <input className="ui-input w-full" type="password" aria-label={`${group} API Key`} autoComplete="off" placeholder="sk-..." value={row.config.apiKey} disabled={saving} onChange={(event) => updateKey(row.id, event.target.value)} />
+              </label>
+              <button type="button" className="ui-btn ui-btn--sm ui-btn--secondary" aria-label={`${t('拉取模型')} ${group}`} disabled={saving || !row.config.apiKey.trim() || row.status === 'loading'} onClick={() => fetchModels(row.id)}>{row.status === 'loading' ? t('正在拉取') : t('拉取模型')}</button>
+              {row.message && <p role={row.status === 'error' ? 'alert' : 'status'} className={`ui-hint ${row.status === 'error' ? 'ui-alert ui-alert--danger' : ''}`}>{row.message}</p>}
+              <details>
+                <summary className="cursor-pointer text-canvas-text">{t('启用模型')} · {row.selectedIds.size}/{row.models.length}</summary>
+                <div className="mt-2 space-y-2">
+                  <label className="flex items-center gap-2 text-canvas-text">
+                    <input type="checkbox" aria-label={`${t('选择全部模型')} ${group}`} disabled={saving || !row.models.length} checked={!!row.models.length && row.selectedIds.size === row.models.length} onChange={(event) => {
+                      const checked = event.target.checked;
+                      setRows((current) => current.map((item) => item.id === row.id ? { ...item, selectedIds: new Set(checked ? item.models.map((model) => model.id) : []), selectionEdited: true } : item));
+                    }} />{t('选择全部模型')}
+                  </label>
+                  <div className="max-h-48 overflow-y-auto space-y-1">
+                    {row.models.map((model) => <label key={model.id} className="flex items-start gap-2 p-2 rounded bg-canvas-surface text-canvas-text">
+                      <input type="checkbox" className="mt-1" aria-label={`${t('启用')} ${group} ${model.id}`} disabled={saving} checked={row.selectedIds.has(model.id)} onChange={() => toggleModel(row.id, model.id)} />
+                      <span className="min-w-0 break-words"><strong className="font-medium">{model.name}</strong><small className="block text-canvas-text-muted">{model.id}</small></span>
+                    </label>)}
+                    {!row.models.length && <p className="ui-hint">{t('填写 Key 后拉取此连接的模型目录')}</p>}
+                  </div>
+                </div>
+              </details>
+            </div>
+          </section>;
+        })}
+      </div>
+      <button type="button" className="provider-external-link mt-3" onClick={() => void openExternal('https://cccapi.cn/keys')}>{t('前往厂商控制台')}</button>
+      {saveError && <p role="alert" className="ui-alert ui-alert--danger mt-3">{saveError}</p>}
+    </div>
+    <footer className="provider-dialog-footer">
+      <span className="ui-hint">{t('所有已填写分组一起保存，调用时自动匹配 Key。')}</span>
+      <div className="flex items-center gap-2">
+        <AnimatedButton type="button" className="provider-secondary-btn" disabled={saving} onClick={onClose}>{t('取消')}</AnimatedButton>
+        <AnimatedButton type="button" className="provider-primary-btn" disabled={saving || !rows.some((row) => row.existing || row.config.apiKey.trim() || row.selectedIds.size)} onClick={save}>{saving ? t('保存中') : t('保存全部分组')}</AnimatedButton>
+      </div>
+    </footer>
+  </>;
+}
 
 interface ProviderConnectionFormProps {
   editing: boolean;

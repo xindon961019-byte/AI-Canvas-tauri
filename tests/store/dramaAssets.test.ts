@@ -615,6 +615,16 @@ describe('dramaAssets store', () => {
     expect(rendered.edges).toEqual([]);
     expect(nodes).toHaveLength(2);
     expect(edges).toHaveLength(1);
+
+    const contentUpdated = nodes.map((node) => ({ ...node, data: { ...node.data, output: '新正文' } }));
+    expect(filterHiddenCanvasElements(contentUpdated, edges).edges).toBe(rendered.edges);
+    const revealed = contentUpdated.map((node) => ({
+      ...node, data: { ...node.data, hiddenByCharacterLibrary: false },
+    }));
+    expect(filterHiddenCanvasElements(revealed, edges).edges).toBe(edges);
+    expect(filterHiddenCanvasElements(contentUpdated, edges).edges).toBe(rendered.edges);
+    const replacedEdges = [{ ...edges[0], source: 'visible' }];
+    expect(filterHiddenCanvasElements(contentUpdated, replacedEdges).edges).toBe(replacedEdges);
   });
 
   it('restores a hidden source and keeps shared nodes hidden until the last character is deleted', () => {

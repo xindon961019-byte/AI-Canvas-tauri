@@ -1,12 +1,14 @@
 /**
  * AnimationNode — 2D 角色 Sprite Sheet 生成与逐帧预览节点
  */
-import { memo, useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { Icon } from '@iconify/react';
 import { Handle, Position } from '@xyflow/react';
 import type { Node } from '@xyflow/react';
-import type { AnimationPreviewMode, BaseNodeData } from '../../types';
+import type { AnimationAction, AnimationPreviewMode, BaseNodeData } from '../../types';
 import { ANIMATION_ACTION_LABELS, ANIMATION_FRAME_GRIDS } from '../../types';
+import type { AnimationFrameCount } from '../../services/ai/animationPrompt';
+import { animationSheet, animationProcessing, animationEdits, animationFrameStyle, prepareAnimationPreview, type AnimationPreview } from '../../services/animationService';
 import { useAppStore } from '../../store/useAppStore';
 import { useCompletionFlash } from '../../hooks/useCompletionFlash';
 import { buildAnimationReskinPrompt } from '../../services/ai/animationPrompt';
@@ -21,6 +23,8 @@ import ResizeHandle from './shared/ResizeHandle';
 import { useNodeRename } from './shared/useNodeRename';
 import { useT } from '../../i18n';
 import NodeGenerationProgress from './shared/NodeGenerationProgress';
+
+const AnimationEditor = lazy(() => import('./shared/AnimationEditor'));
 
 const pageVisibilityListeners = new Set<() => void>();
 let listeningForPageVisibility = false;
@@ -61,24 +65,55 @@ function parseAspectRatio(value: unknown) {
 function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData; selected?: boolean }) {
   const t = useT();
   const updateNodeDataTransient = useAppStore((s) => s.updateNodeDataTransient);
+  const updateNodeData = useAppStore((s) => s.updateNodeData);
   const commitToHistory = useAppStore((s) => s.commitToHistory);
   const justCompleted = useCompletionFlash(data.status);
   const nodeWidth = (data.nodeWidth as number) || 320;
   // 预览区宽高始终一致：节点总高 = 4px 顶边距 + 正方形预览 + 42px 参数栏
   const nodeHeight = nodeWidth + 38;
-  const action = data.animationAction ?? 'idle';
-  const frameCount = data.animationFrames ?? 8;
+  const { animationSheet: storedSheet, animationFrames, animationAction, animationProcessing: storedProcessing, animationEdits: storedEdits } = data;
+  const sheet = useMemo(() => animationSheet({ animationSheet: storedSheet, animationFrames, animationAction }), [storedSheet, animationFrames, animationAction]);
+  const action = (Object.hasOwn(ANIMATION_ACTION_LABELS, sheet.action) ? sheet.action : data.animationAction ?? 'idle') as AnimationAction;
+  const processing = useMemo(() => animationProcessing({ animationSheet: storedSheet, animationFrames, animationAction, animationProcessing: storedProcessing }), [storedProcessing, storedSheet, animationFrames, animationAction]);
+  const edits = useMemo(() => animationEdits({ animationSheet: storedSheet, animationFrames, animationAction, animationEdits: storedEdits }), [storedEdits, storedSheet, animationFrames, animationAction]);
+  const playingFrames = edits.filter((edit) => edit.enabled);
+  const frameCount = playingFrames.length;
   const previewMode = data.animationPreviewMode ?? 'playing';
-  const displaySrc = (data.imageUrl || data.thumbnailUrl) as string | undefined;
-  const grid = ANIMATION_FRAME_GRIDS[frameCount];
-  const fps = data.animationFps ?? 8;
+  const originalSrc = (data.imageUrl || data.thumbnailUrl) as string | undefined;
+  const grid = sheet;
+  const fps = Math.min(24, Math.max(1, data.animationFps ?? 8));
   const loop = data.animationLoop ?? true;
   const [frameIndex, setFrameIndex] = useState(0);
   const [paused, setPaused] = useState(false);
   const [reskinning, setReskinning] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [previewState, setPreviewState] = useState<{ key: string; value?: AnimationPreview; error?: string }>();
   const pageVisible = usePageVisible();
-  const { displayLabel, handleRename } = useNodeRename(id, data, t('生成动画'));
+  const previewKey = JSON.stringify([data.filePath, sheet, processing]);
+  const preview = previewState?.key === previewKey ? previewState.value : undefined;
+  const processingError = previewState?.key === previewKey ? previewState.error : undefined;
+  const displaySrc = preview?.url ?? originalSrc;
+  useEffect(() => {
+    if (!data.filePath || !pageVisible) return;
+    let active = true;
+    let prepared: AnimationPreview | undefined;
+    void prepareAnimationPreview(data.filePath, sheet, processing).then((value) => {
+      if (!active) { value.dispose(); return; }
+      prepared = value;
+      setPreviewState({ key: previewKey, value });
+    }).catch((error: unknown) => {
+      if (active) setPreviewState({ key: previewKey, error: error instanceof Error ? error.message : String(error) });
+    });
+    return () => { active = false; prepared?.dispose(); };
+  }, [data.filePath, pageVisible, previewKey, processing, sheet]);
+  const { displayLabel: storedLabel, handleRename } = useNodeRename(id, data, t('帧动画'));
+  const displayLabel = !data.displayLabel && !data.fileName && ['生成动画', '动画'].includes(storedLabel)
+    ? t('帧动画') : storedLabel;
+  const openEditor = () => {
+    useAppStore.getState().closeNodeDialog();
+    setEditorOpen(true);
+  };
   const visibleFrameIndex = frameIndex % frameCount;
 
   // 单次播放走到末帧即停：由此推出「停住」，定时器随之拆掉，不需要额外的 setState
@@ -93,7 +128,7 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
     return () => window.clearInterval(timer);
   }, [displaySrc, fps, frameCount, pageVisible, previewMode, stopped]);
 
-  const handleTogglePlay = useCallback(() => {
+  const handleTogglePlay = () => {
     // 单次播放停在末帧后再点播放，从头放一遍
     if (endedOnce) {
       setFrameIndex(0);
@@ -101,12 +136,12 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
       return;
     }
     setPaused((current) => !current);
-  }, [endedOnce]);
+  };
 
-  const handleStepFrame = useCallback((delta: number) => {
+  const handleStepFrame = (delta: number) => {
     setPaused(true);
     setFrameIndex((current) => (current % frameCount + delta + frameCount) % frameCount);
-  }, [frameCount]);
+  };
 
   const handleExport = useCallback(async (event: React.MouseEvent) => {
     event.stopPropagation();
@@ -123,11 +158,15 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
         defaultName: `${displayLabel}_${action}_${frameCount}f`,
         cols: grid.cols,
         rows: grid.rows,
-        frameCount,
+        frameCount: sheet.frameCount,
         fps,
+        processing,
+        edits,
+        loop,
+        action: sheet.action,
       });
       if (result) {
-        store.showToast(result.files.length > 1
+        store.showToast(result.format === 'json' ? t('PNG 图集与 JSON 元数据已导出') : result.format === 'png'
           ? t('已导出 {count} 张序列帧（{w}×{h}）', { count: result.files.length, w: result.frame_width, h: result.frame_height })
           : t('GIF 已导出（{w}×{h} · {fps}fps）', { w: result.frame_width, h: result.frame_height, fps }));
       }
@@ -136,7 +175,7 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
     } finally {
       setExporting(false);
     }
-  }, [action, data.filePath, displayLabel, fps, frameCount, grid.cols, grid.rows, t]);
+  }, [action, data.filePath, displayLabel, edits, fps, frameCount, grid.cols, grid.rows, loop, processing, sheet, t]);
 
   const handlePreviewModeChange = useCallback((mode: AnimationPreviewMode) => {
     updateNodeDataTransient(id, { animationPreviewMode: mode });
@@ -152,6 +191,12 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
     const store = useAppStore.getState();
     const sourceNode = store.nodes.find((n) => n.id === id) as Node<BaseNodeData> | undefined;
     if (!sourceNode) return;
+    const reskinFrames = sheet.frameCount as AnimationFrameCount;
+    const reskinGrid = ANIMATION_FRAME_GRIDS[reskinFrames];
+    if (!reskinGrid || reskinGrid.cols !== sheet.cols || reskinGrid.rows !== sheet.rows) {
+      store.showToast(t('自定义宫格请通过提示词重新生成；一键换皮支持标准生成宫格'), 'error');
+      return;
+    }
 
     const skinRefs = collectConnectedReferenceMedia(id).references
       .filter((ref) => ref.kind === 'image' && ref.sourceNodeId);
@@ -165,7 +210,7 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
       const label = (target?.data.label || target?.data.fileName || fallback).replace(/[{}:]/g, '');
       return `@{${nodeId}:${label}}`;
     };
-    const sourceLabel = (sourceNode.data.label || '生成动画').replace(/[{}:]/g, '');
+    const sourceLabel = (sourceNode.data.label || '帧动画').replace(/[{}:]/g, '');
     const { node, edge } = createPresetNode(sourceNode, {
       label: `${sourceLabel} 换皮`,
       icon: 'mdi:hanger',
@@ -178,11 +223,12 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
         ...node.data,
         // createPresetNode 只拼了源节点引用，换皮提示词整体重写
         prompt: buildAnimationReskinPrompt(
-          mentionOf(id, '生成动画'),
+          mentionOf(id, '帧动画'),
           skinRefs.map((ref) => mentionOf(ref.sourceNodeId!, '角色图')),
         ),
         animationAction: action,
-        animationFrames: frameCount,
+        animationFrames: reskinFrames,
+        animationProcessing: processing,
         animationPreviewMode: previewMode,
         nodeWidth,
         nodeHeight,
@@ -201,24 +247,27 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
     setReskinning(false);
     if (ok) live.showToast(t('换皮完成'));
     else live.showToast(fail ? t('换皮失败') : t('请先为该节点选择模型'), 'error');
-  }, [action, frameCount, id, nodeHeight, nodeWidth, previewMode, t]);
+  }, [action, id, nodeHeight, nodeWidth, previewMode, processing, sheet, t]);
 
-  const column = visibleFrameIndex % grid.cols;
-  const row = Math.floor(visibleFrameIndex / grid.cols);
+  const currentEdit = playingFrames[visibleFrameIndex];
+  const layout = preview ?? { cols: grid.cols, rows: grid.rows, cellWidth: (data.imageWidth ?? grid.cols) / grid.cols, cellHeight: (data.imageHeight ?? grid.rows) / grid.rows };
+  const column = currentEdit.sourceIndex % layout.cols;
+  const row = Math.floor(currentEdit.sourceIndex / layout.cols);
   const generatedSheetAspect = data.imageWidth && data.imageHeight
     ? data.imageWidth / data.imageHeight
     : null;
   const sheetAspect = generatedSheetAspect
     ?? parseAspectRatio(data.aspectRatio)
     ?? grid.cols / grid.rows;
-  const cellAspect = sheetAspect * grid.rows / grid.cols;
+  const cellAspect = preview ? preview.cellWidth / preview.cellHeight : sheetAspect * layout.rows / layout.cols;
   const cellWidthPercent = cellAspect >= 1 ? 100 : cellAspect * 100;
   const cellHeightPercent = cellAspect >= 1 ? 100 / cellAspect : 100;
   const frameImageStyle: React.CSSProperties = {
-    width: `${cellWidthPercent * grid.cols}%`,
-    height: `${cellHeightPercent * grid.rows}%`,
-    left: `${(100 - cellWidthPercent) / 2 - column * cellWidthPercent}%`,
-    top: `${(100 - cellHeightPercent) / 2 - row * cellHeightPercent}%`,
+    clipPath: animationFrameStyle(layout, currentEdit).clipPath,
+    width: `${cellWidthPercent * layout.cols}%`,
+    height: `${cellHeightPercent * layout.rows}%`,
+    left: `${(100 - cellWidthPercent) / 2 - column * cellWidthPercent + currentEdit.offsetX / layout.cellWidth * cellWidthPercent}%`,
+    top: `${(100 - cellHeightPercent) / 2 - row * cellHeightPercent + currentEdit.offsetY / layout.cellHeight * cellHeightPercent}%`,
   };
 
   return (
@@ -234,6 +283,11 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
       <div
         className={`node animation-node ${selected ? 'selected' : ''} ${data.status === 'loading' ? 'loading' : ''} ${justCompleted ? 'just-completed' : ''}`}
         style={{ height: nodeHeight }}
+        onDoubleClick={(event) => {
+          event.stopPropagation();
+          if ((event.target as Element).closest('button, input, select, textarea, a, [role="button"], [contenteditable="true"], .react-flow__handle')) return;
+          openEditor();
+        }}
       >
         <div className="animation-preview">
           {displaySrc ? (
@@ -242,14 +296,18 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
                 <img className="animation-frame-sheet" src={displaySrc} alt="" style={frameImageStyle} draggable={false} />
               </div>
             ) : (
-              <img className="animation-sheet" src={displaySrc} alt={t('{action} Sprite Sheet', { action: t(ANIMATION_ACTION_LABELS[action]) })} draggable={false} />
+              <div className="animation-curated-sheet" style={{ gridTemplateColumns: `repeat(${grid.cols}, minmax(0, 1fr))` }}>
+                {playingFrames.map((edit) => <div key={edit.sourceIndex} className="animation-cell" style={{ aspectRatio: `${layout.cellWidth} / ${layout.cellHeight}` }}>
+                  <img className="animation-frame-sheet" src={displaySrc} alt={t('第 {index} 帧', { index: edit.sourceIndex + 1 })} style={animationFrameStyle(layout, edit)} draggable={false} />
+                </div>)}
+              </div>
             )
           ) : data.status === 'loading' ? (
             <NodeGenerationProgress nodeId={id} fallbackLabel={t('正在生成 Sprite Sheet')} />
           ) : (
             <div className="animation-empty">
               <Icon icon="mdi:animation-play-outline" width="38" height="38" />
-              <span>{t('点击节点描述角色并生成')}</span>
+              <span>{t('双击编辑帧动画')}</span>
               <small>{t(ANIMATION_ACTION_LABELS[action])} · {t('{count} 帧', { count: frameCount })} · {grid.cols}×{grid.rows}</small>
             </div>
           )}
@@ -320,7 +378,8 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
                 onChange={(event) => {
                   updateNodeDataTransient(id, { animationFps: Number(event.target.value) });
                 }}
-                onPointerDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => { event.stopPropagation(); commitToHistory(); }}
+                onKeyDown={(event) => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) commitToHistory(); }}
               />
               <span className="animation-transport-counter">{fps}</span>
               <button
@@ -331,7 +390,7 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
                 aria-pressed={loop}
                 onClick={(event) => {
                   event.stopPropagation();
-                  updateNodeDataTransient(id, { animationLoop: !loop });
+                  updateNodeData(id, { animationLoop: !loop });
                   if (loop) return;
                   setFrameIndex(0);
                   setPaused(false);
@@ -348,12 +407,18 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
             <Icon icon="mdi:motion-play-outline" width="14" height="14" />
             {t(ANIMATION_ACTION_LABELS[action])}
           </span>
+          <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" aria-label={t('编辑帧动画')} onClick={(event) => { event.stopPropagation(); openEditor(); }}>
+            <Icon icon="mdi:tune" width="13" />{t('编辑')}
+          </button>
+          <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" aria-label={t('生成帧动画')} data-tooltip={t('生成帧动画')} onClick={(event) => { event.stopPropagation(); useAppStore.getState().openNodeDialog(id); }}>
+            <Icon icon="mdi:creation-outline" width="13" />{!displaySrc && t('生成')}
+          </button>
           {displaySrc && (
             <span className="animation-param-actions">
               <button
                 type="button"
                 className="animation-param-btn"
-                data-tooltip={t('切帧导出：选 .gif 出动图，选 .png 出序列帧')}
+                data-tooltip={t('导出 GIF、PNG 序列帧或 JSON 图集')}
                 disabled={exporting}
                 onClick={handleExport}
               >
@@ -379,6 +444,8 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
         </div>
 
         {data.error && <NodeError nodeId={id} message={data.error} />}
+        {processingError && <div className="animation-processing-hint" role="status">{processingError}</div>}
+        {!processingError && !!preview?.warnings.length && <div className="animation-processing-hint" role="status">{preview.warnings[0]}</div>}
         <Handle type="source" position={Position.Left} id="left" className="node-handle handle-source handle-animation">
           <GooeyBtn className="gooey-btn-left" hue={292} />
         </Handle>
@@ -397,6 +464,7 @@ function AnimationNode({ id, data, selected }: { id: string; data: BaseNodeData;
         onResizeEnd={commitToHistory}
         onResize={handleResize}
       />
+      {editorOpen && <Suspense fallback={null}><AnimationEditor nodeId={id} onClose={() => setEditorOpen(false)} /></Suspense>}
     </div>
   );
 }

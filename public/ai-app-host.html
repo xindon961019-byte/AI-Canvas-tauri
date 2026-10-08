@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta id="app-policy" http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-1iThJf7BHO8KbM8TiTa4BhEbFmzRg8W23wMiH9ZEFDo=' 'nonce-__TAURI_SCRIPT_NONCE__'; style-src 'unsafe-inline'; img-src data: blob:; media-src blob:; worker-src blob:; connect-src 'none'; font-src data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'" />
+    <title>AI 应用</title>
+    <style>
+      :root { color-scheme: dark; }
+      :root[data-theme='light'] { color-scheme: light; }
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 12px; background: var(--canvas-surface, Canvas); color: var(--canvas-text, CanvasText); font: 14px/1.5 system-ui, sans-serif; }
+      button, input, select, textarea { font: inherit; }
+      #root { min-height: 100%; overflow-wrap: anywhere; }
+    </style>
+    <style id="app-style"></style>
+  </head>
+  <body>
+    <main id="root" aria-live="polite"></main>
+    <!-- loader 用固定哈希通过此页 CSP；它自己的 nonce 只交给 Tauri 全局 CSP。 -->
+    <!-- 两处占位在打包后可以不同：外链复制此页 meta 的 nonce，避免 strict-dynamic 传播给 Worker。 -->
+    <script nonce="__TAURI_SCRIPT_NONCE__">
+      (() => {
+        const policy = document.getElementById('app-policy').content;
+        const bootstrap = document.createElement('script');
+        bootstrap.src = './ai-app-bootstrap.js';
+        bootstrap.nonce = /'nonce-([^']+)'/.exec(policy)[1];
+        document.head.appendChild(bootstrap);
+      })();
+    </script>
+  </body>
+</html>

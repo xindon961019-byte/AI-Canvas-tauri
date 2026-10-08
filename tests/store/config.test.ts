@@ -47,6 +47,78 @@ beforeEach(() => {
 });
 
 describe('config hydration guard', () => {
+  it('repairs missing CCC addresses on load while retaining custom addresses, group Keys and model identities', async () => {
+    fileMocks.loadConfig.mockResolvedValue({ providers: {
+      cccapi: { name: 'CCC', apiKey: 'legacy-fixture' },
+      'cccapi-pro': { name: 'CCC Pro', catalogId: 'cccapi', cccGroup: 'GPT-特价Pro', apiKey: 'pro-fixture', baseUrl: '   ' },
+      'cccapi-custom': { name: 'CCC Custom', catalogId: 'cccapi', cccGroup: 'GPT-Pro分组', apiKey: 'custom-fixture', baseUrl: 'https://custom.example/v1' },
+      'cccapi-lookalike': { name: '自定义', catalogId: 'custom-openai', apiKey: '', baseUrl: '' },
+    }, generalModels: [{ id: 'ccc-pro-text', name: 'GPT-5.6 Sol', modelId: 'gpt-5.6-sol', category: 'text', providerConfigId: 'cccapi-pro' }] });
+    await useAppStore.getState().loadConfig();
+    const { providers, generalModels } = useAppStore.getState().config;
+    expect(providers.cccapi).toMatchObject({ apiKey: 'legacy-fixture', baseUrl: 'https://cccapi.cn/v1' });
+    expect(providers['cccapi-pro']).toMatchObject({ apiKey: 'pro-fixture', cccGroup: 'GPT-特价Pro', baseUrl: 'https://cccapi.cn/v1' });
+    expect(providers['cccapi-custom']).toMatchObject({ apiKey: 'custom-fixture', baseUrl: 'https://custom.example/v1' });
+    expect(providers['cccapi-lookalike'].baseUrl).toBe('');
+    expect(generalModels).toEqual([expect.objectContaining({ id: 'ccc-pro-text', modelId: 'gpt-5.6-sol', providerConfigId: 'cccapi-pro' })]);
+  });
+
+  it('saves multiple CCC group credentials and model bindings in one configuration snapshot', async () => {
+    fileMocks.loadConfig.mockResolvedValue({ providers: {} });
+    await useAppStore.getState().loadConfig();
+    for (const [id, group, modelId] of [
+      ['cccapi-banana', '🍌香蕉（官k）', 'nano-banana-pro'],
+      ['cccapi-stable', 'CCC生图稳定', 'gpt-image-2'],
+    ]) useAppStore.getState().saveProviderConfig(id, {
+      name: 'CCC', catalogId: 'cccapi', cccGroup: group, apiKey: `${id}-fixture`,
+      selectedModels: [{ id: modelId, name: modelId, category: 'image', provider: id }],
+    });
+    await useAppStore.getState().saveConfig({ throwOnError: true });
+    expect(fileMocks.saveConfig).toHaveBeenCalledTimes(1);
+    const saved = fileMocks.saveConfig.mock.calls[0][0] as AppConfig;
+    expect(saved.providers['cccapi-banana'].apiKey).toBe('cccapi-banana-fixture');
+    expect(saved.providers['cccapi-stable'].apiKey).toBe('cccapi-stable-fixture');
+    expect(saved.providers['cccapi-banana'].baseUrl).toBe('https://cccapi.cn/v1');
+    expect(saved.providers['cccapi-stable'].baseUrl).toBe('https://cccapi.cn/v1');
+    expect(saved.generalModels).toEqual(expect.arrayContaining([
+      expect.objectContaining({ modelId: 'nano-banana-pro', providerConfigId: 'cccapi-banana' }),
+      expect.objectContaining({ modelId: 'gpt-image-2', providerConfigId: 'cccapi-stable' }),
+    ]));
+    const identities = saved.generalModels!.map((model) => model.id);
+    fileMocks.loadConfig.mockResolvedValue(saved);
+    await useAppStore.getState().loadConfig();
+    expect(useAppStore.getState().config.generalModels!.map((model) => model.id)).toEqual(identities);
+    expect(useAppStore.getState().config.providers['cccapi-banana'].apiKey).toBe('cccapi-banana-fixture');
+    expect(useAppStore.getState().config.providers['cccapi-stable'].apiKey).toBe('cccapi-stable-fixture');
+  });
+  it('keeps CCC group model identities stable and removes only the selected connection references', async () => {
+    useAppStore.setState((state) => ({ config: { ...state.config, providers: {} } }));
+    for (const id of ['cccapi', 'cccapi-free', 'cccapi-stable']) {
+      useAppStore.getState().saveProviderConfig(id, { name: 'CCC', catalogId: 'cccapi', apiKey: `${id}-fixture`,
+        ...(id !== 'cccapi' ? { cccGroup: id } : {}),
+        // 模拟旧目录中仍使用根 provider 的缓存，删除分组不能伤及根连接。
+        selectedModels: [{ id: 'gpt-image-2', name: 'Image', category: 'image', provider: 'cccapi' }],
+      });
+    }
+    const before = useAppStore.getState().config.generalModels!;
+    expect(new Set(before.map((model) => model.id)).size).toBe(3);
+    const stable = before.find((model) => model.providerConfigId === 'cccapi-stable')!;
+    const free = before.find((model) => model.providerConfigId === 'cccapi-free')!;
+    useAppStore.getState().saveProviderConfig('cccapi-stable', useAppStore.getState().config.providers['cccapi-stable']);
+    expect(useAppStore.getState().config.generalModels!.find((model) => model.providerConfigId === 'cccapi-stable')!.id).toBe(stable.id);
+    useAppStore.getState().updateConfig({ assistantImageModelId: `general/${stable.id}` });
+    useAppStore.setState({ nodes: [
+      { id: 'legacy', type: 'ai-image', position: { x: 0, y: 0 }, data: { label: 'Image', type: 'ai-image', provider: 'cccapi', model: 'cccapi/gpt-image-2' } },
+      { id: 'stable', type: 'ai-image', position: { x: 0, y: 0 }, data: { label: 'Image', type: 'ai-image', provider: 'general', model: `general/${stable.id}` } },
+      { id: 'free', type: 'ai-image', position: { x: 0, y: 0 }, data: { label: 'Image', type: 'ai-image', provider: 'general', model: `general/${free.id}` } },
+    ] });
+    await useAppStore.getState().removeProviderConfig('cccapi-free');
+    const state = useAppStore.getState();
+    expect(state.config.generalModels!.map((model) => model.providerConfigId)).toEqual(['cccapi', 'cccapi-stable']);
+    expect(state.config.providers['cccapi-stable'].apiKey).toBe('cccapi-stable-fixture');
+    expect(state.config.assistantImageModelId).toBe(`general/${stable.id}`);
+    expect(state.nodes.map((node) => node.data.model)).toEqual(['cccapi/gpt-image-2', `general/${stable.id}`, undefined]);
+  });
   it('persists an activated appearance before reporting the save as complete', async () => {
     fileMocks.loadConfig.mockResolvedValue({ providers: {} });
     await useAppStore.getState().loadConfig();

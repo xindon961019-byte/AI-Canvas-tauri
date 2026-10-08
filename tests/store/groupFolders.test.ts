@@ -34,6 +34,7 @@ vi.mock('../../src/services/fileService', () => ({
   getProjectDataDir: vi.fn(async () => PROJECT_DIR),
   getAssetUrlFromPath: vi.fn(async (p: string) => `asset://${p}`),
   sanitizeFolderName: (name: string) => name.replace(/[<>:"|?*/\\]/g, '_'),
+  stripVerbatimPrefix: (path: string) => path.replace(/^[\\/]{2}\?[\\/]/, ''),
 }));
 
 vi.mock('../../src/services/indexedDb/mediaRelocations', async (original) => ({
@@ -50,8 +51,9 @@ vi.mock('../../src/services/pollManager', () => ({
 }));
 
 import { useAppStore } from '../../src/store/useAppStore';
-import { finishProjectFileRelocation } from '../../src/services/fileService';
+import { copyFileToProjectData, finishProjectFileRelocation, getProjectDataDir, removeEmptyProjectGroupFolder } from '../../src/services/fileService';
 import { persistMediaRelocation, pendingMediaRelocations } from '../../src/services/indexedDb/mediaRelocations';
+import { copyNodeMedia } from '../../src/services/nodeMediaCopy';
 
 function node(id: string): Node<BaseNodeData> {
   return {
@@ -75,6 +77,12 @@ beforeEach(() => {
   renameGroupFolder.mockClear();
   moveProjectFileToFolder.mockClear();
   vi.mocked(finishProjectFileRelocation).mockClear();
+  vi.mocked(getProjectDataDir).mockClear();
+  vi.mocked(getProjectDataDir).mockResolvedValue(PROJECT_DIR);
+  vi.mocked(removeEmptyProjectGroupFolder).mockClear();
+  vi.mocked(persistMediaRelocation).mockClear();
+  vi.mocked(pendingMediaRelocations).mockClear();
+  vi.mocked(pendingMediaRelocations).mockResolvedValue([]);
 });
 
 describe('展开分组内创建和拖入空节点', () => {
@@ -162,6 +170,166 @@ describe('展开分组内创建和拖入空节点', () => {
 });
 
 describe('分组与本地文件夹同步', () => {
+  it('没有迁移时不保存，正文更新也不重新遍历或请求项目目录', async () => {
+    await useAppStore.getState().syncGroupFiles();
+    const save = vi.mocked(useAppStore.getState().saveCurrentProjectSilent);
+    expect(save).not.toHaveBeenCalled();
+    vi.mocked(getProjectDataDir).mockClear();
+    useAppStore.getState().updateNodeDataTransient('a', { output: '新的正文' });
+    await useAppStore.getState().syncGroupFiles();
+    expect(getProjectDataDir).not.toHaveBeenCalled();
+    expect(moveProjectFileToFolder).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('媒体签名未变也检查并恢复 pending，不依赖下一次编辑', async () => {
+    await useAppStore.getState().syncGroupFiles();
+    const move = { oldPath: `${PROJECT_DIR}/old.png`, newPath: `${PROJECT_DIR}/new.png`,
+      projectId: 'p1', assetUrl: `asset://${PROJECT_DIR}/new.png`, relativePath: 'new.png' };
+    vi.mocked(pendingMediaRelocations).mockResolvedValueOnce([move]);
+    await useAppStore.getState().syncGroupFiles();
+    expect(useAppStore.getState().saveCurrentProjectSilent).toHaveBeenCalledOnce();
+    expect(finishProjectFileRelocation).toHaveBeenCalledWith(move.oldPath, move.newPath, PROJECT_DIR);
+  });
+
+  it('只保留最近项目的媒体签名，回访项目会重新检查目录', async () => {
+    await useAppStore.getState().syncGroupFiles();
+    useAppStore.setState({ currentProjectId: 'p2' });
+    await useAppStore.getState().syncGroupFiles();
+    vi.mocked(getProjectDataDir).mockClear();
+    useAppStore.setState({ currentProjectId: 'p1' });
+    await useAppStore.getState().syncGroupFiles();
+    expect(getProjectDataDir).toHaveBeenCalledOnce();
+    expect(getProjectDataDir).toHaveBeenCalledWith('p1');
+    expect(useAppStore.getState().saveCurrentProjectSilent).not.toHaveBeenCalled();
+  });
+
+  it('已在目标目录的大画布只线性读取媒体字段', async () => {
+    const count = 1000;
+    let pathReads = 0;
+    const nodes = Array.from({ length: count }, (_, index) => {
+      const result = node(`media-${index}`);
+      Object.defineProperty(result.data, 'filePath', {
+        enumerable: true, get: () => { pathReads += 1; return `${PROJECT_DIR}/${index}.png`; },
+      });
+      return result;
+    });
+    useAppStore.setState({ nodes });
+    await useAppStore.getState().syncGroupFiles();
+    expect(pathReads).toBeLessThan(count * 20);
+    expect(moveProjectFileToFolder).not.toHaveBeenCalled();
+    expect(useAppStore.getState().saveCurrentProjectSilent).not.toHaveBeenCalled();
+  });
+
+  it('复制租约暂时跳过的源文件不会被缓存为已同步', async () => {
+    const path = `${PROJECT_DIR}/pinned.png`;
+    const source = { ...node('a'), data: { ...node('a').data, filePath: path } };
+    useAppStore.setState({ nodes: [source, node('b')] });
+    createGroup(['a', 'b']);
+    let release!: (result: { filePath: string; assetUrl: string; fileName: string }) => void;
+    vi.mocked(copyFileToProjectData).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const copying = copyNodeMedia(source.data, 'p1');
+    await useAppStore.getState().syncGroupFiles();
+    expect(moveProjectFileToFolder).not.toHaveBeenCalled();
+    release({ filePath: `${PROJECT_DIR}/copied.png`, assetUrl: 'asset://copied.png', fileName: 'copied.png' });
+    await copying;
+    await useAppStore.getState().syncGroupFiles();
+    expect(useAppStore.getState().nodes.find((item) => item.id === 'a')?.data.filePath).toBe(`${PROJECT_DIR}/分组/pinned.png`);
+  });
+
+  it('一个项目等待 IO 时，另一个项目的恢复请求会在退出后执行', async () => {
+    let release!: (moves: []) => void;
+    vi.mocked(pendingMediaRelocations).mockImplementationOnce(() => new Promise<[]>((resolve) => { release = resolve; }));
+    const first = useAppStore.getState().syncGroupFiles();
+    const move = { oldPath: `${PROJECT_DIR}/old.png`, newPath: `${PROJECT_DIR}/new.png`,
+      projectId: 'p2', assetUrl: `asset://${PROJECT_DIR}/new.png`, relativePath: 'new.png' };
+    useAppStore.setState({ currentProjectId: 'p2' });
+    vi.mocked(useAppStore.getState().saveCurrentProjectSilent).mockResolvedValue('p2');
+    vi.mocked(pendingMediaRelocations).mockResolvedValueOnce([move]);
+    await useAppStore.getState().syncGroupFiles();
+    release([]);
+    await first;
+    expect(pendingMediaRelocations).toHaveBeenCalledWith('p2');
+    expect(finishProjectFileRelocation).toHaveBeenCalledWith(move.oldPath, move.newPath, PROJECT_DIR);
+  });
+
+  it('同项目只有 revision 变化时不立即重跑，显式请求仍可重试', async () => {
+    let revision = 0;
+    useAppStore.setState({ getCurrentRevision: () => revision });
+    let release!: (moves: []) => void;
+    vi.mocked(pendingMediaRelocations).mockImplementationOnce(() => new Promise<[]>((resolve) => { release = resolve; }));
+    const syncing = useAppStore.getState().syncGroupFiles();
+    revision += 1;
+    release([]);
+    await syncing;
+    expect(pendingMediaRelocations).toHaveBeenCalledOnce();
+    expect(getProjectDataDir).not.toHaveBeenCalled();
+    await useAppStore.getState().syncGroupFiles();
+    expect(pendingMediaRelocations).toHaveBeenCalledTimes(2);
+    expect(getProjectDataDir).toHaveBeenCalledOnce();
+  });
+
+  it('忙碌期间的同项目请求合并成后续一轮', async () => {
+    useAppStore.setState({ nodes: [node('coalesced')] });
+    let release!: (moves: []) => void;
+    vi.mocked(pendingMediaRelocations).mockImplementationOnce(() => new Promise<[]>((resolve) => { release = resolve; }));
+    const syncing = useAppStore.getState().syncGroupFiles();
+    await useAppStore.getState().syncGroupFiles();
+    await useAppStore.getState().syncGroupFiles();
+    release([]);
+    await syncing;
+    expect(pendingMediaRelocations).toHaveBeenCalledTimes(2);
+    expect(getProjectDataDir).toHaveBeenCalledOnce();
+  });
+
+  it('复制期间同项目改源会重扫最新文件，旧结果不写回', async () => {
+    let revision = 0;
+    useAppStore.setState({ getCurrentRevision: () => revision });
+    const oldPath = `${PROJECT_DIR}/old.png`;
+    const newPath = `${PROJECT_DIR}/regenerated.png`;
+    useAppStore.setState({ nodes: [{ ...node('a'), data: { ...node('a').data, filePath: oldPath } }, node('b')] });
+    createGroup(['a', 'b']);
+    let release!: (path: string) => void;
+    moveProjectFileToFolder.mockImplementationOnce(() => new Promise<string>((resolve) => { release = resolve; }));
+    const syncing = useAppStore.getState().syncGroupFiles();
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    useAppStore.getState().updateNodeDataTransient('a', { filePath: newPath, output: '生成完成' });
+    revision += 1;
+    release(`${PROJECT_DIR}/分组/old.png`);
+    await syncing;
+    expect(persistMediaRelocation).not.toHaveBeenCalledWith(expect.objectContaining({ oldPath }), undefined);
+    expect(useAppStore.getState().nodes.find((item) => item.id === 'a')?.data)
+      .toMatchObject({ filePath: `${PROJECT_DIR}/分组/regenerated.png`, output: '生成完成' });
+  });
+
+  it('等待保存期间新增旧路径引用时，重扫并再次保存后才清理源文件', async () => {
+    const path = `${PROJECT_DIR}/a.png`;
+    useAppStore.setState({ nodes: [{ ...node('a'), data: { ...node('a').data, filePath: path } }, node('b')] });
+    createGroup(['a', 'b']);
+    let release!: (id: string) => void;
+    vi.mocked(useAppStore.getState().saveCurrentProjectSilent)
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { release = resolve; }));
+    const syncing = useAppStore.getState().syncGroupFiles();
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    useAppStore.getState().updateNodeDataTransient('b', { filePath: path });
+    release('p1');
+    await syncing;
+    const save = vi.mocked(useAppStore.getState().saveCurrentProjectSilent);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(finishProjectFileRelocation).toHaveBeenCalledOnce();
+    expect(vi.mocked(finishProjectFileRelocation).mock.invocationCallOrder[0]).toBeGreaterThan(save.mock.invocationCallOrder[1]);
+  });
+
+  it('空分组改名也先保存，再清理旧空目录', async () => {
+    createGroup(['a', 'b']);
+    const groupId = useAppStore.getState().groups[0].id;
+    useAppStore.getState().renameGroup(groupId, '空镜头');
+    await vi.waitFor(() => expect(removeEmptyProjectGroupFolder).toHaveBeenCalledWith(PROJECT_DIR, '分组'));
+    const save = vi.mocked(useAppStore.getState().saveCurrentProjectSilent);
+    expect(save).toHaveBeenCalled();
+    expect(save.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(removeEmptyProjectGroupFolder).mock.invocationCallOrder[0]);
+  });
+
   it('保存失败时保留源文件，下次同步完成已提交迁移', async () => {
     const path = `${PROJECT_DIR}/a.png`;
     useAppStore.setState({ nodes: [{ ...node('a'), data: { ...node('a').data, filePath: path } }, node('b')] });
@@ -248,7 +416,7 @@ describe('分组与本地文件夹同步', () => {
     ]);
   });
 
-  it('改名时同步重命名文件夹并更新分组节点标签', () => {
+  it('改名时同步重命名文件夹并更新分组节点标签', async () => {
     createGroup(['a', 'b']);
     const groupId = useAppStore.getState().groups[0].id;
 
@@ -258,6 +426,7 @@ describe('分组与本地文件夹同步', () => {
     expect(renameGroupFolder).not.toHaveBeenCalled();
     expect(useAppStore.getState().groups[0].name).toBe('镜头一');
     expect(useAppStore.getState().nodes.find((n) => n.id === groupId)?.data.label).toBe('镜头一');
+    await vi.waitFor(() => expect(removeEmptyProjectGroupFolder).toHaveBeenCalledWith(PROJECT_DIR, '分组'));
   });
 
   it('文件跟着分组走：入组搬进分组文件夹，出组搬回项目根目录', async () => {

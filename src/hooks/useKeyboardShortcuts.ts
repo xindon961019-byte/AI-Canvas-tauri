@@ -27,7 +27,7 @@ const GENERATOR_NODE_SHORTCUTS: NodeShortcutDefinition[] = [
   { type: 'ai-video', label: '生成视频' },
   { type: 'ai-audio', label: '生成音频' },
   { type: 'ai-panorama', label: '生成360全景' },
-  { type: 'ai-animation', label: '生成动画' },
+  { type: 'ai-animation', label: '帧动画' },
   { type: 'ai-director', label: '3D 导演台' },
 ];
 
@@ -166,6 +166,9 @@ export function useKeyboardShortcuts() {
         } catch { /* 非 Tauri 环境 */ }
         return;
       }
+
+      // 编辑器内的空格、数字、撤销和删除交给控件，避免捕获阶段误操作背后的画布。
+      if (target.closest?.('.animation-editor')) return;
 
       // Ctrl+Shift+Space: 打开资源搜索窗口（Win+Space 被系统占用时的可靠备选；不与输入法冲突）
       if (e.ctrlKey && e.shiftKey && e.code === 'Space') {

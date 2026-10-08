@@ -8,7 +8,7 @@ import type { NodeType } from '../../src/types';
 interface Element { type: unknown; props: Record<string, unknown> & { children?: unknown } }
 const driver = vi.hoisted(() => ({
   store: null as StoreApi<AppState> | null,
-  states: [] as unknown[], refs: [] as Array<{ current: unknown }>,
+  states: [] as unknown[], setters: [] as Array<(next: unknown) => void>, refs: [] as Array<{ current: unknown }>,
   effects: [] as Array<{ deps?: readonly unknown[]; cleanup?: () => void }>,
   pending: [] as Array<() => void>, stateIndex: 0, refIndex: 0, effectIndex: 1,
   dirty: false, listProject: vi.fn(), listGlobal: vi.fn(), listExternal: vi.fn(), drag: vi.fn(),
@@ -47,11 +47,12 @@ vi.mock('react', async () => {
   useState: <T,>(initial: T | (() => T)) => {
     const index = driver.stateIndex++;
     if (!(index in driver.states)) driver.states[index] = typeof initial === 'function' ? (initial as () => T)() : initial;
-    return [driver.states[index], (next: T | ((old: T) => T)) => {
+    driver.setters[index] ??= (next: unknown) => {
       const value = typeof next === 'function' ? (next as (old: T) => T)(driver.states[index] as T) : next;
       if (!Object.is(value, driver.states[index])) driver.dirty = true;
       driver.states[index] = value;
-    }];
+    };
+    return [driver.states[index], driver.setters[index]];
   },
   useRef: <T,>(initial: T) => {
     const index = driver.refIndex++;
@@ -96,7 +97,8 @@ vi.mock('../../src/services/fileService', async () => ({
 vi.mock('../../src/services/clipboardService', () => ({ copyFile: driver.copyClipboard, copyText: driver.copyText, readClipboardFolders: driver.readClipboard }));
 vi.mock('../../src/services/assetImageDetails', () => ({ loadAssetImageDetails: driver.imageDetails }));
 vi.mock('../../src/services/assetVideoDetails', () => ({ loadAssetVideoHistory: driver.videoHistory }));
-vi.mock('../../src/services/indexedDbService', () => ({
+vi.mock('../../src/services/indexedDbService', async () => ({
+  imageHistoryReferenceKey: (await vi.importActual<typeof import('../../src/services/indexedDbService')>('../../src/services/indexedDbService')).imageHistoryReferenceKey,
   getAllAssetMeta: async () => [], putAssetMeta: vi.fn(), deleteAssetMeta: vi.fn(),
 }));
 vi.mock('../../src/store/store.dramaAssets', () => ({ countUnreadDramaAssets: () => 0 }));
@@ -133,7 +135,7 @@ import Tabs, { type TabsProps } from '../../src/components/shared/Tabs';
 import AssetFolderNavigation, { type AssetFolderNavigationProps } from '../../src/components/assets/AssetFolderNavigation';
 import AssetFileContextMenu, { type AssetFileContextMenuProps } from '../../src/components/assets/AssetFileContextMenu';
 import { useKeyboardShortcuts } from '../../src/hooks/useKeyboardShortcuts';
-import { isExternalDropCaptured } from '../../src/utils/dropCapture';
+import { isExternalDropCaptured, setExternalDropCaptured } from '../../src/utils/dropCapture';
 
 class Target {
   tagName = 'DIV'; isContentEditable = false; canvas = true; control = false; drawer = false;
@@ -210,7 +212,8 @@ function openNodeList() {
 }
 
 beforeEach(() => {
-  driver.states = []; driver.refs = []; driver.effects = []; driver.pending = [];
+  setExternalDropCaptured(false);
+  driver.states = []; driver.setters = []; driver.refs = []; driver.effects = []; driver.pending = [];
   driver.memos = []; driver.memoIndex = 0;
   driver.reduceMotion = true;
   driver.globalFolders = [];
@@ -264,6 +267,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   driver.effects.forEach((effect) => effect?.cleanup?.());
+  setExternalDropCaptured(false);
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -516,7 +520,7 @@ describe('资产卡片悬浮提示', () => {
     expect(cardElement().props['data-tooltip']).toContain('正在读取');
     await readPrompt();
     expect(driver.imageDetails).toHaveBeenCalledWith(cards()[0].props.file, 'project-1', expect.any(AbortSignal));
-    expect(cardElement().props['data-tooltip']).toBe('提示词：编辑后的 提示词。拖拽到画布可添加节点');
+    expect(cardElement().props['data-tooltip']).toBe('拖拽到画布可添加节点；\n提示词：编辑后的 提示词\n标签：\n夜景');
     expect(driver.markUsed).not.toHaveBeenCalled();
     expect(all(cardElement(), (element) => element.type === 'asset-thumb')[0].props.showNativeTooltip).toBe(false);
   });
@@ -551,7 +555,7 @@ describe('资产卡片悬浮提示', () => {
     driver.listProject.mockResolvedValue([{ name: '视频', path: '/video.mp4', category: 'video', size: 12 }]);
     await open('modal'); hover(); await readPrompt();
     expect(driver.videoHistory).toHaveBeenCalledWith('/video.mp4', undefined, 'project-1', expect.any(AbortSignal));
-    expect(cardElement().props['data-tooltip']).toBe('提示词：视频提示词。拖出弹窗到画布可添加节点');
+    expect(cardElement().props['data-tooltip']).toBe('拖出弹窗到画布可添加节点；\n提示词：视频提示词\n标签：\n暂无标签');
     driver.store!.setState({ currentProjectId: null });
     driver.store!.getState().setAssetsPanelOpen(true, 'page', { tab: 'permanent', folder: { kind: 'all' } });
     render(); await vi.advanceTimersByTimeAsync(0); render(); hover(); await readPrompt();

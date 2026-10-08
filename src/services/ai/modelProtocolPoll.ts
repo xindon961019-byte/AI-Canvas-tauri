@@ -32,6 +32,7 @@ import {
   DEFAULT_MAX_QUERY_RETRIES,
   DEFAULT_MAX_RETRY_DELAY_MS,
   DEFAULT_RETRY_HTTP_STATUSES,
+  isRecord,
   resolveAuthentication,
   validateHeaderName,
 } from './modelProtocolShared';
@@ -73,6 +74,10 @@ export function resolvePoll(
       ? structuredClone(result.base64Transform)
       : undefined,
     resultFetchUrl: result.fetchUrl,
+    resultDownload: result.download ? {
+      url: buildSameOriginUrl(baseUrl, result.download, context),
+      headers: renderRequestHeaders(result.download, { type: 'none' }, '', context),
+    } : undefined,
     errorPath: response.errorPath,
     progressPath: response.progressPath,
     intervalMs: poll.intervalMs ?? 3000,
@@ -163,9 +168,13 @@ function buildResolvedRequestInit(
 ): RequestInit {
   const errors: string[] = [];
   validateAuthentication(poll.auth, errors);
+  if (poll.headers !== undefined && !isRecord(poll.headers)) {
+    throw new Error('轮询请求头必须是 JSON 对象');
+  }
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(poll.headers ?? {})) {
     validateHeaderName(name, '轮询请求 ', errors);
+    if (typeof value !== 'string') errors.push('轮询请求头的值必须是字符串');
     headers[name] = value;
   }
   if (errors.length > 0) throw new Error(errors[0]);
@@ -193,6 +202,16 @@ export async function pollResolvedModelProtocol(
   allowedBaseUrl?: string,
   validateResponse?: (payload: unknown) => void,
 ): Promise<ExecuteModelProtocolResult> {
+  if (poll.resultDownload) {
+    if (!allowedBaseUrl) throw new Error('同源结果下载缺少厂商连接地址');
+    if (new URL(poll.resultDownload.url).origin !== new URL(allowedBaseUrl).origin) {
+      throw new Error('模型结果下载地址与厂商连接地址不同源');
+    }
+    // 恢复描述按不可信数据处理；在发起任何查询前复核下载 Header 和鉴权。
+    buildResolvedRequestInit({
+      ...poll, method: 'GET', headers: poll.resultDownload.headers, body: undefined,
+    }, apiKey);
+  }
   if (allowedBaseUrl) {
     const pollUrl = new URL(poll.url);
     const baseUrl = new URL(allowedBaseUrl);
@@ -254,6 +273,7 @@ export async function pollResolvedModelProtocol(
     isComplete: (payload) => {
       const status = normalizeStatus(readModelProtocolFirstScalar(payload, poll.statusPath));
       if (!successValues.has(status)) return null;
+      if (poll.resultDownload) return {};
       const urls = poll.resultUrlPath ? readModelProtocolUrls(payload, poll.resultUrlPath) : [];
       const base64Urls = poll.resultBase64Path
         ? readModelProtocolUrls(payload, poll.resultBase64Path).map((value) =>
@@ -282,6 +302,14 @@ export async function pollResolvedModelProtocol(
     timeoutMsg: '模型任务轮询超时',
     signal,
   });
+  if (poll.resultDownload) {
+    return {
+      urls: await fetchSameOriginResultUrls(
+        [poll.resultDownload.url], allowedBaseUrl!, poll.auth, apiKey,
+        poll.resultMimeType, signal, poll.resultDownload.headers,
+      ),
+    };
+  }
   if (result.urls && poll.resultFetchUrl) {
     if (!allowedBaseUrl) throw new Error('同源结果下载缺少厂商连接地址');
     return {

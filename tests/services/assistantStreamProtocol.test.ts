@@ -46,6 +46,30 @@ beforeEach(() => {
 });
 
 describe('assistant custom protocol boundary', () => {
+  it('streams identical CCC models with the selected group Key and never borrows another group Key', async () => {
+    for (const group of ['pro', 'discount']) {
+      useAppStore.getState().saveProviderConfig(`cccapi-${group}`, {
+        name: 'CCC', catalogId: 'cccapi', cccGroup: group, apiKey: `${group}-fixture`, baseUrl: 'https://cccapi.cn/v1',
+        selectedModels: [{ id: 'gpt-5', name: 'GPT', category: 'text', provider: `cccapi-${group}`, executionProfile: { preset: 'openai-chat' } }],
+      });
+    }
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(
+      'data: {"choices":[{"delta":{"content":"回复"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      { headers: { 'Content-Type': 'text/event-stream' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    for (const model of useAppStore.getState().config.generalModels!) {
+      useAppStore.getState().updateConfig({ assistantModelId: model.id });
+      await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', onEvent: vi.fn() })).resolves.toBe('回复');
+      const init = fetchMock.mock.calls.at(-1)![1];
+      expect(init.headers).toMatchObject({ Authorization: `Bearer ${useAppStore.getState().config.providers[model.providerConfigId].apiKey}` });
+      expect(JSON.parse(init.body).model).toBe('gpt-5');
+    }
+    useAppStore.getState().setProviderKey('cccapi-discount', '');
+    fetchMock.mockClear();
+    await expect(streamAssistantReply({ systemPrompt: '', userMessage: '你好', onEvent: vi.fn() })).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
   it.each([
     {
       preset: 'anthropic-chat' as const,

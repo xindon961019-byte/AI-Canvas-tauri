@@ -2,7 +2,7 @@
  * 应用主侧栏，集中承载节点创建、项目入口、功能面板切换、更新状态与快捷操作。
  */
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { getVersion } from '@tauri-apps/api/app';
+import { useAppVersion } from '../hooks/useAppVersion';
 import { createPortal } from 'react-dom';
 import type { JSX } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
@@ -79,7 +79,7 @@ const generationItems: {
   },
   {
     type: 'ai-animation',
-    label: '生成动画',
+    label: '帧动画',
     sub: '2D 角色逐帧动画',
     icon: <Icon icon={NODE_TYPE_CONFIG['ai-animation'].icon} width="18" height="18" />,
   },
@@ -352,7 +352,7 @@ function AvatarMenu() {
   /** 「关于」里连点 logo 的计数与重置计时器；纯交互状态，不参与渲染所以用 ref */
   const logoTapsRef = useRef(0);
   const logoTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [appVersion, setAppVersion] = useState('0.1.0');
+  const appVersion = useAppVersion();
   const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'no-update' | 'available' | 'updating' | 'error'>('idle');
   const [updateMsg, setUpdateMsg] = useState('');
   const [updateVersion, setUpdateVersion] = useState('');
@@ -385,10 +385,6 @@ function AvatarMenu() {
       setUpdateMsg(t('下载失败，请稍后重试'));
     }
   };
-
-  useEffect(() => {
-    getVersion().then(setAppVersion).catch(() => {});
-  }, []);
 
   // 连点 logo 达到阈值时打开样式预览窗口；超过间隔没有下一次点击就重新计数
   const handleLogoClick = useCallback(() => {

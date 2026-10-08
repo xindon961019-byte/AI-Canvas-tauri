@@ -48,6 +48,20 @@ interface BuiltInWorkflowSpec {
 
 const BUILT_IN_SPECS: BuiltInWorkflowSpec[] = [
   {
+    id: 'builtin-dlss5-image-enhance',
+    name: 'DLSS5 图片材质增强',
+    fileName: 'dlss5-image-enhance.json',
+    category: 'ai-image',
+    defaultNodes: { image: '1' },
+  },
+  {
+    id: 'builtin-dlss5-video-enhance',
+    name: 'DLSS5 视频材质增强',
+    fileName: 'dlss5-video-enhance.json',
+    category: 'ai-video',
+    defaultNodes: { video: '1' },
+  },
+  {
     id: 'builtin-qwen3-voice-clone',
     name: 'Qwen3-TTS-01-原声1比1克隆',
     fileName: 'qwen3-voice-clone.json',

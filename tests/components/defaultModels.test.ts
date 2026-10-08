@@ -25,6 +25,25 @@ function createConfig(selectedModels: ProviderModelSelection[]): AppConfig {
 }
 
 describe('内置厂商动态模型目录', () => {
+  it('GRSAI 新模型分类正确，默认目录不再列出已下架 GPT-5.4，已有选择保持可读', () => {
+    const models = defaultModelGroups.find((group) => group.id === 'grsai')!.models;
+    for (const [id, kind] of [['nano-banana-2.1', 'image'], ['gpt-image-2.5', 'image'], ['gpt-image-2.5-flare', 'image'], ['gpt-image-2.5-sunburst', 'image'], ['minimax-h3', 'video'], ['gpt-6-astra', 'text'], ['gpt-5.6-sol', 'text'], ['gpt-5.6-terra', 'text'], ['gemini-3.5-flash-lite', 'text'], ['gemini-3.7-flash', 'text'], ['gemini-3.8-flash', 'text']]) {
+      expect(models.find((model) => model.value === `grsai/${id}`)?.nodeTypes).toContain(`ai-${kind}`);
+    }
+    expect(models.some((model) => model.value === 'grsai/gpt-5.4')).toBe(false);
+    const config: AppConfig = { theme: 'dark', providers: { grsai: { name: 'GRSAI', apiKey: 'configured', selectedModels: [{ id: 'gpt-5.4', name: 'GPT-5.4', category: 'text', provider: 'grsai' }] } } };
+    expect(getConfiguredModelGroups(config, 'ai-text').flatMap((group) => group.models).map((model) => model.value)).toEqual(['grsai/gpt-5.4']);
+    expect(getConfiguredModelGroups(config, 'ai-video')).toEqual([]);
+  });
+  it('新模型按媒体分类展示且不自动启用', () => {
+    const models = defaultModelGroups.find((group) => group.id === 'apimart')!.models;
+    for (const [id, kind] of [['claude-opus-4-8', 'text'], ['qwen3.8-max', 'text'], ['grok-imagine-image-2.0', 'image'], ['seedream-5-0-flash', 'image'], ['wan3.0-video', 'video'], ['seedance-2.5', 'video'], ['suno-v6-mini', 'audio'], ['flowmusic-lyria-3.5', 'audio']]) {
+      expect(models.find((model) => model.value === `apimart/${id}`)?.nodeTypes).toContain(`ai-${kind}`);
+    }
+    const configured = createConfig([{ id: 'gpt-5.4', name: 'GPT', category: 'text', provider: 'apimart' }]);
+    expect(getConfiguredModelGroups(configured, 'ai-image')).toEqual([]);
+    expect(getConfiguredModelGroups(configured, 'ai-audio')).toEqual([]);
+  });
   it('云工作流进入媒体目录并保留指定连接，旧无参数合同的云 ID 不再作为可运行选项', () => {
     const config: AppConfig = { theme: 'dark', providers: { runninghub: { name: 'RH 工作流', apiKey: 'configured' } } };
     const workflows = [{ id: 'cloud-video', name: '云视频', category: 'ai-video' as const, adapterType: 'runninghub' as const, runninghub: { version: 1 as const, kind: 'workflow' as const, remoteId: '1904152026220003329', connectionId: 'runninghub-model' as const, parameters: [] }, fileName: 'RH', fileContent: '', createdAt: 1 }];
@@ -80,10 +99,21 @@ describe('内置厂商动态模型目录', () => {
     expect(models.filter((model) => model.nodeTypes.includes('ai-video'))).toHaveLength(6);
   });
 
-  it('内置 GRSAI 官网当前完整模型目录', () => {
+  it('内置 GRSAI 当前目录与兼容型号', () => {
     const models = defaultModelGroups.find((group) => group.id === 'grsai')?.models ?? [];
 
     expect(models.map((model) => model.value)).toEqual([
+      'grsai/gpt-6-astra',
+      'grsai/gpt-5.6-sol',
+      'grsai/gpt-5.6-terra',
+      'grsai/gemini-3.5-flash-lite',
+      'grsai/gemini-3.7-flash',
+      'grsai/gemini-3.8-flash',
+      'grsai/nano-banana-2.1',
+      'grsai/gpt-image-2.5',
+      'grsai/gpt-image-2.5-flare',
+      'grsai/gpt-image-2.5-sunburst',
+      'grsai/minimax-h3',
       'grsai/gpt-image-2',
       'grsai/gpt-image-2-vip',
       'grsai/nano-banana-pro',
@@ -97,7 +127,6 @@ describe('内置厂商动态模型目录', () => {
       'grsai/nano-banana-pro-4k-vip',
       'grsai/nano-banana-pro-vip',
       'grsai/nano-banana-2-4k-cl',
-      'grsai/gpt-5.4',
       'grsai/gpt-5.5',
       'grsai/gemini-3.1-flash-lite',
       'grsai/gemini-3.1-pro',
@@ -107,8 +136,9 @@ describe('内置厂商动态模型目录', () => {
       'grsai/gemini-2.5-flash',
       'grsai/gemini-2.5-pro',
     ]);
-    expect(models.filter((model) => model.nodeTypes.includes('ai-image'))).toHaveLength(13);
-    expect(models.filter((model) => model.nodeTypes.includes('ai-text'))).toHaveLength(9);
+    expect(models.filter((model) => model.nodeTypes.includes('ai-image'))).toHaveLength(17);
+    expect(models.filter((model) => model.nodeTypes.includes('ai-text'))).toHaveLength(14);
+    expect(models.filter((model) => model.nodeTypes.includes('ai-video'))).toHaveLength(1);
   });
 
   it('把已选的 GRSAI 旧版模型 ID 映射到当前官网模型', () => {
@@ -272,6 +302,21 @@ describe('Sora2U 独立模型分组', () => {
 });
 
 describe('CCC API 独立模型分组', () => {
+  it('distinguishes the same image model across CCC groups in node and conversation menus', () => {
+    const grouped: AppConfig = { theme: 'dark', providers: {
+      'cccapi-free': { name: 'CCC', apiKey: 'free', catalogId: 'cccapi', cccGroup: 'CCC生图白嫖' },
+      'cccapi-stable': { name: 'CCC', apiKey: 'stable', catalogId: 'cccapi', cccGroup: 'CCC生图稳定' },
+    } };
+    const models = ['free', 'stable'].map((suffix) => ({ id: suffix, name: 'GPT Image 2',
+      modelId: 'gpt-image-2', category: 'image' as const, providerConfigId: `cccapi-${suffix}` }));
+    const groups = getGeneralModelGroups(models, grouped, 'ai-image');
+    expect(groups.map((group) => group.name)).toEqual(['CCC API · CCC生图白嫖', 'CCC API · CCC生图稳定']);
+    expect(groups.flatMap((group) => group.models.map((model) => model.label)))
+      .toEqual(['GPT Image 2 · CCC生图白嫖', 'GPT Image 2 · CCC生图稳定']);
+    const media = getMediaModelOptions(models, grouped).filter((model) => model.provider === 'general');
+    expect(media.map((model) => model.value)).toEqual(['general/free', 'general/stable']);
+    expect(media.map((model) => model.label)).toEqual(groups.flatMap((group) => group.models.map((model) => model.label)));
+  });
   const config: AppConfig = {
     providers: {
       cccapi: { name: 'CCC API', apiKey: 'k', catalogId: 'cccapi', selectedModels: [] },

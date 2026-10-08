@@ -41,5 +41,7 @@ export default defineConfig({
   },
   optimizeDeps: {
     entries: ["index.html", "plugin-ui-host.html"],
+    // 这些特效首次使用才加载，启动时先准备好，避免生成途中触发依赖重建。
+    include: ["thinking-orbs", "border-beam", "metal-fx"],
   },
 });

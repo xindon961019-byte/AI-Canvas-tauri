@@ -271,8 +271,9 @@ export function useCanvasContextMenu() {
   const handleCopyNodes = useCallback(() => {
     const state = useAppStore.getState();
     if (state.selectedNodeIds.length === 0) return;
-    state.copySelectedNodes();
-    useAppStore.getState().showToast(`已复制 ${state.selectedNodeIds.length} 个节点`);
+    if (state.copySelectedNodes()) {
+      useAppStore.getState().showToast(`已复制 ${state.selectedNodeIds.length} 个节点`);
+    }
     closeMenu();
   }, [closeMenu]);
 

@@ -304,12 +304,13 @@ async function scanDuplicateFiles(
 }
 
 /**
- * 收集所有节点引用的 filePath（用于孤儿检测）
+ * 收集节点和历史里的文件引用，用于孤儿检测。
  * @param allNodeData 所有项目所有节点的 data 数组
+ * @param root 这些数据所属项目的目录，用来解析相对引用
  */
-export function collectNodeFilePaths(allNodeData: Array<{ data?: Record<string, unknown> }>): Set<string> {
+export function collectNodeFilePaths(allNodeData: Array<{ data?: Record<string, unknown> }>, root?: string): Set<string> {
   const paths = new Set<string>();
-  collectReferences(allNodeData, paths);
+  collectReferences(allNodeData, paths, root);
   return paths;
 }
 
@@ -318,7 +319,7 @@ export function collectNodeFilePaths(allNodeData: Array<{ data?: Record<string, 
  */
 export async function scanStorageHealth(
   projects: CanvasProject[],
-  nodeFilePaths: Set<string> | (() => Set<string>),
+  nodeFilePaths: Set<string> | (() => Set<string> | Promise<Set<string>>),
   assetFolders: { path: string; label: string }[] = [],
 ): Promise<StorageHealthReport> {
   const report: StorageHealthReport = {
@@ -364,7 +365,7 @@ export async function scanStorageHealth(
       }
     }
   }
-  const livePaths = typeof nodeFilePaths === 'function' ? nodeFilePaths() : nodeFilePaths;
+  const livePaths = typeof nodeFilePaths === 'function' ? await nodeFilePaths() : nodeFilePaths;
   for (const path of livePaths) references.add(pathKey(path));
 
   // 1. 扫描各项目存储

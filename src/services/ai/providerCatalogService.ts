@@ -26,9 +26,11 @@ import type {
 import type { NormalizedModelExecutionProtocol } from '../../types/aiTypes';
 import { corsSafeFetch } from './httpTransport';
 import { baseUrlCandidates } from './providerBaseUrl';
-import { APIMART_OMNI_MODELS, isLegacyApimartOmni } from './apimartVideoModels';
+import { APIMART_OMNI_MODELS, APIMART_UPDATED_VIDEO_MODELS, isLegacyApimartOmni } from './apimartVideoModels';
 import { getChatApiHeaders, normalizeGeminiModelId, resolveChatApiProtocol } from './chatApiProtocol';
 import { XAI_BASE_URL, XAI_MODEL_MANIFEST } from './providers/xaiModelManifest';
+import { GRSAI_ADDED_MODELS } from './grsaiModels';
+import { filterCccGroupModels } from './cccProviderGroups';
 import {
   GOOGLE_GEMINI_BASE_URL,
   GOOGLE_MODEL_MANIFEST,
@@ -271,7 +273,7 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
     defaultBaseUrl: CCCAPI_BASE_URL,
     modelsPath: '/models',
     allowCustomBaseUrl: false,
-    externalUrl: 'https://cccapi.cn',
+    externalUrl: 'https://cccapi.cn/keys',
     credentials: [
       { ...API_KEY_FIELD, placeholder: 'sk-...' },
     ],
@@ -354,12 +356,13 @@ const BUILT_IN_PROVIDER_DEFINITIONS: ProviderDefinition[] = [
   {
     id: 'grsai',
     name: 'GRSAI',
-    description: '图像生成与多模态文本模型服务',
+    description: '图像、视频与多模态文本模型服务',
     badgeText: 'GR',
     authType: 'api-key',
     catalogAdapter: 'local-manifest',
     defaultBaseUrl: GRSAI_BASE_URL,
     allowCustomBaseUrl: false,
+    models: GRSAI_ADDED_MODELS,
     credentials: [
       API_KEY_FIELD,
       { key: 'baseUrl', label: '接口地址', required: false, placeholder: GRSAI_BASE_URL },
@@ -494,14 +497,13 @@ export function resolveWebSearchProviderId(
 }
 
 /**
- * 连接 ID：内置厂商每种只允许一条连接，直接用目录 ID；
- * 自定义接口可以有多条，加随机后缀区分。
+ * CCC 分组、自定义接口与工作流允许多条连接，各自使用独立的凭据身份。
  */
 export function createConnectionId(providerId: string): string {
-  if (providerId !== 'custom-openai' && providerId !== 'workflow-api') return providerId;
+  if (!['custom-openai', 'workflow-api', 'cccapi'].includes(providerId)) return providerId;
   const suffix = globalThis.crypto?.randomUUID?.().slice(0, 8)
     ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
-  return `${providerId === 'workflow-api' ? 'workflow-api' : 'custom'}-${suffix}`;
+  return `${providerId === 'custom-openai' ? 'custom' : providerId}-${suffix}`;
 }
 
 export function getProviderDefinition(
@@ -660,6 +662,36 @@ function mergeRemoteCatalogMetadata(
   });
 }
 
+// 这些是界面版本选择 ID；执行时仍提交主模型 + version，不能绕过当前 Key 的目录。
+const APIMART_MUSIC_VERSION_PARENTS: Readonly<Record<string, string>> = {
+  'flowmusic-lyria-3.5': 'flowmusic',
+  'suno-v6': 'suno',
+  'suno-v6-wild': 'suno',
+  'suno-v6-mini': 'suno',
+};
+
+function expandApimartCatalog(
+  models: ProviderModelSelection[],
+  fallbackModels: ProviderModelSelection[],
+  providerId: string,
+): ProviderModelSelection[] {
+  const availableIds = new Set(models.map((model) => model.id));
+  return [
+    ...models.map((remote) => {
+      const known = [...APIMART_OMNI_MODELS, ...APIMART_UPDATED_VIDEO_MODELS]
+        .find((model) => model.id === remote.id);
+      if (known) return { ...remote, ...known, provider: providerId };
+      return remote.id === 'suno' ? { ...remote, category: 'audio' as const } : remote;
+    }),
+    ...APIMART_OMNI_MODELS.filter((model) => fallbackModels.some((item) => item.id === model.id)
+      && !availableIds.has(model.id)).map((model) => ({ ...model, provider: providerId })),
+    ...fallbackModels.filter((model) => {
+      const parent = APIMART_MUSIC_VERSION_PARENTS[model.id];
+      return parent && availableIds.has(parent) && !availableIds.has(model.id);
+    }),
+  ];
+}
+
 function safeCatalogError(error: unknown): string {
   if (error instanceof DOMException && error.name === 'AbortError') return '模型列表拉取已取消';
   if (error instanceof Error && /^模型列表拉取失败 \(HTTP \d{3}\)$/.test(error.message)) {
@@ -762,7 +794,9 @@ export async function fetchProviderModelCatalog(
     return { models: [...models.values()], source: 'local-manifest' };
   }
   if (definition.catalogAdapter === 'local-manifest') {
-    return { models: normalizedFallback, source: 'local-manifest' };
+    return { models: definition.id === 'grsai'
+      ? mergeRemoteCatalogMetadata(normalizedFallback, [...GRSAI_ADDED_MODELS])
+      : normalizedFallback, source: 'local-manifest' };
   }
 
   try {
@@ -772,28 +806,22 @@ export async function fetchProviderModelCatalog(
       config,
       signal,
     );
+    const catalogModels = mergeRemoteCatalogMetadata(
+      definition.id === 'apimart'
+        ? expandApimartCatalog(models, normalizedFallback, providerId)
+        : models,
+      normalizedFallback,
+    );
     return {
-      models: mergeRemoteCatalogMetadata(
-        definition.id === 'apimart'
-          ? [
-              ...models.map((remote) => {
-                const omni = APIMART_OMNI_MODELS.find((model) => model.id === remote.id);
-                return omni ? { ...remote, ...omni, provider: providerId } : remote;
-              }),
-              ...APIMART_OMNI_MODELS.filter((model) => normalizedFallback.some((item) => item.id === model.id)
-                && !models.some((remote) => remote.id === model.id))
-                .map((model) => ({ ...model, provider: providerId })),
-            ]
-          : models,
-        normalizedFallback,
-      ),
+      models: definition.id === 'cccapi' ? filterCccGroupModels(catalogModels, config.cccGroup) : catalogModels,
       source: 'remote',
       resolvedBaseUrl: baseUrl,
     };
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error;
     const warning = safeCatalogError(error);
-    if (normalizedFallback.length > 0) {
+    // CCC 分组权限由 Key 决定，不能用全站目录伪装成该 Key 的可用模型。
+    if (!(definition.id === 'cccapi' && config.cccGroup) && normalizedFallback.length > 0) {
       return { models: normalizedFallback, source: 'local-fallback', warning };
     }
     throw new Error(warning, { cause: error });

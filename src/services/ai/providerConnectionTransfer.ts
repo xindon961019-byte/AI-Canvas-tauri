@@ -62,6 +62,7 @@ export function serializeConnection(config: ApiProviderConfig, workflows: Workfl
     connection: {
       name: config.name,
       catalogId: config.catalogId,
+      ...(config.catalogId === 'cccapi' ? { cccGroup: config.cccGroup } : {}),
       baseUrl: config.baseUrl,
       chatApiProtocol: resolveChatApiProtocol(config.chatApiProtocol),
       selectedModels: config.selectedModels,
@@ -186,6 +187,7 @@ export function parseConnectionShare(text: string): ParsedConnectionShare | null
       baseUrl: customWorkflow ? normalizeWorkflowApiBaseUrl(asString(source.baseUrl), true) : normalizeBaseUrl(asString(source.baseUrl), chatApiProtocol) || undefined,
       chatApiProtocol,
       catalogId,
+      ...(catalogId === 'cccapi' ? { cccGroup: asString(source.cccGroup)?.slice(0, 120) } : {}),
       selectedModels: customWorkflow ? [] : parseModels(source.selectedModels),
       catalogModels: customWorkflow ? [] : parseModels(source.catalogModels),
       visibleModelCategories: visible,

@@ -19,6 +19,7 @@ import { resolveDramaAssetImageRef, resolveDramaVoiceRef } from '../../../servic
 import { getApimartSeedanceCapability } from '../../../services/ai/apimartVideoModels';
 import { getVolcengineSeedanceCapability } from '../../../services/ai/volcengineVideoModels';
 import { getDreaminaVideoCapability } from '../../../services/ai/dreaminaModels';
+import { getGrsaiVideoCapability } from '../../../services/ai/grsaiModels';
 import { AUTODL_H3_WORKFLOW } from '../../../services/workflowApi/autodlWorkflowManifest';
 import { getModelProtocolPresetVideoCapability } from '../../../services/ai/modelProtocol';
 import {
@@ -383,6 +384,8 @@ export default function VideoParamSelector({
   const dreaminaCapability = provider === 'dreamina'
     ? getDreaminaVideoCapability(selectedModel)
     : undefined;
+  const grsaiCapability = provider === 'grsai'
+    ? getGrsaiVideoCapability(selectedModel, seedanceResolution) : undefined;
   const generalCapability = generalModel
     ? generalModel.videoCapability
       ?? getModelProtocolPresetVideoCapability(generalModel.executionProfile)
@@ -405,6 +408,7 @@ export default function VideoParamSelector({
     }
     : undefined;
   const baseParameterCapability = nativeParameterCapability
+    ?? grsaiCapability
     ?? workflowApiCapability
     ?? generalCapability;
   const selectedInputMode = resolveVideoParameterInputMode(
@@ -438,7 +442,7 @@ export default function VideoParamSelector({
     frameRate: videoFps,
     generateAudio,
   });
-  const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina' || Boolean(apimartCapability || workflowApiCapability);
+  const isNativeSeedance = provider === 'volcengine' || provider === 'dreamina' || Boolean(apimartCapability || grsaiCapability || workflowApiCapability);
   const generalControlSupport = resolveGeneralVideoControlSupport(generalCapability);
   // 本地工作流（ComfyUI / RunningHub）才按像素分辨率 + 帧率走；
   // 其余接口模型使用按秒表达的 API 布局；具体控件仍只由 capability 决定。
@@ -473,6 +477,7 @@ export default function VideoParamSelector({
       : genericRatios;
   // 参考素材上限只能读模型真正声明的值，不能用 UI 兼容默认值充当模型约束。
   const referenceLimits = apimartCapability
+    ?? grsaiCapability
     ?? volcengineCapability
     ?? dreaminaCapability
     ?? workflowApiCapability

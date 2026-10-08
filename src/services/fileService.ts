@@ -3,13 +3,15 @@
  * 节点输出另存为、系统文件管理器定位。基础设施见 ./fs/core，删除域见 ./fs/trash，
  * 全局资产库见 ./fs/assetLibrary（均通过本模块统一对外导出）。
  */
-import { exists, writeFile, readFile as tauriReadFile, stat, rename, mkdir } from '@tauri-apps/plugin-fs';
+import { exists, writeFile, readFile as tauriReadFile, stat, lstat, rename, mkdir } from '@tauri-apps/plugin-fs';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isLocalMediaUrl, isRemoteMediaUrl, localMediaUrlToPath } from '../utils/mediaUrl';
-import { identifyAsset } from './fs/assetIndex';
+import { identifyAsset, getRelativeAssetPath } from './fs/assetIndex';
+import { readAssetTextFile } from './fs/assetTextFiles';
 import { walkDirectoryFiles } from './fs/assetLibrary';
+import { completeMediaRelocation, persistMediaRelocation, type MediaRelocation } from './indexedDb/mediaRelocations';
 import {
   decodeDataUrlBytesAsync,
   MEDIA_DATA_URL_BYTE_LIMITS,
@@ -463,6 +465,7 @@ export {
   type CustomStyleRecord,
 } from './storageService';
 export * from './fs/core';
+export * from './fs/assetTextFiles';
 export * from './fs/assetIndex';
 export * from './fs/trash';
 export * from './fs/assetLibrary';
@@ -1082,6 +1085,91 @@ export async function renameProjectFileToLabel(
     console.warn('[fileService] renameProjectFileToLabel failed:', filePath, err);
     return null;
   }
+}
+
+/** 磁盘改名结果；部分完成时同时返回最新位置和提醒。 */
+export interface AssetFileRenameResult {
+  file: AssetFileEntry;
+  warning?: string;
+}
+
+const assetRenameLocks = new Set<string>();
+
+/** 就地改名图片或文档；保留资产身份，引用同步失败时恢复磁盘原名。 */
+export async function renameAssetFile(
+  file: AssetFileEntry, label: string, projectId: string | undefined, roots: readonly string[],
+  onRelocated: (move: MediaRelocation) => void,
+): Promise<AssetFileRenameResult> {
+  if (!isTauriEnv() || !['image', 'text'].includes(file.category) || file.availability === 'offline') throw new Error('仅支持重命名可访问的本地图片或文本文件');
+  const path = stripVerbatimPrefix(file.path).replace(/\\/g, '/');
+  if (path.split('/').some((part) => part === '.' || part === '..' || part === '.trash')) throw new Error('文件位置无效');
+  const oldName = path.split('/').pop() ?? '';
+  const extension = oldName.lastIndexOf('.') > 0 ? oldName.slice(oldName.lastIndexOf('.')) : '';
+  let base = label.trim();
+  if (extension && base.toLowerCase().endsWith(extension.toLowerCase())) base = base.slice(0, -extension.length);
+  if (!base || /[<>:"/\\|?*]/.test(base) || Array.from(base).some((char) => char.charCodeAt(0) < 32) || /[. ]$/.test(base)
+    || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(base) || base.length + extension.length > 255) {
+    throw new Error('文件名无效，请勿使用路径、特殊字符、保留名称或过长名称');
+  }
+  const name = `${base}${extension}`;
+  if (name === oldName) return { file };
+  const newPath = `${path.slice(0, path.lastIndexOf('/') + 1)}${name}`;
+  const lockKey = /^[a-z]:\//i.test(path) ? path.toLowerCase() : path;
+  if (assetRenameLocks.has(lockKey)) throw new Error('此文件正在改名，请稍候');
+  assetRenameLocks.add(lockKey);
+  try {
+    const { getAssetIndexById, getAssetIndexByPath } = await import('./indexedDbService');
+    const { getGlobalFilesDir } = await import('./fs/assetLibrary');
+    const { fingerprintAssetImage } = await import('./fs/assetImageMetadata');
+    const indexed = file.assetId ? await getAssetIndexById(file.assetId) : await getAssetIndexByPath(path);
+    const samePath = (value: string) => /^[a-z]:\//i.test(value) ? value.toLowerCase() : value;
+    if (indexed && samePath(indexed.path.replace(/\\/g, '/')) !== samePath(path)) throw new Error('文件位置已变化，请刷新后重试');
+    const source = indexed?.source ?? file.source;
+    const ownerId = projectId ?? indexed?.projectId;
+    const root = source === 'project' && ownerId ? await getProjectDataDir(ownerId)
+      : source === 'global' ? await getGlobalFilesDir()
+      : source === 'folder' ? roots.find((candidate) => getRelativeAssetPath(path, candidate) !== undefined) : undefined;
+    const relativePath = root ? getRelativeAssetPath(newPath, root) : undefined;
+    if (!root || !relativePath || getRelativeAssetPath(path, root) === undefined) throw new Error('文件不在已登记的资产目录内');
+    // 内部 JSON 按固定路径和摘要引用，不能按普通素材的方式改名。
+    if (file.category === 'text' && source === 'project'
+      && /^(?:(?:director\/previs|ai-apps)\/[a-f0-9]{64}|director\/scenes\/[^/]+\/(?:scene-r\d+|results\/manifest-r\d+)-[a-f0-9]{64})\.json$/i.test(getRelativeAssetPath(path, root)!)) {
+      throw new Error('此文件由应用内部管理，需要保留原名；请先复制为普通文本文件再改名');
+    }
+    const info = await lstat(path);
+    if (!info.isFile || info.isSymlink) throw new Error('仅支持普通图片或文本文件');
+    if (await exists(newPath)) throw new Error('已有同名文件，请换一个名称');
+    const identity = await identifyAsset(path, { assetId: file.assetId, source: source!, rootPath: root, projectId: ownerId });
+    const content = file.category === 'text' ? await readAssetTextFile(path) : await fingerprintAssetImage(path);
+    const assetUrl = await getAssetUrlFromPath(newPath);
+    if (!assetUrl) throw new Error('无法解析改名后的文件位置');
+    const move: MediaRelocation = { oldPath: path, newPath, oldAssetUrl: file.assetUrl, assetUrl, relativePath,
+      projectId: ownerId ?? 'asset-rename', renamedFileName: name,
+      ...(source !== 'project' ? { assetMove: { assetId: identity.assetId, rootPath: root, source: source as 'global' | 'folder',
+        digest: content.digest, totalBytes: 'bytes' in content ? content.bytes : content.size, mtimeMs: info.mtime?.getTime() ?? 0 } } : {}) };
+    const next: AssetFileEntry = { ...file, assetId: identity.assetId, name, path: newPath, assetUrl, relativePath };
+    // 再次检查目标，名称冲突时不使用自动加序号或覆盖路径。
+    if (await exists(newPath)) throw new Error('已有同名文件，请换一个名称');
+    await rename(path, newPath);
+    try {
+      await persistMediaRelocation(move);
+    } catch {
+      try {
+        if (await exists(path)) throw new Error('原位置已被占用');
+        await rename(newPath, path);
+      } catch {
+        onRelocated(move);
+        notifyProjectDiskChanged();
+        return { file: next, warning: '磁盘文件已改名，但引用同步失败且无法恢复原名，请重新打开资源库检查。' };
+      }
+      throw new Error('引用同步失败，已恢复磁盘原文件名');
+    }
+    onRelocated(move);
+    notifyProjectDiskChanged();
+    try { await completeMediaRelocation(move); }
+    catch { return { file: next, warning: '文件已改名，引用已同步，但操作记录尚未完成清理。' }; }
+    return { file: next };
+  } finally { assetRenameLocks.delete(lockKey); }
 }
 
 /** 获取项目文件列表 */

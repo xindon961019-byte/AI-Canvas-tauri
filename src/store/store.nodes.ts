@@ -35,6 +35,7 @@ import { getCanvasPointerPosition } from '../services/canvasPointerService';
 import { resolveDirectorRuntime } from '../services/directorRuntimeRegistry';
 import { copyNodeMedia, needsNodeMediaCopy, discardCopiedNodeMedia } from '../services/nodeMediaCopy';
 import { registerCanvasDerivation, isCanvasDerivationFresh, completeCanvasDerivation } from '../services/canvasDerivationGuard';
+import { AI_APP_COPY_MESSAGE, AI_APP_CREATION_MESSAGE, assertAiAppNodeInsertion, isAiAppNode } from '../services/aiApps/aiAppCreation';
 
 interface GroupNodeDataAccess {
   groupId: string;
@@ -298,12 +299,50 @@ function insertNodeInGroup(state: Pick<AppState, 'nodes' | 'groups'>, node: Node
   };
 }
 
+function insertPreparedNode(state: AppState, node: Node<BaseNodeData>) {
+  const displayId = getNextDisplayId(state.nodes);
+  const settings = state.projects.find((project) => project.id === state.currentProjectId)?.settings;
+  const data = applyProjectDefaultsToNodeData(node.data, settings);
+  return insertNodeInGroup(state, prepareNodeForInsertion(node, data, displayId));
+}
+
+function appendPreparedNodes(state: AppState, nodes: Node<BaseNodeData>[]): Node<BaseNodeData>[] {
+  const nextNodes = [...state.nodes];
+  const settings = state.projects.find((project) => project.id === state.currentProjectId)?.settings;
+  for (const node of nodes) {
+    const data = applyProjectDefaultsToNodeData(node.data, settings);
+    nextNodes.push(prepareNodeForInsertion(node, data, getNextDisplayId(nextNodes)));
+  }
+  return nextNodes;
+}
+
 function prepareDuplicateNodeData(
   data: BaseNodeData,
   nodeType: string | undefined,
   cloneId: string,
+  includeContent: boolean,
 ): BaseNodeData {
   const duplicate = structuredClone(data);
+
+  if (!includeContent) {
+    // 拖拽复用生成配置，不带走上一份结果、文件身份或运行记录。
+    for (const key of [
+      'output', 'imageUrl', 'videoUrl', 'audioUrl', 'sourceUrl', 'thumbnailUrl',
+      'fileName', 'filePath', 'assetId', 'relativePath', 'artifactId', 'mediaVersion',
+      'imageWidth', 'imageHeight', 'videoWidth', 'videoHeight', 'videoDuration', 'videoBatchFingerprint',
+      'mattingMask', 'annotation', 'annotationLayer', 'batchGroupId',
+      'runninghubOutputs', 'runninghubStage', 'workflowApiOutputs', 'workflowApiStage', 'pluginOutputs',
+      'musicClipId', 'animationSheet', 'animationEdits',
+      'storyboardExtracted', 'storyboardOverrides', 'shotlistRows',
+      'shotlistScriptSource', 'shotlistProductionSource', 'frameAnalysis', 'outputHistory',
+      'directorCaptureUrls', 'directorCaptureFilePaths', 'directorScene',
+      'directorPrevisScene', 'directorResultManifest',
+      'dramaAssetId', 'dramaAssetKind', 'characterLibraryLinks', 'hiddenByCharacterLibrary',
+      'agentPresetRunId', 'agentPresetTaskId', 'agentPresetStepIndex', 'agentPresetTotalSteps',
+      'error',
+    ]) delete duplicate[key];
+    duplicate.status = 'idle';
+  }
 
   if (duplicate.status === 'loading') {
     duplicate.status = hasMaterializedNodeOutput(duplicate, nodeType) ? 'success' : 'idle';
@@ -347,6 +386,10 @@ export function collectKeepPaths(
 }
 
 function mergeNodeData(previous: BaseNodeData, patch: Partial<BaseNodeData>): BaseNodeData {
+  if ('type' in patch && patch.type !== previous.type
+    && (patch.type === 'ai-app' || previous.type === 'ai-app')) {
+    throw new Error(AI_APP_CREATION_MESSAGE);
+  }
   const next = { ...previous, ...patch } as BaseNodeData;
   if (previous.type === 'ai-video' && previous.shotlistProductionSource?.kind === 'video'
     && 'seedanceDuration' in patch && patch.seedanceDuration !== previous.seedanceDuration) {
@@ -444,6 +487,9 @@ function pruneDeletedNodesAndEmptyGroups(
   };
 }
 
+// 每个源数组只保留最近一次过滤结果；正文更新不必让连线投影跟着重建。
+const visibleEdgesBySource = new WeakMap<Edge[], Edge[]>();
+
 /** 渲染前剔除隐藏元素：角色库收纳的节点、已折叠分组的子节点，以及它们的连线 */
 export function filterHiddenCanvasElements(
   nodes: Node<BaseNodeData>[],
@@ -458,11 +504,17 @@ export function filterHiddenCanvasElements(
   ));
   if (visibleNodes.length === nodes.length) return { nodes, edges };
   const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
+  const nextEdges = edges.filter(
+    (edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target),
+  );
+  const previousEdges = visibleEdgesBySource.get(edges);
+  const visibleEdges = nextEdges.length === edges.length ? edges
+    : previousEdges?.length === nextEdges.length
+      && nextEdges.every((edge, index) => edge === previousEdges[index]) ? previousEdges : nextEdges;
+  visibleEdgesBySource.set(edges, visibleEdges);
   return {
     nodes: visibleNodes,
-    edges: edges.filter(
-      (edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target),
-    ),
+    edges: visibleEdges,
   };
 }
 
@@ -490,8 +542,8 @@ export interface NodeSlice {
     artifact: MediaGenerationResult,
     position?: { x: number; y: number },
   ) => string;
-  /** 在原位复制一个节点，并让拖出的副本继承入口边——用于 Ctrl 拖拽复制。 */
-  duplicateNode: (nodeId: string) => Promise<string | undefined>;
+  /** 在原位复制节点并继承入口边；拖拽时可只复用配置。 */
+  duplicateNode: (nodeId: string, options?: { includeContent?: boolean }) => Promise<string | undefined>;
   duplicateCanvasNote: (nodeId: string) => string | null | Promise<string | null>;
   convertImageNodeKind: (nodeId: string) => 'to-note' | 'to-node' | 'connected' | null;
   updateCanvasNote: (nodeId: string, patch: CanvasNotePatch) => boolean;
@@ -544,7 +596,7 @@ export function createNodeDuplicateDrag(getState: () => AppState, sourceId: stri
   const getClone = () => getState().currentProjectId === projectId
     ? getState().nodes.find((node) => node.id === cloneId)
     : undefined;
-  const ready = initial.duplicateNode(sourceId).then((id) => {
+  const ready = initial.duplicateNode(sourceId, { includeContent: false }).then((id) => {
     cloneId = id;
     if (getClone()) {
       getState().onNodesChange([{ type: 'position', id: id!, position, dragging }]);
@@ -559,7 +611,7 @@ export function createNodeDuplicateDrag(getState: () => AppState, sourceId: stri
         if (change.type !== 'position' || change.id !== sourceId) return [change];
         if (change.position) position = { ...change.position };
         if (change.dragging !== undefined) dragging = change.dragging;
-        // 媒体文件还在复制时只缓存最新落点，失败时原节点也不会被拖走。
+        // 副本身份就绪前先记住最新落点，原节点始终留在原位。
         const original = getState().currentProjectId === projectId
           ? getState().nodes.find((node) => node.id === sourceId)
           : undefined;
@@ -599,26 +651,21 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
   setSelectedNodeIds: (ids) => set({ selectedNodeIds: ids }),
 
   addNode: (node) => {
+    assertAiAppNodeInsertion([node]);
     get().commitToHistory();
-    get().addNodeTransient(node);
+    set((state) => insertPreparedNode(state, node));
   },
 
   addNodeTransient: (node) => {
-    set((state) => {
-      const displayId = getNextDisplayId(state.nodes);
-      const settings = state.projects.find((project) => project.id === state.currentProjectId)?.settings;
-      const data = applyProjectDefaultsToNodeData(node.data, settings);
-      return insertNodeInGroup(state, prepareNodeForInsertion(node, data, displayId));
-    });
+    assertAiAppNodeInsertion([node]);
+    set((state) => insertPreparedNode(state, node));
   },
 
   addNodeWithEdge: (node, edge) => {
+    assertAiAppNodeInsertion([node]);
     get().commitToHistory();
     set((state) => {
-      const displayId = getNextDisplayId(state.nodes);
-      const settings = state.projects.find((project) => project.id === state.currentProjectId)?.settings;
-      const data = applyProjectDefaultsToNodeData(node.data, settings);
-      const inserted = insertNodeInGroup(state, prepareNodeForInsertion(node, data, displayId));
+      const inserted = insertPreparedNode(state, node);
       const connected = appendConnectionMentions(inserted.nodes, [edge], state.config?.autoMentionOnConnect);
       return {
         ...inserted,
@@ -630,15 +677,10 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
 
   addNodesWithEdges: (nodes, edges) => {
     if (nodes.length === 0) return;
+    assertAiAppNodeInsertion(nodes);
     get().commitToHistory();
     set((state) => {
-      const nextNodes = [...state.nodes];
-      const settings = state.projects.find((project) => project.id === state.currentProjectId)?.settings;
-      for (const node of nodes) {
-        const displayId = getNextDisplayId(nextNodes);
-        const data = applyProjectDefaultsToNodeData(node.data, settings);
-        nextNodes.push(prepareNodeForInsertion(node, data, displayId));
-      }
+      const nextNodes = appendPreparedNodes(state, nodes);
       const connected = appendConnectionMentions(nextNodes, edges, state.config?.autoMentionOnConnect);
       return {
         nodes: connected.nodes,
@@ -649,22 +691,15 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
 
   addNodes: (nodes) => {
     if (nodes.length === 0) return;
+    assertAiAppNodeInsertion(nodes);
     get().commitToHistory();
-    get().addNodesTransient(nodes);
+    set((state) => ({ nodes: appendPreparedNodes(state, nodes) }));
   },
 
   addNodesTransient: (nodes) => {
     if (nodes.length === 0) return;
-    set((state) => {
-      const nextNodes = [...state.nodes];
-      const settings = state.projects.find((project) => project.id === state.currentProjectId)?.settings;
-      for (const node of nodes) {
-        const displayId = getNextDisplayId(nextNodes);
-        const data = applyProjectDefaultsToNodeData(node.data, settings);
-        nextNodes.push(prepareNodeForInsertion(node, data, displayId));
-      }
-      return { nodes: nextNodes };
-    });
+    assertAiAppNodeInsertion(nodes);
+    set((state) => ({ nodes: appendPreparedNodes(state, nodes) }));
   },
 
   createMediaPlaceholder: (intent, requestedPosition) => {
@@ -813,10 +848,9 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
   },
 
   updateNodeData: (nodeId, data) => {
+    const nodes = mergeNodeDataWithShotDurations(get().nodes, new Set([nodeId]), data);
     get().commitToHistory();
-    set((state) => ({
-      nodes: mergeNodeDataWithShotDurations(state.nodes, new Set([nodeId]), data),
-    }));
+    set({ nodes });
   },
 
   updateNodeDataTransient: (nodeId, data) => {
@@ -835,11 +869,9 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
 
   updateNodesDataBatch: (nodeIds, data) => {
     if (nodeIds.length === 0) return;
-    const targetIds = new Set(nodeIds);
+    const nodes = mergeNodeDataWithShotDurations(get().nodes, new Set(nodeIds), data);
     get().commitToHistory();
-    set((state) => ({
-      nodes: mergeNodeDataWithShotDurations(state.nodes, targetIds, data),
-    }));
+    set({ nodes });
   },
 
   linkNodeToCharacter: (nodeId, link, hideNode) => {
@@ -935,13 +967,16 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     return restoredNodeIds;
   },
 
-  duplicateNode: async (nodeId) => {
+  duplicateNode: async (nodeId, options) => {
     const state = get();
     const src = state.nodes.find((n) => n.id === nodeId);
     // 分组节点暂不支持拖拽复制（涉及子节点/边重映射）
     if (!src || src.type === 'group') return;
+    if (isAiAppNode(src)) { state.showToast(AI_APP_COPY_MESSAGE, 'error'); return; }
+    // 笔记承载手写内容，继续沿用完整复制。
+    const includeContent = options?.includeContent !== false || src.type === 'canvas-note';
     let duplicateData = src.data;
-    if (needsNodeMediaCopy(src.data)) {
+    if (includeContent && needsNodeMediaCopy(src.data)) {
       const guard = registerCanvasDerivation(state, nodeId);
       if (!guard) { state.showToast('请先创建项目再复制媒体', 'error'); return; }
       state.showToast('正在复制素材…');
@@ -960,7 +995,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
     }
     get().commitToHistory();
 
-    // 原节点的真实 ID、编号和引用保持不变；新身份与独立素材都属于副本。
+    // 原节点的真实 ID、编号和引用保持不变，副本使用自己的新身份。
     const cloneId = `node-${generateId()}`;
     const newDisplayId = getNextDisplayId(get().nodes);
 
@@ -969,7 +1004,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
         ...src,
         id: cloneId,
         position: { ...src.position },
-        data: { ...prepareDuplicateNodeData(duplicateData, src.type, cloneId), displayId: newDisplayId },
+        data: { ...prepareDuplicateNodeData(duplicateData, src.type, cloneId, includeContent), displayId: newDisplayId },
         selected: false,
         dragging: false,
       } as Node<BaseNodeData>;
@@ -1345,6 +1380,7 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
   },
 
   addNodeFromSelection: (node, sourceIds, projectId) => {
+    assertAiAppNodeInsertion([node]);
     const state = get();
     const sources = resolveBatchSources(state, sourceIds, projectId, node.id);
     if (!sources || !isBatchConnectableNode(node) || state.nodes.some((item) => item.id === node.id)) return false;
@@ -1366,6 +1402,9 @@ export const createNodeSlice: StateCreator<AppState, [], [], NodeSlice> = (set, 
   },
 
   onNodesChange: (changes) => {
+    assertAiAppNodeInsertion(changes.flatMap((change) => (
+      change.type === 'add' || change.type === 'replace' ? [change.item] : []
+    )));
     const removedIds = changes
       .filter((c) => c.type === 'remove')
       .map((c) => c.id);

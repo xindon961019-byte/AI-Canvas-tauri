@@ -49,7 +49,7 @@ const menuItems: { type: NodeType; label: string; icon: JSX.Element; badge?: str
   },
   {
     type: 'ai-animation',
-    label: '动画',
+    label: '帧动画',
     icon: <Icon icon={NODE_TYPE_CONFIG['ai-animation'].icon} width="18" height="18" />,
     badge: 'Sprite',
   },

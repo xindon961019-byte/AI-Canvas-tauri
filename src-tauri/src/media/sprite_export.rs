@@ -1,61 +1,42 @@
-//! Sprite Sheet 切帧导出：按等分宫格把整张图切成单帧，输出 GIF 动图或 PNG 序列帧。
-//!
-//! 目标扩展名决定格式：`.gif` 出一个动图，`.png` 出 `{stem}_00.png` 起的一组序列帧
-//! （Unity / Godot 直接按序列帧导入，因此不额外生成 meta 文件）。
+//! Sprite Sheet 原生处理与编排导出：GIF、PNG 序列帧、PNG 图集 + JSON。
 
+#[cfg(test)]
 use std::fs::File;
-use std::io::BufWriter;
-use std::path::Path;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 
 use image::codecs::gif::{GifEncoder, Repeat};
 use image::{Delay, Frame, RgbaImage};
 use serde_json::json;
 
 use crate::path_policy::{authorize_path, PathAccess};
+use crate::sprite_processing::{self, FrameEdit, SpriteOptions};
 
 const MAX_FRAMES: u32 = 256;
 
 /// 按 cols×rows 等分切出前 frame_count 帧，顺序与生成时一致：从左到右、从上到下。
+#[cfg(test)]
 fn slice_frames(
     sheet: &RgbaImage,
     cols: u32,
     rows: u32,
     frame_count: u32,
 ) -> Result<Vec<RgbaImage>, String> {
-    if cols == 0 || rows == 0 {
-        return Err("宫格行列数必须大于 0".to_string());
-    }
-    if frame_count == 0 || frame_count > cols * rows {
-        return Err(format!("帧数 {frame_count} 超出 {cols}×{rows} 宫格容量"));
-    }
-
-    // 整除取整：余下的几个像素留在右/下边缘，避免逐格累积偏移把后面的帧切歪
-    let cell_width = sheet.width() / cols;
-    let cell_height = sheet.height() / rows;
-    if cell_width == 0 || cell_height == 0 {
-        return Err(format!(
-            "Sprite Sheet {}×{} 太小，无法按 {cols}×{rows} 切分",
-            sheet.width(),
-            sheet.height()
-        ));
-    }
-
-    Ok((0..frame_count)
-        .map(|index| {
-            let x = (index % cols) * cell_width;
-            let y = (index / cols) * cell_height;
-            image::imageops::crop_imm(sheet, x, y, cell_width, cell_height).to_image()
-        })
-        .collect())
+    Ok(
+        sprite_processing::prepare(sheet.clone(), &SpriteOptions::grid(cols, rows, frame_count))?
+            .frames,
+    )
 }
 
 // ponytail: GIF 只有 1 位透明和 256 色，用来预览和分享够了；要保真就导 PNG 序列帧。
-fn write_gif(frames: &[RgbaImage], fps: u32, output: &Path) -> Result<(), String> {
-    let file = File::create(output).map_err(|error| format!("创建 GIF 文件失败: {error}"))?;
-    let mut encoder = GifEncoder::new(BufWriter::new(file));
-    encoder
-        .set_repeat(Repeat::Infinite)
-        .map_err(|error| format!("设置 GIF 循环失败: {error}"))?;
+fn gif_bytes(frames: &[RgbaImage], fps: u32, looping: bool) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut encoder = GifEncoder::new(&mut bytes);
+    if looping {
+        encoder
+            .set_repeat(Repeat::Infinite)
+            .map_err(|_| "设置 GIF 循环失败")?;
+    }
 
     let delay = Delay::from_numer_denom_ms(1000, fps);
     for (index, frame) in frames.iter().enumerate() {
@@ -63,32 +44,130 @@ fn write_gif(frames: &[RgbaImage], fps: u32, output: &Path) -> Result<(), String
             .encode_frame(Frame::from_parts(frame.clone(), 0, 0, delay))
             .map_err(|error| format!("写入第 {} 帧失败: {error}", index + 1))?;
     }
-    drop(encoder); // 丢弃编码器才会写出 GIF 尾块并 flush BufWriter
-    Ok(())
+    drop(encoder);
+    Ok(bytes)
 }
 
-fn write_png_sequence(frames: &[RgbaImage], output: &Path) -> Result<Vec<String>, String> {
-    let parent = output.parent().ok_or("无法解析导出目录".to_string())?;
+/// 每个派生路径独立授权。只创建新文件，任何冲突或写入失败都清理本轮新文件。
+fn publish_outputs(
+    app: &tauri::AppHandle,
+    outputs: Vec<(PathBuf, Vec<u8>)>,
+) -> Result<Vec<String>, String> {
+    let mut authorized = Vec::new();
+    for (path, bytes) in outputs {
+        let path = authorize_path(
+            app,
+            path.to_str().ok_or("导出路径编码无效")?,
+            PathAccess::Write,
+        )?;
+        if path.exists() {
+            return Err("导出文件已存在，请选择新的名称，避免覆盖已有图集或序列帧".into());
+        }
+        authorized.push((path, bytes));
+    }
+    write_new_outputs(authorized)
+}
+
+fn write_new_outputs(outputs: Vec<(PathBuf, Vec<u8>)>) -> Result<Vec<String>, String> {
+    let mut created = Vec::new();
+    for (path, bytes) in outputs {
+        let result = (|| {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|_| "无法创建导出文件，请检查名称和权限")?;
+            created.push(path.clone());
+            let mut writer = BufWriter::new(file);
+            writer.write_all(&bytes).map_err(|_| "导出文件写入失败")?;
+            writer.flush().map_err(|_| "导出文件写入未完成")
+        })();
+        if let Err(error) = result {
+            for created_path in &created {
+                let _ = std::fs::remove_file(created_path);
+            }
+            return Err(error.into());
+        }
+    }
+    Ok(created
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect())
+}
+
+fn encode_outputs(
+    frames: &[RgbaImage],
+    output: &Path,
+    cols: u32,
+    fps: u32,
+    looping: bool,
+    action: Option<&str>,
+    warnings: &[String],
+) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
+    if frames.is_empty() || cols == 0 || fps == 0 {
+        return Err("导出帧或参数无效".into());
+    }
+    let frame_width = frames[0].width();
+    let frame_height = frames[0].height();
+    let extension = output
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let parent = output.parent().ok_or("无法解析导出目录")?;
     let stem = output
         .file_stem()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
-        .unwrap_or("frame");
-
-    frames
-        .iter()
-        .enumerate()
-        .map(|(index, frame)| {
-            let path = parent.join(format!("{stem}_{index:02}.png"));
-            frame
-                .save(&path)
-                .map_err(|error| format!("保存第 {} 帧失败: {error}", index + 1))?;
-            Ok(path.to_string_lossy().into_owned())
-        })
-        .collect()
+        .ok_or("导出名称无效")?;
+    let outputs = match extension.as_str() {
+        "gif" => vec![(output.to_path_buf(), gif_bytes(frames, fps, looping)?)],
+        "png" => frames
+            .iter()
+            .enumerate()
+            .map(|(index, frame)| {
+                Ok((
+                    parent.join(format!("{stem}_{index:03}.png")),
+                    sprite_processing::png_bytes(frame.clone())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+        "json" => {
+            let image = sprite_processing::atlas(frames, cols)?;
+            let columns = cols.min(frames.len() as u32);
+            let rects: Vec<_> = (0..frames.len() as u32).map(|i| json!({"x": i % columns * frame_width, "y": i / columns * frame_height, "w": frame_width, "h": frame_height})).collect();
+            let state = action
+                .filter(|value| {
+                    !value.is_empty()
+                        && value.len() <= 64
+                        && value
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                })
+                .unwrap_or("animation");
+            let manifest = json!({
+                "version": 1, "image": format!("{stem}.png"),
+                "frame_layout": {"sheetWidth": image.width(), "sheetHeight": image.height(), "cellWidth": frame_width, "cellHeight": frame_height, "rows": {state: rects}},
+                "animation": {"rows": {state: {"frames": frames.len(), "fps": fps, "loop": looping, "durations_ms": vec![1000.0 / f64::from(fps); frames.len()]}}},
+                "warnings": warnings,
+            });
+            vec![
+                (
+                    parent.join(format!("{stem}.png")),
+                    sprite_processing::png_bytes(image)?,
+                ),
+                (
+                    output.to_path_buf(),
+                    serde_json::to_vec_pretty(&manifest).map_err(|_| "图集元数据编码失败")?,
+                ),
+            ]
+        }
+        _ => return Err("导出格式无效".into()),
+    };
+    Ok(outputs)
 }
 
-/// 把 Sprite Sheet 切帧导出。`output_path` 的扩展名决定格式：`.gif` / `.png`。
+/// `.gif` 动图、`.png` 序列帧、`.json` 图集 + manifest。原图始终只读。
 #[tauri::command]
 pub async fn export_sprite_frames(
     app: tauri::AppHandle,
@@ -99,11 +178,15 @@ pub async fn export_sprite_frames(
     rows: u32,
     frame_count: u32,
     fps: u32,
+    options: Option<SpriteOptions>,
+    edits: Option<Vec<FrameEdit>>,
+    looping: Option<bool>,
+    action: Option<String>,
 ) -> Result<String, String> {
     crate::path_policy::ensure_trusted_caller(&webview)?;
     let input = authorize_path(&app, &input_path, PathAccess::Read)?;
     if !input.is_file() {
-        return Err(format!("Sprite Sheet 不存在: {input_path}"));
+        return Err("Sprite Sheet 不存在".into());
     }
     let output = authorize_path(&app, &output_path, PathAccess::Write)?;
 
@@ -120,32 +203,21 @@ pub async fn export_sprite_frames(
         .unwrap_or_default()
         .to_ascii_lowercase();
 
-    let sheet = image::open(&input)
-        .map_err(|error| format!("读取 Sprite Sheet 失败: {error}"))?
-        .to_rgba8();
-    let frames = slice_frames(&sheet, cols, rows, frame_count)?;
-    let frame_width = frames[0].width();
-    let frame_height = frames[0].height();
-
-    let files = match extension.as_str() {
-        "gif" => {
-            write_gif(&frames, fps, &output)?;
-            vec![output.to_string_lossy().into_owned()]
-        }
-        "png" => write_png_sequence(&frames, &output)?,
-        other => {
-            return Err(format!(
-                "不支持的导出格式 .{other}，请选择 .gif 或 .png"
-            ))
-        }
-    };
-
-    Ok(json!({
-        "files": files,
-        "frame_width": frame_width,
-        "frame_height": frame_height,
-    })
-    .to_string())
+    if !matches!(extension.as_str(), "gif" | "png" | "json") {
+        return Err("请选择 GIF、PNG 序列帧或 JSON 图集".into());
+    }
+    let options = options.unwrap_or_else(|| SpriteOptions::grid(cols, rows, frame_count));
+    options.validate()?;
+    let _slot = sprite_processing::processing_slot().await?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let prepared = sprite_processing::prepare(sprite_processing::read_sheet(&input)?, &options)?;
+        let frames = sprite_processing::curate(&prepared.frames, edits.as_deref())?;
+        let frame_width = frames[0].width(); let frame_height = frames[0].height();
+        let outputs = encode_outputs(&frames, &output, options.cols, fps, looping.unwrap_or(true), action.as_deref(), &prepared.warnings)?;
+        if outputs.iter().map(|(_, bytes)| bytes.len()).sum::<usize>() > 128 * 1024 * 1024 { return Err("导出产物超过 128 MiB 限制".into()); }
+        let files = publish_outputs(&app, outputs)?;
+        Ok(json!({ "files": files, "frame_width": frame_width, "frame_height": frame_height, "format": extension, "frame_count": frames.len() }).to_string())
+    }).await.map_err(|_| "动画导出任务异常退出".to_string())?
 }
 
 #[cfg(test)]
@@ -166,7 +238,11 @@ mod tests {
         assert_eq!(frames.len(), 8);
         for (index, frame) in frames.iter().enumerate() {
             assert_eq!(frame.dimensions(), (3, 5));
-            assert_eq!(frame.get_pixel(0, 0)[0], index as u8, "第 {index} 帧位置不对");
+            assert_eq!(
+                frame.get_pixel(0, 0)[0],
+                index as u8,
+                "第 {index} 帧位置不对"
+            );
         }
     }
 
@@ -191,7 +267,10 @@ mod tests {
         let frames = slice_frames(&numbered_sheet(), 4, 2, 8).expect("应切出 8 帧");
 
         let gif_path = directory.join("walk.gif");
-        write_gif(&frames, 12, &gif_path).expect("应写出 GIF");
+        write_new_outputs(
+            encode_outputs(&frames, &gif_path, 4, 12, true, Some("walk"), &[]).unwrap(),
+        )
+        .expect("应写出 GIF");
         // 编码器必须已 flush 并写完尾块，否则这里解不出 8 帧
         let decoded = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(
             File::open(&gif_path).expect("应打开 GIF"),
@@ -200,10 +279,13 @@ mod tests {
         assert_eq!(image::AnimationDecoder::into_frames(decoded).count(), 8);
 
         let png_path = directory.join("walk.png");
-        let files = write_png_sequence(&frames, &png_path).expect("应写出序列帧");
+        let files = write_new_outputs(
+            encode_outputs(&frames, &png_path, 4, 12, true, Some("walk"), &[]).unwrap(),
+        )
+        .expect("应写出序列帧");
         assert_eq!(files.len(), 8);
-        assert!(directory.join("walk_00.png").is_file());
-        assert!(directory.join("walk_07.png").is_file());
+        assert!(directory.join("walk_000.png").is_file());
+        assert!(directory.join("walk_007.png").is_file());
 
         std::fs::remove_dir_all(&directory).ok();
     }
@@ -214,6 +296,82 @@ mod tests {
         assert!(slice_frames(&sheet, 4, 2, 9).is_err(), "帧数超容量应报错");
         assert!(slice_frames(&sheet, 4, 2, 0).is_err(), "0 帧应报错");
         assert!(slice_frames(&sheet, 0, 2, 4).is_err(), "0 列应报错");
-        assert!(slice_frames(&sheet, 40, 2, 4).is_err(), "格子小于 1px 应报错");
+        assert!(
+            slice_frames(&sheet, 40, 2, 4).is_err(),
+            "格子小于 1px 应报错"
+        );
+    }
+
+    #[test]
+    fn single_play_gif_omits_loop_extension() {
+        let frames = slice_frames(&numbered_sheet(), 4, 2, 8).unwrap();
+        let once = gif_bytes(&frames, 8, false).unwrap();
+        let looping = gif_bytes(&frames, 8, true).unwrap();
+        assert!(!once.windows(11).any(|w| w == b"NETSCAPE2.0"));
+        assert!(looping.windows(11).any(|w| w == b"NETSCAPE2.0"));
+    }
+
+    #[test]
+    fn atlas_manifest_matches_curated_pixels_and_timing() {
+        let source = slice_frames(&numbered_sheet(), 4, 2, 8).unwrap();
+        let edits: Vec<_> = (0..8)
+            .rev()
+            .map(|source_index| FrameEdit {
+                source_index,
+                enabled: source_index > 4,
+                offset_x: 0,
+                offset_y: 0,
+            })
+            .collect();
+        let frames = sprite_processing::curate(&source, Some(&edits)).unwrap();
+        let outputs = encode_outputs(
+            &frames,
+            Path::new("exports/walk.json"),
+            2,
+            8,
+            false,
+            Some("walk"),
+            &[],
+        )
+        .unwrap();
+        let atlas = image::load_from_memory(&outputs[0].1).unwrap().to_rgba8();
+        assert_eq!(atlas.dimensions(), (6, 10));
+        assert_eq!(atlas.get_pixel(0, 0)[0], 7);
+        assert_eq!(atlas.get_pixel(3, 0)[0], 6);
+        assert_eq!(atlas.get_pixel(0, 5)[0], 5);
+        let manifest: serde_json::Value = serde_json::from_slice(&outputs[1].1).unwrap();
+        assert_eq!(
+            manifest["frame_layout"]["rows"]["walk"][2],
+            json!({"x": 0, "y": 5, "w": 3, "h": 5})
+        );
+        assert_eq!(
+            manifest["animation"]["rows"]["walk"]["durations_ms"],
+            json!([125.0, 125.0, 125.0])
+        );
+        assert_eq!(manifest["animation"]["rows"]["walk"]["loop"], false);
+    }
+
+    #[test]
+    fn collision_preserves_existing_file_and_rolls_back_only_new_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "ai-canvas-sprite-collision-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let first = directory.join("new.png");
+        let existing = directory.join("existing.png");
+        std::fs::write(&existing, b"original").unwrap();
+        assert!(write_new_outputs(vec![
+            (first.clone(), b"new".to_vec()),
+            (existing.clone(), b"replacement".to_vec())
+        ])
+        .is_err());
+        assert!(!first.exists());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"original");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

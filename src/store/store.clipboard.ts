@@ -10,6 +10,7 @@ import { textNodeHeight } from '../utils/num';
 import * as fileService from '../services/fileService';
 import { copyNodeMedia, needsNodeMediaCopy, discardCopiedNodeMedia } from '../services/nodeMediaCopy';
 import { registerCanvasImport, isCanvasDerivationFresh, completeCanvasDerivation } from '../services/canvasDerivationGuard';
+import { AI_APP_COPY_MESSAGE, isAiAppNode } from '../services/aiApps/aiAppCreation';
 
 export interface ClipboardSlice {
   clipboard: {
@@ -18,7 +19,7 @@ export interface ClipboardSlice {
     /** 复制时所在项目；粘贴到别的项目时需要把媒体文件复制过来 */
     projectId: string | null;
   };
-  copySelectedNodes: () => void;
+  copySelectedNodes: () => boolean;
   pasteNodes: (position: { x: number; y: number }) => Promise<void>;
   pasteExternalContent: (position: { x: number; y: number }) => Promise<void>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -66,7 +67,7 @@ export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice
 
   copySelectedNodes: () => {
     const { nodes, selectedNodeIds, groups } = get();
-    if (selectedNodeIds.length === 0) return;
+    if (selectedNodeIds.length === 0) return false;
 
     // Collect all node IDs to copy: selected + descendants of selected group nodes
     const idsToCopy = new Set(selectedNodeIds);
@@ -82,6 +83,12 @@ export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice
       }
     }
 
+    if (nodes.some((node) => idsToCopy.has(node.id) && isAiAppNode(node))) {
+      set({ clipboard: { nodes: [], groups: [], projectId: null } });
+      get().showToast(AI_APP_COPY_MESSAGE, 'error');
+      return false;
+    }
+
     // data 做浅快照：不与源节点共享同一对象，之后编辑源节点不会改到剪贴板内容
     const copiedNodes = nodes
       .filter((n) => idsToCopy.has(n.id))
@@ -90,11 +97,16 @@ export const createClipboardSlice: StateCreator<AppState, [], [], ClipboardSlice
     set({
       clipboard: { nodes: copiedNodes, groups: copiedGroups, projectId: get().currentProjectId },
     });
+    return true;
   },
 
   pasteNodes: async (_position) => {
     const { clipboard } = get();
     if (clipboard.nodes.length === 0) return;
+    if (clipboard.nodes.some(isAiAppNode)) {
+      get().showToast(AI_APP_COPY_MESSAGE, 'error');
+      return;
+    }
     let copiedNodes = clipboard.nodes;
     if (copiedNodes.some((node) => needsNodeMediaCopy(node.data))) {
       const guard = registerCanvasImport(get());

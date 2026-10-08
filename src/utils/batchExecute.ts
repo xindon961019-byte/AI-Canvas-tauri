@@ -24,6 +24,8 @@ import {
 import { persistAudioGenerationResult } from '../services/ai/generateAudio';
 import { resolveVideoSubmissionControls } from '../services/ai/videoRequestResolver';
 import { persistMediaUrlToProjectData } from '../services/fileService';
+import { animationProcessing, animationResultPatch } from '../services/animationService';
+import { completeCanvasDerivation, isCanvasDerivationFresh, registerCanvasDerivation, type CanvasDerivationGuard } from '../services/canvasDerivationGuard';
 
 export interface BatchContext {
   commitToHistory: () => void;
@@ -64,6 +66,20 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
   }
   const nt = d.type as AINodeType;
   const prompt = (d.prompt as string) || '';
+  let animationGuard: CanvasDerivationGuard | null = null;
+  const guarded = nt === 'ai-animation' && !!ctx.currentProjectId;
+  if (guarded) {
+    const { useAppStore } = await import('../store/useAppStore');
+    const state = useAppStore.getState();
+    if (state.currentProjectId !== ctx.currentProjectId) return false;
+    animationGuard = registerCanvasDerivation(state, node.id);
+    if (!animationGuard) return false;
+  }
+  const isFresh = async () => {
+    if (!guarded) return true;
+    const { useAppStore } = await import('../store/useAppStore');
+    return !!animationGuard && isCanvasDerivationFresh(animationGuard, useAppStore.getState());
+  };
 
   ctx.updateNodeDataTransient(node.id, { status: 'loading', error: undefined });
   try {
@@ -98,8 +114,9 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
       const aspectRatio = isAnimation
         ? resolveAnimationSheetAspectRatio(animationFrames, d.provider!)
         : (d.aspectRatio as string) || '1:1';
+      const spriteProcessing = isAnimation ? animationProcessing({ ...d, animationSheet: undefined }) : undefined;
       const requestPrompt = isAnimation
-        ? buildAnimationSpritePrompt(prompt, animationAction, animationFrames, aspectRatio)
+        ? buildAnimationSpritePrompt(prompt, animationAction, animationFrames, aspectRatio, spriteProcessing)
         : prompt;
       const result = await generateImage({
         prompt: requestPrompt,
@@ -111,10 +128,12 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
         workflowInputs: d.workflowInputs,
         nodeId: node.id,
       });
+      if (!await isFresh()) return false;
       const persisted = ctx.currentProjectId
         ? await persistMediaUrlToProjectData(result.url, ctx.currentProjectId, 'ai-image', d.label)
         : { mediaUrl: result.url, sourceUrl: result.url };
       const mediaUrl = persisted.mediaUrl;
+      if (!await isFresh()) return false;
       ctx.updateNodeDataTransient(node.id, {
         imageUrl: mediaUrl,
         sourceUrl: persisted.sourceUrl,
@@ -124,7 +143,7 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
         status: 'success',
         imageWidth: result.width,
         imageHeight: result.height,
-        ...(isAnimation ? { aspectRatio } : {}),
+        ...(isAnimation ? { aspectRatio, ...animationResultPatch(d) } : {}),
       });
       {
         const { useAppStore } = await import('../store/useAppStore');
@@ -134,7 +153,7 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
         nodeId: node.id,
         nodeLabel: d.label,
         timestamp: Date.now(),
-        prompt,
+        prompt: requestPrompt,
         output: persisted.sourceUrl,
         nodeType: nt,
         model: d.model!,
@@ -149,6 +168,8 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
               animationAction,
               animationFrames,
               grid: ANIMATION_FRAME_GRIDS[animationFrames],
+              animationProcessing: spriteProcessing,
+              animationPromptVersion: 1,
             }
           : { imageSize, aspectRatio },
       });
@@ -305,6 +326,7 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
     }
     return true;
   } catch (err) {
+    if (!await isFresh()) return false;
     const msg = err instanceof Error ? err.message : typeof err === 'string' && err.trim() ? err : '生成失败';
     ctx.updateNodeDataTransient(node.id, { status: 'error', error: msg });
     ctx.recordOutputHistory(node.id, {
@@ -320,6 +342,8 @@ async function executeOneNode(node: Node<BaseNodeData>, ctx: BatchContext): Prom
       error: msg,
     });
     return false;
+  } finally {
+    if (animationGuard) completeCanvasDerivation(animationGuard);
   }
 }
 

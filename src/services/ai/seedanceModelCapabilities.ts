@@ -273,9 +273,8 @@ function getTransportCapability(
 
   capability.allowFrameAndReferenceMix = false;
   if (model === '2.5') {
-    capability.resolutions = ['480p', '720p'];
     capability.defaultDuration = 5;
-    delete capability.automaticDurationValue;
+    // APIMart 的 video_urls 同时承载参考视频与编辑，由提示词判定；不强制所有参考任务为自动时长。
     delete capability.operationCapabilities;
   }
   return capability;

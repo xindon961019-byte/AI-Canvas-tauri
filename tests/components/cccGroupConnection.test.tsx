@@ -1,0 +1,253 @@
+import type { ComponentProps, ReactElement } from 'react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+interface HookScope { values: unknown[]; index: number }
+const driver = vi.hoisted(() => ({ scope: null as HookScope | null, catalog: vi.fn() }));
+vi.mock('react', async () => ({
+  ...await vi.importActual<typeof import('react')>('react'),
+  useState: <T,>(initial: T | (() => T)) => {
+    const scope = driver.scope!;
+    const index = scope.index++;
+    if (!(index in scope.values)) scope.values[index] = typeof initial === 'function' ? (initial as () => T)() : initial;
+    return [scope.values[index] as T, (value: T | ((previous: T) => T)) => {
+      scope.values[index] = typeof value === 'function' ? (value as (previous: T) => T)(scope.values[index] as T) : value;
+    }];
+  },
+  useRef: <T,>(initial: T) => {
+    const scope = driver.scope!;
+    return scope.values[scope.index++] ??= { current: initial };
+  },
+  useMemo: <T,>(factory: () => T) => factory(),
+  useEffect: () => {},
+}));
+vi.mock('react-dom', () => ({ createPortal: (children: unknown) => children }));
+vi.mock('../../src/i18n', () => ({ useT: () => (text: string) => text }));
+vi.mock('../../src/store/useAppStore', () => ({ useAppStore: { getState: () => ({ workflows: [] }) } }));
+vi.mock('../../src/services/ai/providerCatalogService', async (original) => ({
+  ...await original<typeof import('../../src/services/ai/providerCatalogService')>(),
+  fetchProviderModelCatalog: (...args: unknown[]) => driver.catalog(...args),
+}));
+import ProviderConnectionDialog from '../../src/components/settings/ProviderConnectionDialog';
+import { CccGroupConnectionsForm } from '../../src/components/settings/providerConnection/ProviderConnectionForm';
+import AnimatedButton from '../../src/components/shared/AnimatedButton';
+import { getProviderDefinition } from '../../src/services/ai/providerCatalogService';
+import { CCC_PROVIDER_GROUPS } from '../../src/services/ai/cccProviderGroups';
+
+type Element = ReactElement<Record<string, unknown> & { children?: unknown }>;
+type Props = ComponentProps<typeof CccGroupConnectionsForm>;
+let props: Props;
+let tree: unknown;
+function elements(value: unknown): Element[] {
+  if (Array.isArray(value)) return value.flatMap(elements);
+  if (!value || typeof value !== 'object' || !('props' in value)) return [];
+  const element = value as Element;
+  return [element, ...elements(element.props.children)];
+}
+function render() {
+  driver.scope!.index = 0;
+  tree = CccGroupConnectionsForm(props);
+}
+function field(label: string) {
+  return elements(tree).find((element) => element.props['aria-label'] === label)!;
+}
+function key(group: string, value: string) {
+  (field(`${group} API Key`).props.onChange as (event: unknown) => void)({ target: { value } }); render();
+}
+function toggle(group: string, modelId: string) {
+  (field(`启用 ${group} ${modelId}`).props.onChange as () => void)(); render();
+}
+async function pull(group: string) {
+  await (field(`拉取模型 ${group}`).props.onClick as () => Promise<void>)(); render();
+}
+async function save() {
+  const button = elements(tree).find((element) => element.type === AnimatedButton && element.props.children === '保存全部分组')!;
+  expect(button.props.disabled).toBe(false);
+  await (button.props.onClick as () => Promise<void>)(); render();
+}
+const banana = '🍌香蕉（官k）';
+const stable = 'CCC生图稳定';
+
+beforeEach(() => {
+  driver.scope = { values: [], index: 0 };
+  driver.catalog.mockReset().mockResolvedValue({ source: 'remote', models: [
+    { id: 'gpt-image-2', name: 'GPT Image 2', category: 'image', provider: 'cccapi' },
+  ] });
+  vi.stubGlobal('document', { body: {} });
+  props = { providerConfigs: {}, presetModels: [...getProviderDefinition('cccapi')!.models!],
+    onClose: vi.fn(), onSave: vi.fn().mockResolvedValue(undefined),
+  };
+});
+
+describe('CCC simultaneous group settings', () => {
+  it('shows all eight Key fields and their own models at once without a group switch', () => {
+    render();
+    for (const group of CCC_PROVIDER_GROUPS) expect(field(`${group.name} API Key`)).toBeDefined();
+    expect(elements(tree).filter((element) => element.type === 'section')).toHaveLength(8);
+    expect(field(`启用 ${banana} nano-banana-pro`)).toBeDefined();
+    expect(field(`启用 ${banana} gpt-image-2`)).toBeUndefined();
+    expect(field(`启用 ${stable} gpt-image-2`)).toBeDefined();
+    expect(elements(tree).some((element) => element.type === 'select')).toBe(false);
+    expect(driver.catalog).not.toHaveBeenCalled();
+  });
+
+  it('keeps multiple Keys and selections while editing and saves all groups in one call', async () => {
+    render();
+    key(banana, 'banana-fixture'); toggle(banana, 'nano-banana-pro');
+    key(stable, 'stable-fixture'); toggle(stable, 'gpt-image-2');
+    expect(field(`${banana} API Key`).props.value).toBe('banana-fixture');
+    expect(field(`启用 ${banana} nano-banana-pro`).props.checked).toBe(true);
+    await save();
+    expect(props.onSave).toHaveBeenCalledTimes(1);
+    const connections = vi.mocked(props.onSave).mock.calls[0][0];
+    expect(Object.keys(connections)).toHaveLength(2);
+    const [bananaId, bananaConfig] = Object.entries(connections).find(([, config]) => config.cccGroup === banana)!;
+    const [stableId, stableConfig] = Object.entries(connections).find(([, config]) => config.cccGroup === stable)!;
+    expect(bananaId).not.toBe(stableId);
+    expect(bananaConfig.apiKey).toBe('banana-fixture');
+    expect(bananaConfig.baseUrl).toBe('https://cccapi.cn/v1');
+    expect(bananaConfig.selectedModels).toEqual([expect.objectContaining({ id: 'nano-banana-pro', provider: bananaId })]);
+    expect(stableConfig.apiKey).toBe('stable-fixture');
+    expect(stableConfig.baseUrl).toBe('https://cccapi.cn/v1');
+    expect(stableConfig.selectedModels).toEqual([expect.objectContaining({ id: 'gpt-image-2', provider: stableId })]);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+    // Simulate a reopen using restored configuration: no Key needs to be entered again.
+    props.providerConfigs = connections; driver.scope = { values: [], index: 0 }; render();
+    expect(field(`${banana} API Key`).props.value).toBe('banana-fixture');
+    expect(field(`${stable} API Key`).props.value).toBe('stable-fixture');
+    expect(field(`启用 ${banana} nano-banana-pro`).props.checked).toBe(true);
+    expect(field(`启用 ${stable} gpt-image-2`).props.checked).toBe(true);
+    await save();
+    expect(Object.keys(vi.mocked(props.onSave).mock.calls[1][0])).toEqual(Object.keys(connections));
+  });
+
+  it('keeps legacy, duplicate and unknown-group connection identities and credentials', async () => {
+    props.providerConfigs = {
+      cccapi: { name: 'CCC', apiKey: 'legacy-fixture', selectedModels: [{ id: 'old-model', name: 'Old', category: 'text', provider: 'cccapi' }] },
+      'cccapi-a': { name: 'CCC', apiKey: 'a-fixture', catalogId: 'cccapi', cccGroup: stable },
+      'cccapi-b': { name: 'CCC', apiKey: 'b-fixture', catalogId: 'cccapi', cccGroup: stable },
+      'cccapi-new': { name: 'CCC', apiKey: 'new-fixture', catalogId: 'cccapi', cccGroup: '新分组', baseUrl: 'https://custom.example/v1' },
+    };
+    render(); await save();
+    const connections = vi.mocked(props.onSave).mock.calls[0][0];
+    expect(Object.keys(connections)).toEqual(expect.arrayContaining(['cccapi', 'cccapi-a', 'cccapi-b', 'cccapi-new']));
+    expect(connections.cccapi.apiKey).toBe('legacy-fixture');
+    expect(connections.cccapi.selectedModels?.[0].id).toBe('old-model');
+    expect(connections['cccapi-b'].apiKey).toBe('b-fixture');
+    expect(connections['cccapi-new'].cccGroup).toBe('新分组');
+    expect(connections['cccapi-new'].baseUrl).toBe('https://custom.example/v1');
+  });
+
+  it('refreshes only the requested group and preserves matching user metadata', async () => {
+    props.providerConfigs = { 'cccapi-stable': { name: 'CCC', catalogId: 'cccapi', cccGroup: stable, apiKey: 'stable-fixture', selectedModels: [
+      { id: 'gpt-image-2', name: 'Image', category: 'image', provider: 'cccapi-stable', description: '我的说明', descriptionManual: true },
+      { id: 'gpt-image-1', name: 'Old', category: 'image', provider: 'cccapi-stable' },
+    ] } };
+    render(); key(banana, 'banana-fixture'); toggle(banana, 'nano-banana-pro');
+    await pull(stable);
+    expect(driver.catalog).toHaveBeenCalledWith(expect.objectContaining({ providerId: 'cccapi-stable', config: expect.objectContaining({ cccGroup: stable, apiKey: 'stable-fixture' }) }));
+    expect(field(`启用 ${stable} gpt-image-1`)).toBeUndefined();
+    expect(field(`${banana} API Key`).props.value).toBe('banana-fixture');
+    await save();
+    expect(vi.mocked(props.onSave).mock.calls[0][0]['cccapi-stable'].selectedModels).toEqual([
+      expect.objectContaining({ id: 'gpt-image-2', description: '我的说明', descriptionManual: true }),
+    ]);
+  });
+
+  it('ignores an old response when its Key changes without affecting another group request', async () => {
+    render(); key(stable, 'old-fixture'); key(banana, 'banana-fixture');
+    let finish!: (value: unknown) => void;
+    driver.catalog.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const fetching = pull(stable);
+    key(stable, 'new-fixture');
+    const oldSignal = driver.catalog.mock.calls[0][0].signal;
+    driver.catalog.mockResolvedValueOnce({ source: 'remote', models: [{ id: 'nano-banana-pro', name: 'Banana', category: 'image', provider: 'cccapi' }] });
+    await pull(banana);
+    expect(oldSignal.aborted).toBe(true);
+    expect(driver.catalog.mock.calls[1][0].signal.aborted).toBe(false);
+    finish({ source: 'remote', models: [{ id: 'stale-model', name: 'Stale', category: 'image', provider: 'cccapi' }] });
+    await fetching; render();
+    expect(field(`启用 ${stable} stale-model`)).toBeUndefined();
+    expect(field(`${stable} API Key`).props.value).toBe('new-fixture');
+    expect(field(`启用 ${banana} nano-banana-pro`)).toBeDefined();
+  });
+
+  it('reports a single-group directory error while preserving all Keys and models', async () => {
+    render(); key(stable, 'invalid-fixture'); key(banana, 'banana-fixture'); toggle(banana, 'nano-banana-pro');
+    driver.catalog.mockRejectedValueOnce(new Error('目录失败（403）'));
+    await pull(stable);
+    expect(elements(tree).some((element) => element.props.role === 'alert' && element.props.children === '目录失败（403）')).toBe(true);
+    expect(field(`启用 ${stable} gpt-image-2`)).toBeDefined();
+    expect(field(`${banana} API Key`).props.value).toBe('banana-fixture');
+    expect(field(`启用 ${banana} nano-banana-pro`).props.checked).toBe(true);
+  });
+
+  it('keeps all drafts open after save failure and supports retry', async () => {
+    render(); key(banana, 'banana-fixture'); key(stable, 'stable-fixture');
+    vi.mocked(props.onSave).mockRejectedValueOnce(new Error('保存失败'));
+    await save();
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(field(`${banana} API Key`).props.value).toBe('banana-fixture');
+    expect(field(`${stable} API Key`).props.value).toBe('stable-fixture');
+    await save(); expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves legacy implicit model activation until the user explicitly edits the selection', async () => {
+    props.providerConfigs = { 'cccapi-stable': { name: 'CCC', catalogId: 'cccapi', cccGroup: stable, apiKey: 'stable-fixture' } };
+    render(); await save();
+    expect(vi.mocked(props.onSave).mock.calls[0][0]['cccapi-stable'].selectedModels).toBeUndefined();
+    toggle(stable, 'gpt-image-2'); toggle(stable, 'gpt-image-2'); await save();
+    expect(vi.mocked(props.onSave).mock.calls[1][0]['cccapi-stable'].selectedModels).toEqual([]);
+  });
+
+  it('keeps the legacy image request defaults when saving multiple groups', async () => {
+    props.providerConfigs = { 'cccapi-stable': { name: 'CCC', catalogId: 'cccapi', cccGroup: stable, apiKey: 'stable-fixture',
+      imageProtocolDefault: { preset: 'gpt-image-gateway-json' }, imageReferenceRequestModeDefault: 'generation-json-image-data-urls',
+      selectedModels: [{ id: 'gpt-image-2', name: 'Image', category: 'image', provider: 'cccapi-stable' }],
+    } };
+    render(); key(banana, 'banana-fixture'); await save();
+    expect(vi.mocked(props.onSave).mock.calls[0][0]['cccapi-stable'].selectedModels).toEqual([
+      expect.objectContaining({ id: 'gpt-image-2', executionProfile: { preset: 'gpt-image-gateway-json' }, imageReferenceRequestMode: 'generation-json-image-data-urls' }),
+    ]);
+  });
+
+  it('cancels pending directory work on save and leaves that group retryable after a save failure', async () => {
+    render(); key(stable, 'stable-fixture');
+    let finish!: (value: unknown) => void;
+    driver.catalog.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const fetching = pull(stable); render();
+    expect(field(`拉取模型 ${stable}`).props.disabled).toBe(true);
+    vi.mocked(props.onSave).mockRejectedValueOnce(new Error('保存失败'));
+    await save();
+    expect(driver.catalog.mock.calls[0][0].signal.aborted).toBe(true);
+    expect(field(`拉取模型 ${stable}`).props.disabled).toBe(false);
+    finish({ source: 'remote', models: [] }); await fetching;
+    expect(field(`启用 ${stable} gpt-image-2`)).toBeDefined();
+  });
+
+  it('can save model choices before a Key is filled without creating unused blank groups', async () => {
+    render(); toggle(banana, 'nano-banana-pro'); await save();
+    const connections = Object.values(vi.mocked(props.onSave).mock.calls[0][0]);
+    expect(connections).toHaveLength(1);
+    expect(connections[0]).toMatchObject({ cccGroup: banana, apiKey: '', selectedModels: [expect.objectContaining({ id: 'nano-banana-pro' })] });
+  });
+
+  it('opens the simultaneous group form from the provider picker and from any saved CCC connection', () => {
+    const parentProps: ComponentProps<typeof ProviderConnectionDialog> = { isOpen: true, providerConfigs: {}, connectedProviderIds: ['cccapi'],
+      fallbackModels: { cccapi: props.presetModels }, dreaminaLoggedIn: false, dreaminaLoading: false,
+      onDreaminaLogin: vi.fn(), onClose: vi.fn(), onSave: vi.fn(), onSaveCccGroups: vi.fn(),
+    };
+    driver.scope!.index = 0;
+    tree = ProviderConnectionDialog(parentProps);
+    const button = elements(tree).find((element) => element.props.className === 'provider-picker-item'
+      && elements(element).some((child) => child.props.children === 'CCC API'))!;
+    (button.props.onClick as () => void)(); driver.scope!.index = 0;
+    tree = ProviderConnectionDialog(parentProps);
+    expect(elements(tree).find((element) => element.type === CccGroupConnectionsForm)!.props.onSave).toBe(parentProps.onSaveCccGroups);
+    driver.scope = { values: [], index: 0 };
+    parentProps.connectionId = 'cccapi-stable';
+    parentProps.initialConfig = { name: 'CCC', apiKey: 'saved-fixture', catalogId: 'cccapi', cccGroup: stable };
+    parentProps.providerConfigs['cccapi-stable'] = parentProps.initialConfig;
+    tree = ProviderConnectionDialog(parentProps);
+    expect(elements(tree).find((element) => element.type === CccGroupConnectionsForm)!.props.providerConfigs).toBe(parentProps.providerConfigs);
+  });
+});

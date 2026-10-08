@@ -12,6 +12,7 @@ const VIEWPORT_CULL_MARGIN = 400;
 const SNAP_THRESHOLD = 8;
 const MIN_SPACING_GAP = 2;
 const SPACING_GUIDE_OFFSET = 12;
+const LINEAR_SPACING_LIMIT = 96;
 
 export type SnapLine =
   | {
@@ -213,6 +214,119 @@ function getSharedCrossAlignmentModes(
   ));
 }
 
+function findEqualSpacingNeighborsLinear(otherBounds: NodeBounds[], axis: SpacingAxis, neighbors: Int32Array): Int32Array {
+  for (let i = 0; i < otherBounds.length; i += 1) {
+    for (let mode = 0; mode < CROSS_ALIGNMENT_MODES.length; mode += 1) {
+      let nearestStart = Infinity;
+      for (let j = 0; j < otherBounds.length; j += 1) {
+        if (i === j) continue;
+        const secondStart = getAxisStart(otherBounds[j], axis);
+        if (secondStart - getAxisEnd(otherBounds[i], axis) < MIN_SPACING_GAP || secondStart >= nearestStart) continue;
+        if (Math.abs(getCrossCoordinate(otherBounds[i], axis, CROSS_ALIGNMENT_MODES[mode])
+          - getCrossCoordinate(otherBounds[j], axis, CROSS_ALIGNMENT_MODES[mode])) > SNAP_THRESHOLD) continue;
+        neighbors[i * CROSS_ALIGNMENT_MODES.length + mode] = j;
+        nearestStart = secondStart;
+      }
+    }
+  }
+  return neighbors;
+}
+
+function findEqualSpacingNeighbors(otherBounds: NodeBounds[], axis: SpacingAxis): Int32Array {
+  const count = otherBounds.length;
+  const modeCount = CROSS_ALIGNMENT_MODES.length;
+  const neighbors = new Int32Array(count * modeCount).fill(-1);
+  // 小集合沿用直接比较，省去排序、坐标压缩和查询树的准备工作。
+  if (count <= LINEAR_SPACING_LIMIT) return findEqualSpacingNeighborsLinear(otherBounds, axis, neighbors);
+  const starts = otherBounds.map((bounds) => getAxisStart(bounds, axis));
+  const ends = otherBounds.map((bounds) => getAxisEnd(bounds, axis));
+  const crosses = CROSS_ALIGNMENT_MODES.map((mode) => (
+    otherBounds.map((bounds) => getCrossCoordinate(bounds, axis, mode))
+  ));
+
+  // 脏几何沿用原来的比较结果，其余走 O(N log N) 查询。
+  if (![starts, ends, ...crosses].every((values) => values.every(Number.isFinite))) {
+    return findEqualSpacingNeighborsLinear(otherBounds, axis, neighbors);
+  }
+
+  const indices = Array.from({ length: count }, (_, index) => index);
+  const byStart = [...indices].sort((a, b) => starts[b] - starts[a] || a - b);
+  const byEnd = [...indices].sort((a, b) => ends[b] - ends[a] || a - b);
+  const comesFirst = (a: number, b: number) => a >= 0 && (
+    b < 0 || starts[a] < starts[b] || (starts[a] === starts[b] && a < b)
+  );
+
+  for (let mode = 0; mode < modeCount; mode += 1) {
+    const cross = crosses[mode];
+    const coordinates = [...new Set(cross)].sort((a, b) => a - b);
+    const ranks = new Map(coordinates.map((coordinate, index) => [coordinate, index]));
+    const size = coordinates.length;
+    const best = new Int32Array(size * 2).fill(-1);
+    const runnerUp = new Int32Array(size * 2).fill(-1);
+    let inserted = 0;
+
+    // 按主轴下限从大到小加点；树里只保留已满足最小间距的节点。
+    // 每段记两名，是为了连负尺寸的旧数据也能准确排除节点自身。
+    for (const i of byEnd) {
+      while (inserted < count && starts[byStart[inserted]] - ends[i] >= MIN_SPACING_GAP) {
+        const index = byStart[inserted++];
+        let slot = size + ranks.get(cross[index])!;
+        if (comesFirst(index, best[slot])) {
+          runnerUp[slot] = best[slot];
+          best[slot] = index;
+        } else if (comesFirst(index, runnerUp[slot])) {
+          runnerUp[slot] = index;
+        }
+        while ((slot = Math.floor(slot / 2)) > 0) {
+          const left = slot * 2;
+          const right = left + 1;
+          if (comesFirst(best[left], best[right])) {
+            best[slot] = best[left];
+            runnerUp[slot] = comesFirst(runnerUp[left], best[right]) ? runnerUp[left] : best[right];
+          } else {
+            best[slot] = best[right];
+            runnerUp[slot] = comesFirst(runnerUp[right], best[left]) ? runnerUp[right] : best[left];
+          }
+        }
+      }
+
+      // 用原来的减法判阈值，不改成 coordinate ± threshold，避免浮点边界变掉。
+      let lower = 0;
+      let upper = size;
+      while (lower < upper) {
+        const middle = (lower + upper) >>> 1;
+        if (cross[i] - coordinates[middle] > SNAP_THRESHOLD) lower = middle + 1;
+        else upper = middle;
+      }
+      let left = lower + size;
+      upper = size;
+      while (lower < upper) {
+        const middle = (lower + upper) >>> 1;
+        if (coordinates[middle] - cross[i] <= SNAP_THRESHOLD) lower = middle + 1;
+        else upper = middle;
+      }
+      let right = lower + size;
+      let nearest = -1;
+      while (left < right) {
+        if (left & 1) {
+          const candidate = best[left] === i ? runnerUp[left] : best[left];
+          if (comesFirst(candidate, nearest)) nearest = candidate;
+          left += 1;
+        }
+        if (right & 1) {
+          right -= 1;
+          const candidate = best[right] === i ? runnerUp[right] : best[right];
+          if (comesFirst(candidate, nearest)) nearest = candidate;
+        }
+        left = Math.floor(left / 2);
+        right = Math.floor(right / 2);
+      }
+      neighbors[i * modeCount + mode] = nearest;
+    }
+  }
+  return neighbors;
+}
+
 /**
  * 拖拽开始时预计算等间距落点。间距按节点相邻边缘之间的空白计算，
  * 而不是按中心点计算，因此不同尺寸节点也能得到一致的视觉间距。
@@ -224,26 +338,12 @@ export function buildEqualSpacingCandidates(
 ): EqualSpacingCandidate[] {
   const candidates: EqualSpacingCandidate[] = [];
   const adjacentPairs = new Map<string, [NodeBounds, NodeBounds]>();
+  const neighbors = findEqualSpacingNeighbors(otherBounds, axis);
 
   for (let i = 0; i < otherBounds.length; i += 1) {
     const first = otherBounds[i];
-    for (const mode of CROSS_ALIGNMENT_MODES) {
-      let nearestIndex = -1;
-      let nearestStart = Infinity;
-
-      for (let j = 0; j < otherBounds.length; j += 1) {
-        if (i === j) continue;
-        const second = otherBounds[j];
-        const secondStart = getAxisStart(second, axis);
-        const gap = secondStart - getAxisEnd(first, axis);
-        if (gap < MIN_SPACING_GAP || secondStart >= nearestStart) continue;
-        if (Math.abs(getCrossCoordinate(first, axis, mode) - getCrossCoordinate(second, axis, mode))
-          > SNAP_THRESHOLD) continue;
-
-        nearestIndex = j;
-        nearestStart = secondStart;
-      }
-
+    for (let mode = 0; mode < CROSS_ALIGNMENT_MODES.length; mode += 1) {
+      const nearestIndex = neighbors[i * CROSS_ALIGNMENT_MODES.length + mode];
       if (nearestIndex >= 0) {
         adjacentPairs.set(`${i}:${nearestIndex}`, [first, otherBounds[nearestIndex]]);
       }
