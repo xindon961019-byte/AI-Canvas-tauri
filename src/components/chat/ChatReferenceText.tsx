@@ -135,11 +135,11 @@ const INPUT_TOKEN_CLASSES: Record<ReferenceTokenKind, string> = {
 };
 
 const COMPACT_TOKEN_CLASSES: Record<ReferenceTokenKind, string> = {
-  node: 'border-indigo-400/25 bg-indigo-400/10 text-indigo-100',
-  model: 'border-sky-400/25 bg-sky-400/10 text-sky-100',
-  skill: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-100',
-  drama: 'border-violet-400/25 bg-violet-400/10 text-violet-100',
-  slash: 'border-emerald-400/20 bg-emerald-400/10 text-emerald-100',
+  node: 'border-indigo-400/25 bg-indigo-400/10 text-canvas-text',
+  model: 'border-sky-400/25 bg-sky-400/10 text-canvas-text',
+  skill: 'border-emerald-400/25 bg-emerald-400/10 text-canvas-text',
+  drama: 'border-violet-400/25 bg-violet-400/10 text-canvas-text',
+  slash: 'border-emerald-400/20 bg-emerald-400/10 text-canvas-text',
 };
 
 const ACCENT_CLASSES: Record<ReferenceTokenKind, string> = {
@@ -182,7 +182,7 @@ function CompactToken({
       />
       <span className="truncate">{label || '/'}</span>
       {token.kind === 'node' && token.displayId != null && (
-        <span className="ml-1.5 shrink-0 border-l border-indigo-300/20 pl-1.5 text-[0.84em] font-semibold tabular-nums text-indigo-200/65">
+        <span className="ml-1.5 shrink-0 border-l border-indigo-300/20 pl-1.5 text-[0.84em] font-semibold tabular-nums text-canvas-text-secondary">
           #{token.displayId}
         </span>
       )}
@@ -206,7 +206,7 @@ function CompactToken({
         className={`mx-0.5 inline-flex max-w-full items-center rounded-[7px] border px-2 py-1 align-middle text-[0.92em] font-medium leading-none shadow-sm transition-[border-color,background-color,color,transform]
           focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400/50 active:scale-[0.98]
           ${missing
-            ? 'border-red-400/25 bg-red-400/10 text-red-200/80'
+            ? 'border-red-400/25 bg-red-400/10 text-canvas-text'
             : `${COMPACT_TOKEN_CLASSES[token.kind]} hover:border-current hover:bg-canvas-hover/80`}`}
       >
         {content}

@@ -107,6 +107,45 @@ const character = {
   '该节点没有可用的图片、GIF 或视频': 'This node has no usable image, GIF or video',
   '该节点已经添加到这个动作': 'This node is already in the action',
   '画布节点已添加到动作「{name}」': 'Canvas node added to action {name}',
+
+  // ── 资产面板 ──
+  '列数设置保存失败': 'Failed to save the column count setting',
+  '文件夹已创建': 'Folder created',
+  '文件夹已复制，可在这里或系统中粘贴': 'Folder copied — paste it here or in the system',
+  '正在读取提示词…': 'Reading prompt…',
+  '此资产暂无提示词': 'This asset has no prompt yet',
+  '提示词已复制': 'Prompt copied',
+  '文件已复制，可在系统中粘贴': 'File copied — paste it in the system',
+  '文件已移入系统回收站': 'File moved to the system trash',
+  '添加失败': 'Failed to add',
+  '此文件无法使用系统回收站': 'The system trash is unavailable for this file',
+  '拖拽调整顺序；Alt + 左右方向键移动': 'Drag to reorder; use Alt with the left and right arrow keys to move',
+
+  // ── 角色素材 ──
+  '音频读取失败': 'Failed to read the audio',
+  '无法读取来源节点': 'Cannot read the source node',
+  '已添加到角色声音库': 'Added to the character voice library',
+  '添加声音失败，请重试': 'Failed to add the voice. Please try again',
+  '请选择要添加到的角色': 'Select the character to add to',
+  '请选择已有动作': 'Select an existing action',
+  '请填写动作名称': 'Enter an action name',
+  '请填写自定义分类名': 'Enter a custom category name',
+  '该节点没有可用的角色图片': 'This node has no usable character image',
+  '请填写角色名称': 'Enter a character name',
+  '请选择角色': 'Select a character',
+  '媒体读取失败': 'Failed to read the media',
+  '没有唯一对应的画布节点': 'There is no unique matching canvas node',
+  '显示画布节点': 'Show canvas node',
+  '添加后隐藏画布节点': 'Hide the canvas node after adding',
+
+  // ── 短剧资产 ──
+  '请先保存项目，再上传素材': 'Save the project before uploading assets',
+  '项目已切换，上传素材未添加到资产列表': 'The project switched, so the uploaded asset was not added to the list',
+  '资产已删除，上传素材未绑定': 'The asset was deleted, so the uploaded file is unbound',
+  '上传失败，请检查项目目录是否可写后重试': 'Upload failed — check that the project folder is writable, then try again',
+  '简介已复制': 'Description copied',
+  '已绑定图像节点': 'Image node bound',
+  '已解绑': 'Unbound',
 };
 
 export default character;

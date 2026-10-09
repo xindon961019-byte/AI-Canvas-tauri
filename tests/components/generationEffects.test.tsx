@@ -110,8 +110,10 @@ describe('内置生成特效', () => {
       }
       frames.push({ state, size, t, frame });
     }
-    // 摘要取自迁移前的 npm 包，避免抄错数学常量后测试也一起变绿。
-    expect(digest(JSON.stringify(frames))).toBe('a5bc7a4daea8924aa96ca44b74cc38285a8b839cc8d9e876a45dda6fc90756ca');
+    // 基准来自原 npm 0.3.1 包；统一到 1e-9 精度，避免平台三角函数尾数差异导致误报。
+    const serialized = JSON.stringify(frames, (_key, value: unknown) =>
+      typeof value === 'number' ? Number(value.toFixed(9)) : value);
+    expect(digest(serialized)).toBe('e0aa7653511b33b68267e073ec969c52492ecf17ca2de24b550b685e68b5f259');
   });
 
   it('两段着色器与原 metal-fx 2.0.10 包逐字节一致', () => {

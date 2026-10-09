@@ -18,7 +18,6 @@ import { isRunningHubWorkflow, workflowExecution } from '../../../services/workf
 import { DREAMINA_IMAGE_MODELS, DREAMINA_VIDEO_MODELS } from '../../../services/ai/dreaminaModels';
 import { APIMART_OMNI_MODELS, APIMART_UPDATED_VIDEO_MODELS, isLegacyApimartOmni, replaceLegacyApimartOmni } from '../../../services/ai/apimartVideoModels';
 import { GRSAI_ADDED_MODELS } from '../../../services/ai/grsaiModels';
-import { cccConnectionName } from '../../../services/ai/cccProviderGroups';
 
 export type MediaModelKind = 'image' | 'video' | 'audio';
 
@@ -1189,9 +1188,9 @@ function dedicatedGeneralModelGroup(
   }
   if (catalogId === 'cccapi') {
     return {
-      id: `general-provider-${model.providerConfigId}`,
-      name: cccConnectionName(provider),
-      description: provider?.cccGroup ? '使用此分组连接的 API Key' : 'OpenAI 兼容文本与图片模型',
+      id: 'general-provider-cccapi',
+      name: 'CCC API',
+      description: '按模型所属分组自动使用对应的 API Key',
       badgeText: 'CCC',
     };
   }
@@ -1200,7 +1199,7 @@ function dedicatedGeneralModelGroup(
 
 function generalModelLabel(model: GeneralModelConfig, config?: ProviderModelVisibilityConfig): string {
   const provider = config?.providers[model.providerConfigId];
-  return provider?.catalogId === 'cccapi' && provider.cccGroup?.trim()
+  return (provider?.catalogId || model.providerConfigId) === 'cccapi' && provider?.cccGroup?.trim()
     ? `${model.name} · ${provider.cccGroup.trim()}` : model.name;
 }
 

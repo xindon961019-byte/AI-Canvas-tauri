@@ -94,6 +94,58 @@ const common = {
   'QQ 群：873354155': 'QQ group: 873354155',
   '点击复制 QQ 群号': 'Click to copy the QQ group number',
   '已复制 QQ 群号：873354155': 'QQ group number copied: 873354155',
+
+  // ── 应用生命周期 / Header ──
+  '关闭未完成，请重试': 'Closing did not finish. Please try again',
+  'MCP 控制器初始化失败，请重新加载应用后重试': 'Failed to initialize the MCP controller. Reload the app and try again',
+  '正在返回启动页': 'Returning to the start page…',
+  '返回启动页': 'Back to the start page',
+  '正在保存项目…': 'Saving project…',
+  '已打开样式预览窗口': 'Style preview window opened',
+  '切换明暗主题，仅在本窗口生效': 'Toggle the light or dark theme for this window only',
+  '样式分区目录': 'Style section index',
+  '吉祥物已显示': 'Mascot shown',
+
+  // ── 生成 / 任务提示 ──
+  '请先选中节点': 'Select a node first',
+  '本次音频模型参考媒体': 'Reference media for this audio model',
+  '本次视频模型参考媒体': 'Reference media for this video model',
+  '任务已被取消': 'The task was cancelled',
+  '源节点已不存在': 'The source node no longer exists',
+  '已添加为文本节点': 'Added as a text node',
+  '读取媒体信息超时': 'Reading media information timed out',
+  '媒体无法加载': 'The media cannot be loaded',
+  '无法创建 canvas 上下文': 'Cannot create a canvas context',
+  '图片大小不能超过 10MB': 'Images must be smaller than 10MB',
+  '文件读取失败': 'Failed to read the file',
+  'Data URL 转换失败': 'Failed to convert the data URL',
+  '火山方舟调用已执行，但费用记录更新失败': 'The Volcengine Ark call ran, but updating the cost record failed',
+  '用户拒绝了本次操作': 'The user rejected this operation',
+  '（更早的消息因长度限制未纳入本次压缩输入）': '(Earlier messages were left out of this compression input because of the length limit)',
+  '根据用户要求生成电影镜头预演。': 'Generate a cinematic shot preview as requested.',
+  '正在打开另一个工作流，请等待当前载入完成': 'Another workflow is opening — wait for the current one to finish loading',
+  '3D 导演台已切换到其他节点': 'The 3D director desk switched to another node',
+  '参考视频读取失败': 'Failed to read the reference video',
+  '物体 ID': 'Object ID',
+  '镜头预演已生成，可打开导演台查看': 'Shot preview generated — open the director desk to view it',
+  '原图已生成，8 向宫格处理失败': 'The base image was generated, but the 8-direction grid processing failed',
+  '剪辑工程已被 MCP 更新，请重新读取工程后编辑': 'The editing project was updated by MCP — reload it before editing',
+  '剪辑工程事务已取消': 'The editing project transaction was cancelled',
+  '剪辑工程已变化，请重新读取后提交': 'The editing project changed — reload it before submitting',
+  '生成记录过多，无法完成媒体来源查询': 'Too many generation records; the media source query cannot be completed',
+  '图片信息过多，请先整理': 'Too many image records — tidy them up first',
+  '插件会话已撤销，但未确认系统窗口关闭，请手动关闭该窗口': 'The plugin session was revoked, but closing the system window is unconfirmed — close that window manually',
+  '插件窗口桥接失败，会话已撤销，请重新打开': 'The plugin window bridge failed and the session was revoked — open it again',
+  '已启动“': 'Started “',
+  '取画面已取消': 'Frame capture cancelled',
+  '视频定位超时': 'Video seeking timed out',
+
+  // ── 工具栏 ──
+  '工具栏重新加载失败，编辑内容仍保留': 'Reloading the toolbar failed; your edits are kept',
+  '工具栏设置读取失败，已保留原布局；长按工具栏可重试加载': 'Failed to read the toolbar settings; the previous layout is kept. Long-press the toolbar to retry loading',
+
+  // ── MarkdownEditor ──
+  '\n| 列一 | 列二 |\n| --- | --- |\n| 内容 | 内容 |\n': '\n| Column 1 | Column 2 |\n| --- | --- |\n| Content | Content |\n',
 };
 
 export default common;

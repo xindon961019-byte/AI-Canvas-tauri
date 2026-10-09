@@ -41,7 +41,6 @@ import { queryBillingRuns } from '../../services/billing/volcengineBillingServic
 import { saveAutodlWorkflowTemplate, saveWorkflowApiDrafts } from '../../services/workflowApi/workflowApiConfig';
 import { invoke } from '@tauri-apps/api/core';
 import { useT } from '../../i18n';
-import { cccConnectionName } from '../../services/ai/cccProviderGroups';
 
 interface ProviderListItem {
   id: string;
@@ -191,6 +190,12 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
       return order.indexOf(leftOrderId) - order.indexOf(rightOrderId);
     });
   }, [activeWebSearchProviderId, config.providers, dreaminaAuth?.loggedIn]);
+
+  // 只合并展示入口，各连接仍保留独立的 ID、模型和凭据。
+  const cccConnections = providerItems.filter((item) => getProviderDefinition(item.id, item.config)?.id === 'cccapi');
+  const visibleProviderItems = providerItems.filter((item) => (
+    getProviderDefinition(item.id, item.config)?.id !== 'cccapi' || item.id === cccConnections[0]?.id
+  ));
 
   const connectedProviderIds = useMemo(
     () => providerItems.map((item) => getProviderDefinition(item.id, item.config)?.id || item.id),
@@ -567,7 +572,9 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
     } catch {
       const state = useAppStore.getState();
       state.showToast(state.configSaveError || t('连接删除失败，请重试'), 'error');
+      return false;
     }
+    return true;
   };
 
   return (
@@ -656,10 +663,15 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
           </div>
         ) : (
           <div className="provider-connection-list">
-            {providerItems.map((item) => {
+            {visibleProviderItems.map((item) => {
               const definition = getProviderDefinition(item.id, item.config);
               if (!definition) return null;
-              const selectedCount = item.config.selectedModels?.length;
+              const isCcc = definition.id === 'cccapi';
+              const cccKeyCount = cccConnections.filter((connection) => connection.config.apiKey.trim()).length;
+              const selectedCount = isCcc
+                ? cccConnections.reduce((count, connection) => count + (connection.config.selectedModels?.length
+                  ?? config.generalModels?.filter((model) => model.providerConfigId === connection.id).length ?? 0), 0)
+                : item.config.selectedModels?.length;
               const summaryUrl = providerSummaryUrl(item.config, definition.defaultBaseUrl);
               const isDreamina = definition.id === 'dreamina';
               const isRunningHub = definition.id === 'runninghub-model';
@@ -667,7 +679,8 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
               const isWorkflowApi = definition.kind === 'workflow-api';
               const connectionWorkflows = workflows.filter((workflow) => workflow.workflowApi?.connectionId === item.id);
               const needsWorkflowKey = connectionWorkflows.some((workflow) => workflow.workflowApi?.version !== 2 || workflow.workflowApi.protocol.auth?.type !== 'none');
-              const isPendingApiKey = definition.authType !== 'oauth' && !item.config.apiKey.trim() && (!isWorkflowApi || needsWorkflowKey);
+              const isPendingApiKey = isCcc ? cccKeyCount === 0
+                : definition.authType !== 'oauth' && !item.config.apiKey.trim() && (!isWorkflowApi || needsWorkflowKey);
               const hasRunningHubModelKey = isRunningHub && !!item.config.apiKey.trim();
               const hasRunningHubWorkflowKey = isRunningHub
                 && !!config.providers.runninghub?.apiKey.trim();
@@ -677,12 +690,13 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                 ? t('联网搜索')
                 : definition.id === 'custom-openai'
                   ? item.config.name.trim() || definition.name
-                  : definition.id === 'cccapi' ? cccConnectionName(item.config)
-                    : isWorkflowApi ? item.config.name.trim() || t(definition.name) : definition.name;
+                  : isWorkflowApi ? item.config.name.trim() || t(definition.name) : definition.name;
               const statusLabel = isDreamina
                 ? t('OAuth 已连接')
                 : isRunningHub
                   ? t('{count}/2 密钥已配置', { count: runningHubKeyCount })
+                  : isCcc
+                    ? t('{configured}/{count} 组已配置', { configured: cccKeyCount, count: cccConnections.length })
                   : isPendingApiKey
                     ? t('待填写 API Key')
                     : isWorkflowApi ? t('已配置') : t('已连接');
@@ -693,7 +707,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                   <div className="provider-connection-copy">
                     <div className="provider-connection-title-row">
                       <strong>{displayName}</strong>
-                      <span className={`provider-list-status${isPendingApiKey || (isRunningHub && runningHubKeyCount < 2) ? ' is-limited' : ''}`}>
+                      <span className={`provider-list-status${isPendingApiKey || (isRunningHub && runningHubKeyCount < 2) || (isCcc && cccKeyCount < cccConnections.length) ? ' is-limited' : ''}`}>
                         {statusLabel}
                       </span>
                       {providerBalances[item.id] && (
@@ -717,7 +731,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                               ? t('沿用内置模型目录')
                               : t('{count} 个模型', { count: selectedCount })}
                           </span>
-                          {summaryUrl && <span>{summaryUrl}</span>}
+                          {isCcc ? <span>{t('{count} 个分组', { count: cccConnections.length })}</span> : summaryUrl && <span>{summaryUrl}</span>}
                         </>
                       )}
                     </div>}
@@ -771,7 +785,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                           <Icon icon="lucide:receipt-text" width="16" />
                         </AnimatedButton>
                       )}
-                      {!isDreamina && !isWebSearchProvider && (
+                      {!isDreamina && !isWebSearchProvider && !isCcc && (
                         <AnimatedButton
                           type="button"
                           className="provider-icon-btn"
@@ -785,13 +799,13 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                       <AnimatedButton
                         type="button"
                         className="provider-icon-btn"
-                        aria-label={t('编辑 {name}', { name: definition.name })}
-                        data-tooltip={t('编辑连接')}
+                        aria-label={isCcc ? t('管理 CCC 分组') : t('编辑 {name}', { name: definition.name })}
+                        data-tooltip={isCcc ? t('统一管理分组') : t('编辑连接')}
                         onClick={() => openEditDialog(item.id)}
                       >
                         <Icon icon="mdi:pencil-outline" width="16" />
                       </AnimatedButton>
-                      <AnimatedButton
+                      {!isCcc && <AnimatedButton
                         type="button"
                         className="provider-icon-btn"
                         aria-label={t('删除 {name}', { name: definition.name })}
@@ -799,7 +813,7 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
                         onClick={() => setPendingDeleteId(item.id)}
                       >
                         <Icon icon="mdi:trash-can-outline" width="16" />
-                      </AnimatedButton>
+                      </AnimatedButton>}
                     </div>
                   )}
                 </div>
@@ -845,6 +859,8 @@ export default function ApiKeySettings({ onClose }: { onClose: () => void }) {
         onClose={closeConnectionDialog}
         onSave={handleSaveConnection}
         onSaveCccGroups={handleSaveCccGroups}
+        onCopyCccGroup={handleCopyConnection}
+        onRemoveCccGroup={handleRemoveConnection}
       />
 
       <DreaminaLoginModal

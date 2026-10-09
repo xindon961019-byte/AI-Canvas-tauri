@@ -85,7 +85,13 @@ export default function ProviderConnectionDialog({
   onClose,
   onSave,
   onSaveCccGroups,
-}: ProviderConnectionDialogProps & { onSaveCccGroups: (connections: Record<string, ApiProviderConfig>) => Promise<void> }) {
+  onCopyCccGroup,
+  onRemoveCccGroup,
+}: ProviderConnectionDialogProps & {
+  onSaveCccGroups: (connections: Record<string, ApiProviderConfig>) => Promise<void>;
+  onCopyCccGroup?: (connectionId: string) => Promise<void>;
+  onRemoveCccGroup?: (connectionId: string) => Promise<boolean>;
+}) {
   const t = useT();
   const editing = !!connectionId && !!initialConfig;
   const initialDefinitionId = initialConfig?.catalogId || connectionId || '';
@@ -720,7 +726,8 @@ export default function ProviderConnectionDialog({
         </div>
       ) : definition.id === 'cccapi' ? (
         <CccGroupConnectionsForm providerConfigs={providerConfigs} presetModels={fallbackModels.cccapi || []}
-          onSave={onSaveCccGroups} onClose={closeDialog} onReturnToPicker={editing ? undefined : returnToDefinitionPicker} />
+          onSave={onSaveCccGroups} onClose={closeDialog} onReturnToPicker={editing ? undefined : returnToDefinitionPicker}
+          onCopyConnection={onCopyCccGroup} onRemoveConnection={onRemoveCccGroup} />
       ) : (
         <>
           <div className="provider-dialog-body">

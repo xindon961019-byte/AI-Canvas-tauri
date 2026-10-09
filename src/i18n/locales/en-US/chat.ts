@@ -363,6 +363,21 @@ const chat = {
 
   // ── ChatComposerEditor ──
   '对话消息': 'Conversation message',
+
+  // ── AgentApprovalCard ──
+  '模型目录已过期，请拒绝本次选择并重新读取目录。': 'The model catalog is out of date. Reject this selection and reload the catalog.',
+  '搜索模型名称或 ID': 'Search model name or ID',
+  '全部分类': 'All categories',
+  '清空已选': 'Clear selected',
+  '没有匹配的模型': 'No matching models',
+  '取消本页此类选择': 'Deselect this category on this page',
+  '选取本页此类（受批次上限限制）': 'Select this category on this page (subject to the batch limit)',
+  '上一页': 'Previous page',
+  '下一页': 'Next page',
+
+  // ── AgentCenterPanel ──
+  '智能体大纲': 'Agent outline',
+  '按安装时识别的入口与 Skill 目录展示。': 'Shown by the entry point and skill directories detected at install time.',
 };
 
 export default chat;

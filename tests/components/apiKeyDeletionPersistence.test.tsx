@@ -9,6 +9,7 @@ const driver = vi.hoisted(() => ({
   patch: (_partial: Partial<AppState>) => {},
   listProjects: vi.fn(), loadProject: vi.fn(), saveProject: vi.fn(),
   saveCurrentProject: vi.fn(), toast: vi.fn(),
+  native: false, secrets: new Map<string, string>(), invoke: vi.fn(),
 }));
 // 执行真实按钮事件和 Store / IndexedDB；不挂载余额查询及其他窗口副作用。
 vi.mock('react', async () => ({
@@ -33,12 +34,16 @@ vi.mock('zustand/react/shallow', () => ({ useShallow: <T,>(selector: T) => selec
 // 直接返回 key，避免运行环境的系统语言不同导致文案被翻译后找不到元素。
 vi.mock('../../src/i18n', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../src/i18n')>()),
-  useT: () => (text: string) => text,
+  useT: () => (text: string, params?: Record<string, string | number>) => Object.entries(params || {})
+    .reduce((value, [key, replacement]) => value.replaceAll(`{${key}}`, String(replacement)), text),
 }));
 vi.mock('../../src/store/useAppStore', () => ({
   useAppStore: Object.assign(<T,>(selector: (state: AppState) => T) => selector(driver.state()), { getState: () => driver.state() }),
 }));
 vi.mock('@iconify/react', () => ({ Icon: 'icon' }));
+vi.mock('@tauri-apps/api/core', async (original) => ({
+  ...await original<typeof import('@tauri-apps/api/core')>(), invoke: driver.invoke,
+}));
 vi.mock('../../src/components/shared/AnimatedButton', () => ({ default: 'button' }));
 vi.mock('../../src/components/shared/ProviderBadge', () => ({ default: 'badge' }));
 vi.mock('../../src/components/settings/ProviderConnectionDialog', () => ({ default: 'dialog' }));
@@ -46,7 +51,7 @@ vi.mock('../../src/components/settings/DreaminaLoginModal', () => ({ default: 'd
 vi.mock('../../src/components/nodes/shared/defaultModels', () => ({ defaultModelGroups: [] }));
 vi.mock('../../src/services/workflowApi/workflowApiConfig', () => ({ saveWorkflowApiDrafts: vi.fn(), saveAutodlWorkflowTemplate: vi.fn() }));
 vi.mock('../../src/services/fs/core', () => ({
-  isTauriEnv: () => false, getProjectDataDir: async () => null,
+  isTauriEnv: () => driver.native, getProjectDataDir: async () => null,
   joinPath: (...parts: string[]) => parts.join('/'),
 }));
 vi.mock('../../src/services/fileService', async () => ({
@@ -63,6 +68,7 @@ function configStore() {
   return createStore<AppState>()((set, get, api) => ({
     ...createConfigSlice(set, get, api), showToast: driver.toast,
     nodes: [], projects: [], workflows: [], currentProjectId: null,
+    pendingApiKeyConnectionId: null, setPendingApiKeyConnectionId: vi.fn(),
     commitToHistory: vi.fn(), saveCurrentProjectSilent: driver.saveCurrentProject,
   } as unknown as AppState));
 }
@@ -79,6 +85,22 @@ function render() {
   return ApiKeySettings({ onClose: vi.fn() });
 }
 
+function findAll(root: unknown, predicate: (element: Element) => boolean): Element[] {
+  if (Array.isArray(root)) return root.flatMap((child) => findAll(child, predicate));
+  if (!root || typeof root !== 'object' || !('props' in root)) return [];
+  const element = root as Element;
+  return [...(predicate(element) ? [element] : []), ...findAll(element.props.children, predicate)];
+}
+
+function addCccGroups() {
+  driver.state().saveProviderConfig('cccapi-free', { name: 'CCC API · CCC生图白嫖', catalogId: 'cccapi', cccGroup: 'CCC生图白嫖', apiKey: '',
+    selectedModels: [{ id: 'gpt-image-2', name: 'GPT Image 2', category: 'image', provider: 'cccapi-free' }],
+  });
+  driver.state().saveProviderConfig('cccapi-pro', { name: 'CCC API · GPT-特价Pro', catalogId: 'cccapi', cccGroup: 'GPT-特价Pro', apiKey: 'pro-fixture',
+    selectedModels: [{ id: 'gpt-5.6-sol', name: 'GPT', category: 'text', provider: 'cccapi-pro' }],
+  });
+}
+
 async function clickDelete() {
   const remove = find(render(), (element) => element.props['data-tooltip'] === '删除连接');
   expect(remove).toBeDefined();
@@ -91,6 +113,14 @@ async function clickDelete() {
 
 beforeEach(async () => {
   driver.slots = [];
+  driver.native = false; driver.secrets.clear();
+  driver.invoke.mockReset().mockImplementation(async (command: string, args: { key: string; value?: string }) => {
+    if (command === 'secret_store_available') return true;
+    if (command === 'secret_get') return driver.secrets.get(args.key) ?? null;
+    if (command === 'secret_set') { driver.secrets.set(args.key, args.value!); return; }
+    if (command === 'secret_delete') { driver.secrets.delete(args.key); return; }
+    throw new Error('测试未声明的原生命令');
+  });
   driver.listProjects.mockReset().mockResolvedValue([]);
   driver.loadProject.mockReset().mockResolvedValue(null);
   driver.saveProject.mockReset().mockResolvedValue('project');
@@ -159,5 +189,45 @@ describe('API Key 连接删除持久化', () => {
     await fresh.getState().loadConfig();
     expect(fresh.getState().config.providers).not.toHaveProperty('custom-1');
     expect(fresh.getState().config.generalModels?.map((model) => model.id)).toEqual(['kept-model']);
+  });
+});
+
+describe('CCC 统一管理入口', () => {
+  it('多组仅显示一张 CCC 卡片，汇总配置状态并从统一入口编辑全部分组', () => {
+    addCccGroups();
+    const cards = findAll(render(), (element) => typeof element.props.className === 'string'
+      && element.props.className.split(' ').includes('provider-connection-card'));
+    expect(cards).toHaveLength(3); // 两个自定义连接和一个 CCC 入口。
+    const ccc = cards.filter((card) => find(card.props.children, (element) => element.props.children === 'CCC API'));
+    expect(ccc).toHaveLength(1);
+    expect(find(ccc[0], (element) => element.props.children === '1/2 组已配置')).toBeDefined();
+    expect(find(ccc[0], (element) => element.props.children === '2 个模型')).toBeDefined();
+    expect(find(ccc[0], (element) => element.props.children === '2 个分组')).toBeDefined();
+    expect(find(ccc[0], (element) => element.props['data-tooltip'] === '删除连接')).toBeUndefined();
+    expect(find(ccc[0], (element) => element.props['data-tooltip'] === '复制配置（不含 API Key）')).toBeUndefined();
+    (find(ccc[0], (element) => element.props['aria-label'] === '管理 CCC 分组')!.props.onClick as () => void)();
+    const dialog = find(render(), (element) => 'onSaveCccGroups' in element.props)!;
+    expect(dialog.props.isOpen).toBe(true);
+    expect(dialog.props.providerConfigs).toBe(driver.state().config.providers);
+    expect(driver.state().config.providers['cccapi-pro'].apiKey).toBe('pro-fixture');
+    expect(dialog.props.onCopyCccGroup).toBeTypeOf('function');
+    expect(dialog.props.onRemoveCccGroup).toBeTypeOf('function');
+  });
+
+  it('从管理页删除指定组并持久化，其他组的连接、Key 和模型保持独立', async () => {
+    addCccGroups();
+    driver.native = true;
+    const dialog = find(render(), (element) => 'onRemoveCccGroup' in element.props)!;
+    const removed = await (dialog.props.onRemoveCccGroup as (id: string) => Promise<boolean>)('cccapi-free');
+    expect(removed).toBe(true);
+    expect(driver.state().config.providers['cccapi-free']).toBeUndefined();
+    expect(driver.state().config.providers['cccapi-pro'].apiKey).toBe('pro-fixture');
+    const fresh = configStore();
+    await fresh.getState().loadConfig();
+    expect(fresh.getState().config.providers).not.toHaveProperty('cccapi-free');
+    expect(fresh.getState().config.providers).toHaveProperty('cccapi-pro');
+    expect(fresh.getState().config.providers['cccapi-pro'].apiKey).toBe('pro-fixture');
+    expect(fresh.getState().config.generalModels?.filter((model) => model.providerConfigId.startsWith('cccapi'))
+      .map((model) => model.providerConfigId)).toEqual(['cccapi-pro']);
   });
 });

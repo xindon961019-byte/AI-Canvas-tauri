@@ -310,12 +310,39 @@ describe('CCC API 独立模型分组', () => {
     const models = ['free', 'stable'].map((suffix) => ({ id: suffix, name: 'GPT Image 2',
       modelId: 'gpt-image-2', category: 'image' as const, providerConfigId: `cccapi-${suffix}` }));
     const groups = getGeneralModelGroups(models, grouped, 'ai-image');
-    expect(groups.map((group) => group.name)).toEqual(['CCC API · CCC生图白嫖', 'CCC API · CCC生图稳定']);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ id: 'general-provider-cccapi', name: 'CCC API' });
+    expect(groups[0].models.map((model) => model.value)).toEqual(['general/free', 'general/stable']);
     expect(groups.flatMap((group) => group.models.map((model) => model.label)))
       .toEqual(['GPT Image 2 · CCC生图白嫖', 'GPT Image 2 · CCC生图稳定']);
     const media = getMediaModelOptions(models, grouped).filter((model) => model.provider === 'general');
     expect(media.map((model) => model.value)).toEqual(['general/free', 'general/stable']);
+    expect(new Set(media.map((model) => model.groupId))).toEqual(new Set(['general-provider-cccapi']));
+    expect(media.every((model) => model.groupName === 'CCC API')).toBe(true);
     expect(media.map((model) => model.label)).toEqual(groups.flatMap((group) => group.models.map((model) => model.label)));
+  });
+
+  it('合并旧连接与新分组，同时保留每组的类别可见性和模型引用', () => {
+    const grouped: AppConfig = { theme: 'dark', providers: {
+      cccapi: { name: 'CCC', apiKey: 'legacy' },
+      'cccapi-free': { name: 'CCC', apiKey: 'free', catalogId: 'cccapi', cccGroup: 'CCC生图白嫖', visibleModelCategories: ['text'] },
+      'cccapi-pro': { name: 'CCC', apiKey: 'pro', catalogId: 'cccapi', cccGroup: 'GPT-特价Pro' },
+    } };
+    const models = [
+      { id: 'legacy', name: 'Legacy Image', modelId: 'gpt-image-2', category: 'image' as const, providerConfigId: 'cccapi' },
+      { id: 'hidden', name: 'Hidden Image', modelId: 'gpt-image-2', category: 'image' as const, providerConfigId: 'cccapi-free' },
+      { id: 'text', name: 'GPT', modelId: 'gpt-5.6-sol', category: 'text' as const, providerConfigId: 'cccapi-pro' },
+    ];
+    const image = getGeneralModelGroups(models, grouped, 'ai-image');
+    expect(image).toHaveLength(1);
+    expect(image[0].models.map((model) => model.value)).toEqual(['general/legacy']);
+    const text = getGeneralModelGroups(models, grouped, 'ai-text');
+    expect(text).toHaveLength(1);
+    expect(text[0]).toMatchObject({ id: image[0].id, name: 'CCC API' });
+    expect(text[0].models[0]).toMatchObject({ value: 'general/text', label: 'GPT · GPT-特价Pro' });
+    expect(getMediaModelOptions(models, grouped).filter((model) => model.provider === 'general').map((model) => model.value))
+      .toEqual(['general/legacy']);
+    expect(models.map((model) => model.providerConfigId)).toEqual(['cccapi', 'cccapi-free', 'cccapi-pro']);
   });
   const config: AppConfig = {
     providers: {

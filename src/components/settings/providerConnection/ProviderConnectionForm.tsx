@@ -28,12 +28,14 @@ interface CccGroupDraft {
 }
 
 /** 所有分组同时编辑；凭据仍按独立连接保存，不引入嵌套 Key 持久化。 */
-export function CccGroupConnectionsForm({ providerConfigs, presetModels, onSave, onClose, onReturnToPicker }: {
+export function CccGroupConnectionsForm({ providerConfigs, presetModels, onSave, onClose, onReturnToPicker, onCopyConnection, onRemoveConnection }: {
   providerConfigs: Record<string, ApiProviderConfig>;
   presetModels: ProviderModelSelection[];
   onSave: (connections: Record<string, ApiProviderConfig>) => Promise<void>;
   onClose: () => void;
   onReturnToPicker?: () => void;
+  onCopyConnection?: (connectionId: string) => Promise<void>;
+  onRemoveConnection?: (connectionId: string) => Promise<boolean>;
 }) {
   const t = useT();
   const [rows, setRows] = useState<CccGroupDraft[]>(() => {
@@ -53,6 +55,9 @@ export function CccGroupConnectionsForm({ providerConfigs, presetModels, onSave,
   });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
+  const [pendingRemoveId, setPendingRemoveId] = useState<string | null>(null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+  const busy = saving || removingId !== null;
   const requests = useRef(new Map<string, AbortController>());
   useEffect(() => {
     const controllers = requests.current;
@@ -72,7 +77,7 @@ export function CccGroupConnectionsForm({ providerConfigs, presetModels, onSave,
   }));
   const fetchModels = async (id: string) => {
     const row = rows.find((item) => item.id === id);
-    if (!row?.config.apiKey.trim() || saving) return;
+    if (!row?.config.apiKey.trim() || busy) return;
     requests.current.get(id)?.abort();
     const controller = new AbortController();
     requests.current.set(id, controller);
@@ -92,7 +97,7 @@ export function CccGroupConnectionsForm({ providerConfigs, presetModels, onSave,
     }
   };
   const save = async () => {
-    if (saving) return;
+    if (busy) return;
     const connections: Record<string, ApiProviderConfig> = {};
     for (const row of rows) {
       // 空白分组始终显示；填写 Key 或选择模型后才创建对应连接。
@@ -113,11 +118,36 @@ export function CccGroupConnectionsForm({ providerConfigs, presetModels, onSave,
     finally { setSaving(false); }
   };
 
+  const removeConnection = async (row: CccGroupDraft) => {
+    if (!onRemoveConnection || busy) return;
+    setRemovingId(row.id); setSaveError('');
+    requests.current.get(row.id)?.abort();
+    setRows((current) => current.map((item) => item.id === row.id ? { ...item, status: 'idle' } : item));
+    try {
+      if (!await onRemoveConnection(row.id)) return;
+      requests.current.delete(row.id);
+      setRows((current) => current.flatMap((item) => {
+        if (item.id !== row.id) return [item];
+        const group = row.config.cccGroup;
+        // 已删除的连接不能被「保存全部」重新写回；常驻分组保留空白输入，重新填写会获得新身份。
+        if (!CCC_PROVIDER_GROUPS.some((known) => known.name === group)
+          || current.some((other) => other.id !== row.id && other.config.cccGroup === group)) return [];
+        const id = createConnectionId('cccapi');
+        return [{ id, config: { name: cccConnectionName({ cccGroup: group }), catalogId: 'cccapi', cccGroup: group, apiKey: '' },
+          models: getCccGroupPresetModels(presetModels, group), selectedIds: new Set<string>(), selectionEdited: false,
+          existing: false, status: 'idle' as const, message: t('分组预置模型，拉取后以该 Key 返回为准。') }];
+      }));
+      setPendingRemoveId(null);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : t('连接删除失败，请重试'));
+    } finally { setRemovingId(null); }
+  };
+
   return <>
     <div className="provider-dialog-body">
       <div className="flex items-start justify-between gap-2 mb-3">
         <p className="ui-hint">{t('各分组的 Key 和模型同时保留。配置并保存后，选择模型即可自动使用所属分组的 Key，无需切换分组。')}</p>
-        {onReturnToPicker && <button type="button" className="ui-btn ui-btn--sm ui-btn--ghost shrink-0" disabled={saving} onClick={onReturnToPicker}>{t('更换厂商')}</button>}
+        {onReturnToPicker && <button type="button" className="ui-btn ui-btn--sm ui-btn--ghost shrink-0" disabled={busy} onClick={onReturnToPicker}>{t('更换厂商')}</button>}
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {rows.map((row) => {
@@ -131,22 +161,22 @@ export function CccGroupConnectionsForm({ providerConfigs, presetModels, onSave,
               <p className="ui-hint">{CCC_PROVIDER_GROUPS.find((item) => item.name === group)?.description || t('保留已有连接与模型配置')}</p>
               <label className="ui-field block">
                 <span className="ui-label">API Key</span>
-                <input className="ui-input w-full" type="password" aria-label={`${group} API Key`} autoComplete="off" placeholder="sk-..." value={row.config.apiKey} disabled={saving} onChange={(event) => updateKey(row.id, event.target.value)} />
+                <input className="ui-input w-full" type="password" aria-label={`${group} API Key`} autoComplete="off" placeholder="sk-..." value={row.config.apiKey} disabled={busy} onChange={(event) => updateKey(row.id, event.target.value)} />
               </label>
-              <button type="button" className="ui-btn ui-btn--sm ui-btn--secondary" aria-label={`${t('拉取模型')} ${group}`} disabled={saving || !row.config.apiKey.trim() || row.status === 'loading'} onClick={() => fetchModels(row.id)}>{row.status === 'loading' ? t('正在拉取') : t('拉取模型')}</button>
+              <button type="button" className="ui-btn ui-btn--sm ui-btn--secondary" aria-label={`${t('拉取模型')} ${group}`} disabled={busy || !row.config.apiKey.trim() || row.status === 'loading'} onClick={() => fetchModels(row.id)}>{row.status === 'loading' ? t('正在拉取') : t('拉取模型')}</button>
               {row.message && <p role={row.status === 'error' ? 'alert' : 'status'} className={`ui-hint ${row.status === 'error' ? 'ui-alert ui-alert--danger' : ''}`}>{row.message}</p>}
               <details>
                 <summary className="cursor-pointer text-canvas-text">{t('启用模型')} · {row.selectedIds.size}/{row.models.length}</summary>
                 <div className="mt-2 space-y-2">
                   <label className="flex items-center gap-2 text-canvas-text">
-                    <input type="checkbox" aria-label={`${t('选择全部模型')} ${group}`} disabled={saving || !row.models.length} checked={!!row.models.length && row.selectedIds.size === row.models.length} onChange={(event) => {
+                    <input type="checkbox" aria-label={`${t('选择全部模型')} ${group}`} disabled={busy || !row.models.length} checked={!!row.models.length && row.selectedIds.size === row.models.length} onChange={(event) => {
                       const checked = event.target.checked;
                       setRows((current) => current.map((item) => item.id === row.id ? { ...item, selectedIds: new Set(checked ? item.models.map((model) => model.id) : []), selectionEdited: true } : item));
                     }} />{t('选择全部模型')}
                   </label>
                   <div className="max-h-48 overflow-y-auto space-y-1">
                     {row.models.map((model) => <label key={model.id} className="flex items-start gap-2 p-2 rounded bg-canvas-surface text-canvas-text">
-                      <input type="checkbox" className="mt-1" aria-label={`${t('启用')} ${group} ${model.id}`} disabled={saving} checked={row.selectedIds.has(model.id)} onChange={() => toggleModel(row.id, model.id)} />
+                      <input type="checkbox" className="mt-1" aria-label={`${t('启用')} ${group} ${model.id}`} disabled={busy} checked={row.selectedIds.has(model.id)} onChange={() => toggleModel(row.id, model.id)} />
                       <span className="min-w-0 break-words"><strong className="font-medium">{model.name}</strong><small className="block text-canvas-text-muted">{model.id}</small></span>
                     </label>)}
                     {!row.models.length && <p className="ui-hint">{t('填写 Key 后拉取此连接的模型目录')}</p>}
@@ -154,6 +184,16 @@ export function CccGroupConnectionsForm({ providerConfigs, presetModels, onSave,
                 </div>
               </details>
             </div>
+            {row.existing && (onCopyConnection || onRemoveConnection) && <div className="ui-card__footer flex flex-wrap items-center gap-2">
+              {pendingRemoveId === row.id ? <>
+                <span className="ui-hint w-full">{t('移除此分组连接及其模型？立即生效。')}</span>
+                <button type="button" className="ui-btn ui-btn--sm ui-btn--secondary" disabled={busy} onClick={() => setPendingRemoveId(null)}>{t('取消删除')}</button>
+                <button type="button" className="ui-btn ui-btn--sm ui-btn--danger" aria-label={`${t('确认删除')} ${group}`} disabled={busy} onClick={() => removeConnection(row)}>{removingId === row.id ? t('删除中') : t('确认删除')}</button>
+              </> : <>
+                {onCopyConnection && <button type="button" className="ui-btn ui-btn--sm ui-btn--ghost" aria-label={`${t('复制分组配置')} ${group}`} disabled={busy} onClick={() => onCopyConnection(row.id)}><Icon icon="mdi:content-copy" width="14" />{t('复制已保存配置（不含 Key）')}</button>}
+                {onRemoveConnection && <button type="button" className="ui-btn ui-btn--sm ui-btn--ghost" aria-label={`${t('删除分组')} ${group}`} disabled={busy} onClick={() => setPendingRemoveId(row.id)}><Icon icon="mdi:trash-can-outline" width="14" />{t('删除分组')}</button>}
+              </>}
+            </div>}
           </section>;
         })}
       </div>
@@ -163,8 +203,8 @@ export function CccGroupConnectionsForm({ providerConfigs, presetModels, onSave,
     <footer className="provider-dialog-footer">
       <span className="ui-hint">{t('所有已填写分组一起保存，调用时自动匹配 Key。')}</span>
       <div className="flex items-center gap-2">
-        <AnimatedButton type="button" className="provider-secondary-btn" disabled={saving} onClick={onClose}>{t('取消')}</AnimatedButton>
-        <AnimatedButton type="button" className="provider-primary-btn" disabled={saving || !rows.some((row) => row.existing || row.config.apiKey.trim() || row.selectedIds.size)} onClick={save}>{saving ? t('保存中') : t('保存全部分组')}</AnimatedButton>
+        <AnimatedButton type="button" className="provider-secondary-btn" disabled={busy} onClick={onClose}>{t('取消')}</AnimatedButton>
+        <AnimatedButton type="button" className="provider-primary-btn" disabled={busy || !rows.some((row) => row.existing || row.config.apiKey.trim() || row.selectedIds.size)} onClick={save}>{saving ? t('保存中') : t('保存全部分组')}</AnimatedButton>
       </div>
     </footer>
   </>;

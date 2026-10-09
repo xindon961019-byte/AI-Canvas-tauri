@@ -231,10 +231,67 @@ describe('CCC simultaneous group settings', () => {
     expect(connections[0]).toMatchObject({ cccGroup: banana, apiKey: '', selectedModels: [expect.objectContaining({ id: 'nano-banana-pro' })] });
   });
 
+  it('copies only the requested saved group and provides no actions for blank groups', async () => {
+    props.providerConfigs = { 'cccapi-stable': { name: 'CCC', catalogId: 'cccapi', cccGroup: stable, apiKey: 'stable-fixture' } };
+    props.onCopyConnection = vi.fn().mockResolvedValue(undefined);
+    props.onRemoveConnection = vi.fn().mockResolvedValue(true);
+    render();
+    expect(field(`复制分组配置 ${banana}`)).toBeUndefined();
+    expect(field(`删除分组 ${banana}`)).toBeUndefined();
+    await (field(`复制分组配置 ${stable}`).props.onClick as () => Promise<void>)();
+    expect(props.onCopyConnection).toHaveBeenCalledExactlyOnceWith('cccapi-stable');
+    expect(props.onRemoveConnection).not.toHaveBeenCalled();
+  });
+
+  it('confirms deletion of one group, preserves other drafts and never resurrects the removed connection on save', async () => {
+    props.providerConfigs = { 'cccapi-stable': { name: 'CCC', catalogId: 'cccapi', cccGroup: stable, apiKey: 'stable-fixture',
+      selectedModels: [{ id: 'gpt-image-2', name: 'Image', category: 'image', provider: 'cccapi-stable' }],
+    } };
+    props.onRemoveConnection = vi.fn().mockResolvedValue(true);
+    render(); key(banana, 'banana-draft'); toggle(banana, 'nano-banana-pro');
+    (field(`删除分组 ${stable}`).props.onClick as () => void)(); render();
+    expect(props.onRemoveConnection).not.toHaveBeenCalled();
+    await (field(`确认删除 ${stable}`).props.onClick as () => Promise<void>)(); render();
+    expect(props.onRemoveConnection).toHaveBeenCalledExactlyOnceWith('cccapi-stable');
+    expect(elements(tree).filter((element) => element.type === 'section')).toHaveLength(8);
+    expect(field(`${stable} API Key`).props.value).toBe('');
+    expect(field(`启用 ${stable} gpt-image-2`).props.checked).toBe(false);
+    expect(field(`${banana} API Key`).props.value).toBe('banana-draft');
+    expect(field(`启用 ${banana} nano-banana-pro`).props.checked).toBe(true);
+    await save();
+    expect(vi.mocked(props.onSave).mock.calls[0][0]).not.toHaveProperty('cccapi-stable');
+    expect(Object.values(vi.mocked(props.onSave).mock.calls[0][0])).toHaveLength(1);
+    key(stable, 'replacement-fixture'); await save();
+    const replacement = Object.entries(vi.mocked(props.onSave).mock.calls[1][0]).find(([, config]) => config.cccGroup === stable)!;
+    expect(replacement[0]).not.toBe('cccapi-stable');
+    expect(replacement[1].apiKey).toBe('replacement-fixture');
+  });
+
+  it('keeps a failed deletion retryable and ignores the aborted directory result', async () => {
+    props.providerConfigs = { 'cccapi-stable': { name: 'CCC', catalogId: 'cccapi', cccGroup: stable, apiKey: 'stable-fixture' } };
+    props.onRemoveConnection = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    let finish!: (value: unknown) => void;
+    driver.catalog.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    render();
+    const fetching = pull(stable); render();
+    (field(`删除分组 ${stable}`).props.onClick as () => void)(); render();
+    await (field(`确认删除 ${stable}`).props.onClick as () => Promise<void>)(); render();
+    expect(field(`${stable} API Key`).props.value).toBe('stable-fixture');
+    expect(field(`确认删除 ${stable}`).props.disabled).toBe(false);
+    expect(field(`拉取模型 ${stable}`).props.disabled).toBe(false);
+    expect(driver.catalog.mock.calls[0][0].signal.aborted).toBe(true);
+    finish({ source: 'remote', models: [{ id: 'stale', name: 'Stale', category: 'image', provider: 'cccapi' }] });
+    await fetching;
+    expect(field(`启用 ${stable} stale`)).toBeUndefined();
+    await (field(`确认删除 ${stable}`).props.onClick as () => Promise<void>)(); render();
+    expect(field(`${stable} API Key`).props.value).toBe('');
+  });
+
   it('opens the simultaneous group form from the provider picker and from any saved CCC connection', () => {
     const parentProps: ComponentProps<typeof ProviderConnectionDialog> = { isOpen: true, providerConfigs: {}, connectedProviderIds: ['cccapi'],
       fallbackModels: { cccapi: props.presetModels }, dreaminaLoggedIn: false, dreaminaLoading: false,
       onDreaminaLogin: vi.fn(), onClose: vi.fn(), onSave: vi.fn(), onSaveCccGroups: vi.fn(),
+      onCopyCccGroup: vi.fn(), onRemoveCccGroup: vi.fn(),
     };
     driver.scope!.index = 0;
     tree = ProviderConnectionDialog(parentProps);
@@ -243,6 +300,8 @@ describe('CCC simultaneous group settings', () => {
     (button.props.onClick as () => void)(); driver.scope!.index = 0;
     tree = ProviderConnectionDialog(parentProps);
     expect(elements(tree).find((element) => element.type === CccGroupConnectionsForm)!.props.onSave).toBe(parentProps.onSaveCccGroups);
+    expect(elements(tree).find((element) => element.type === CccGroupConnectionsForm)!.props.onCopyConnection).toBe(parentProps.onCopyCccGroup);
+    expect(elements(tree).find((element) => element.type === CccGroupConnectionsForm)!.props.onRemoveConnection).toBe(parentProps.onRemoveCccGroup);
     driver.scope = { values: [], index: 0 };
     parentProps.connectionId = 'cccapi-stable';
     parentProps.initialConfig = { name: 'CCC', apiKey: 'saved-fixture', catalogId: 'cccapi', cccGroup: stable };

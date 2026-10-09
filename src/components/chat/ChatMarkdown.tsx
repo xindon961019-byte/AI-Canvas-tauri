@@ -63,7 +63,7 @@ function InlineContent({
       nodes.push(
         <code
           key={`code-${start}`}
-          className="rounded-[4px] bg-canvas-hover/70 px-1 py-0.5 font-mono text-[0.9em] text-emerald-200"
+          className="ui-code"
         >
           {raw.slice(1, -1)}
         </code>,

@@ -4,7 +4,8 @@ import vm from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 
 const bootstrap = readFileSync(new URL('../../public/ai-app-bootstrap.js', import.meta.url), 'utf8');
-const hostHtml = readFileSync(new URL('../../public/ai-app-host.html', import.meta.url), 'utf8');
+// HTML 解析会先将 CRLF/CR 规范为 LF；CSP 校验应使用浏览器实际执行的文本。
+const hostHtml = readFileSync(new URL('../../public/ai-app-host.html', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
 const channel = 'ai-canvas-app-v1';
 const sessionId = 'session_12345678901234567890';
 const png = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
