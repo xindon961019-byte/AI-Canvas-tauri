@@ -1,20 +1,23 @@
-﻿/**
+/**
  * MentionEditor @提及编辑器 — 支持 @引用其他节点输出的富文本输入框，实时渲染为彩色标签芯片
  */
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, forwardRef, useImperativeHandle } from 'react';
 import { createPortal } from 'react-dom';
-import type { WorkflowIONodeType } from '../../../types';
+import type { PromptSubmitShortcut, WorkflowIONodeType } from '../../../types';
+import { resolvePromptEnterAction } from '../../../utils/promptSubmitShortcut';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../../store/useAppStore';
 import { Icon } from '@iconify/react';
 import { listGlobalFiles, listExternalFolderFiles, type AssetFileEntry } from '../../../services/fileService';
 import { getAllAssetMeta } from '../../../services/indexedDbService';
 import { springSmooth, fadeFast } from '../../../utils/motion';
-import { calcAnchoredPosition } from '../../../utils/popupPosition';
+import { calcAnchoredPosition, calcFixedPosition } from '../../../utils/popupPosition';
+import { resolveMentionPreview } from './connectedNodesPreviewInteractions';
 import { AnimatePresence, motion } from 'framer-motion';
 import PopupCloseButton from '../../shared/PopupCloseButton';
 import MentionPicker, { type MentionPickerChip, type MentionPickerItem } from '../../shared/MentionPicker';
 import ViewportImage from '../../shared/ViewportImage';
+import { findDraggableMentionChip, startMentionChipDrag } from './mentionEditorChipDrag';
 import {
   DRAMA_MENTION_MERGE_ALL,
   buildDramaMentionId,
@@ -58,13 +61,14 @@ const DRAMA_KIND_LABELS: Record<string, string> = { character: '角色', scene: 
 // ── Props ──
 export interface MentionEditorProps {
   value: string;
-  onChange: (value: string) => void;
+  onChange: (value: string, previousValue?: string) => void;
   onSubmit?: () => void;
   placeholder?: string;
   nodeId?: string;
   selectedWorkflowId?: string;
   canSubmit?: boolean;
   submitOnShiftEnter?: boolean;
+  submitShortcut?: PromptSubmitShortcut;
   onFocus?: () => void;
   onBlur?: () => void;
   onSlashTrigger?: () => void;
@@ -89,6 +93,7 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
   selectedWorkflowId,
   canSubmit = true,
   submitOnShiftEnter = false,
+  submitShortcut,
   onFocus,
   onBlur,
   onSlashTrigger,
@@ -101,17 +106,27 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
   const mentionDropdownRef = useRef<HTMLDivElement>(null);
   const [mentionDropdownPosition, setMentionDropdownPosition] = useState({ left: 12, top: 0 });
   const editorRef = useRef<HTMLDivElement>(null);
+  const syncedPromptRef = useRef(prompt);
+  const composingRef = useRef(false);
+  const [compositionRevision, setCompositionRevision] = useState(0);
   const savedMentionRangeRef = useRef<Range | null>(null);
   const selectFirstMentionRef = useRef<(() => void) | null>(null);
   const lastFocusedWfValueRef = useRef<HTMLSpanElement | null>(null);
-  const { nodes, edges, workflows, dramaAssets } = useAppStore(
+  const cancelChipDragRef = useRef<(() => void) | null>(null);
+  const { nodes, edges, workflows, dramaAssets, currentProjectId } = useAppStore(
     useShallow((state) => ({
       nodes: state.nodes,
       edges: state.edges,
       workflows: state.workflows,
       dramaAssets: state.dramaAssets,
+      currentProjectId: state.currentProjectId,
     })),
   );
+  const editorOwnerRef = useRef({ projectId: currentProjectId, nodeId });
+  useEffect(() => () => {
+    cancelChipDragRef.current?.();
+    cancelChipDragRef.current = null;
+  }, [currentProjectId, nodeId, prompt]);
 
   // ── 资产引用弹窗 ──
   const assetFolders = useAppStore((s) => s.config.assetFolders);
@@ -138,10 +153,18 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
   const nodeMetaMap = useMemo(() => getNodeMetaMap(nodes), [nodes]);
 
   // ── Rebuild DOM when prompt changes externally ──
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = editorRef.current;
     if (!el) return;
+    const owner = editorOwnerRef.current;
+    if (owner.projectId !== currentProjectId || owner.nodeId !== nodeId) {
+      composingRef.current = false;
+      editorOwnerRef.current = { projectId: currentProjectId, nodeId };
+    }
+    // IME 组合输入期间保留浏览器的文本节点，结束后再通过输入基线合并新引用。
+    if (composingRef.current) return;
     syncImageReferenceLabels(el, nodeMetaMap);
+    syncedPromptRef.current = prompt;
     if (serializeDOM(el) === prompt) {
       // 删空后浏览器常残留 <br>，而 serializeDOM 会剥掉尾部换行使其「看起来为空」，
       // 于是 DOM 不会被清理、光标停在残留空行（第 2/3 行）。这里把真正的空状态归一化。
@@ -161,14 +184,17 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
       return;
     }
     const sel = window.getSelection();
-    const cursorOffset = sel && sel.rangeCount ? saveCursor(el) : null;
+    const cursorOffset = sel && sel.rangeCount && el.contains(sel.getRangeAt(0).startContainer)
+      ? saveCursor(el) : null;
+    cancelChipDragRef.current?.();
+    cancelChipDragRef.current = null;
     el.innerHTML = '';
     for (const node of renderPromptToNodes(prompt, nodeMetaMap)) {
       el.appendChild(node);
     }
     syncImageReferenceLabels(el, nodeMetaMap);
     if (cursorOffset !== null) restoreCursor(el, cursorOffset);
-  }, [prompt, nodeMetaMap]);
+  }, [compositionRevision, currentProjectId, nodeId, prompt, nodeMetaMap]);
 
   // ── Cursor save/restore ──
   const saveCursor = (root: HTMLElement): number => {
@@ -246,7 +272,10 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
     const el = editorRef.current;
     if (!el) return;
     syncImageReferenceLabels(el, nodeMetaMap);
-    onChange(serializeDOM(el));
+    const nextPrompt = serializeDOM(el);
+    const previousPrompt = syncedPromptRef.current;
+    syncedPromptRef.current = nextPrompt;
+    onChange(nextPrompt, previousPrompt);
   }, [nodeMetaMap, onChange]);
 
   const canvasMentionNodes = useMemo(
@@ -769,11 +798,12 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       // 输入法组合中：回车/方向键属于候选框，不该触发提交或 @ 选中
-      if (e.nativeEvent.isComposing) return;
+      if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+      const enterAction = resolvePromptEnterAction(e, submitShortcut ?? (submitOnShiftEnter ? 'shift-enter' : 'enter'), showMention);
       // 方向键导航前先补好行首芯片的光标落点（ZWSP），否则光标跳不到芯片前
       if (e.key.startsWith('Arrow') && editorRef.current) normalizeChipSlots(editorRef.current);
       // @ mention: Enter → select first match
-      if (showMention && e.key === 'Enter' && !e.shiftKey) {
+      if (enterAction === 'mention') {
         e.preventDefault();
         selectFirstMentionRef.current?.();
         return;
@@ -785,14 +815,15 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
         return;
       }
       // Submit with the shortcut chosen by the parent; mention selection keeps plain Enter.
-      if (e.key === 'Enter' && e.shiftKey === submitOnShiftEnter) {
+      if (enterAction === 'submit') {
         e.preventDefault();
+        if (e.repeat) return;
         const text = editorRef.current ? serializeDOM(editorRef.current) : '';
         if (canSubmit && text.trim() && onSubmit) onSubmit();
         return;
       }
       // 换行时手动插入单个 <br>，避免浏览器在芯片旁默认插入两个 <br>（换两行）
-      if (e.key === 'Enter' && e.shiftKey !== submitOnShiftEnter) {
+      if (enterAction === 'newline') {
         e.preventDefault();
         const sel = window.getSelection();
         if (!sel || !sel.rangeCount) return;
@@ -917,6 +948,7 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
       canSubmit,
       onSubmit,
       submitOnShiftEnter,
+      submitShortcut,
       emitDOM,
     ],
   );
@@ -939,30 +971,83 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
     [emitDOM],
   );
 
-  // ── 芯片 hover：① 发布节点 id 联动 connected-nodes-float 高亮；② 显示节点名字浮层 ──
+  // ── 芯片 hover：读取对应内容的小卡片，保留原有引用高亮联动 ──
   const lastHoverIdRef = useRef<string | null>(null);
-  const [chipTip, setChipTip] = useState<{ label: string; x: number; y: number } | null>(null);
-  const handleEditorMouseOver = useCallback((e: React.MouseEvent) => {
-    const el = (e.target as HTMLElement).closest?.('[data-ref-id]') as HTMLElement | null;
-    const id = el?.getAttribute('data-ref-id') ?? null;
-    if (id === lastHoverIdRef.current) return; // 同一芯片，跳过避免抖动
-    lastHoverIdRef.current = id;
-    useAppStore.getState().setHoveredMentionNodeId(id);
-    if (el && id) {
-      const label = el.getAttribute('data-ref-label') || '节点';
-      const r = el.getBoundingClientRect();
-      setChipTip({ label, x: r.left + r.width / 2, y: r.top });
-    } else {
-      setChipTip(null);
-    }
-  }, []);
+  const chipHoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [chipTip, setChipTip] = useState<{ id: string; label: string; x: number; y: number; width: number; ownerNodeId?: string } | null>(null);
   const handleEditorMouseLeave = useCallback(() => {
+    if (chipHoverTimer.current !== null) clearTimeout(chipHoverTimer.current);
+    chipHoverTimer.current = null;
     lastHoverIdRef.current = null;
     useAppStore.getState().setHoveredMentionNodeId(null);
     setChipTip(null);
   }, []);
-  // 卸载时清除，避免残留 hover 高亮
-  useEffect(() => () => { useAppStore.getState().setHoveredMentionNodeId(null); }, []);
+  const handleEditorMouseOver = useCallback((e: React.MouseEvent) => {
+    if (editorRef.current?.classList.contains('is-chip-dragging')) return;
+    const el = (e.target as HTMLElement).closest?.('[data-ref-id]') as HTMLElement | null;
+    const id = el?.getAttribute('data-ref-id') ?? null;
+    if (id === lastHoverIdRef.current) return; // 同一芯片，跳过避免抖动
+    handleEditorMouseLeave();
+    lastHoverIdRef.current = id;
+    useAppStore.getState().setHoveredMentionNodeId(id);
+    if (el && id) {
+      const label = el.getAttribute('data-ref-label') || '节点';
+      chipHoverTimer.current = setTimeout(() => {
+        chipHoverTimer.current = null;
+        if (lastHoverIdRef.current !== id || !el.isConnected) return;
+        const rect = el.getBoundingClientRect();
+        const width = Math.min(264, window.innerWidth - 24);
+        const height = Math.min(208, window.innerHeight - 24);
+        // 优先放在编辑器内的下方，空间不足时使用既有锚定翻转算法。
+        const position = rect.bottom + 8 + height <= window.innerHeight - 12
+          ? calcFixedPosition(rect.left, rect.bottom + 8, width, height, 12)
+          : calcAnchoredPosition(rect, width, height, 8, 12);
+        setChipTip({ id, label, x: position.left, y: position.top, width, ownerNodeId: nodeId });
+      }, 120);
+    }
+  }, [handleEditorMouseLeave, nodeId]);
+  const handleChipPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const root = editorRef.current;
+    if (!root || event.button !== 0 || event.pointerType === 'touch') return;
+    const source = findDraggableMentionChip(root, event.target);
+    if (!source) return;
+    event.preventDefault();
+    event.stopPropagation();
+    cancelChipDragRef.current?.();
+    handleEditorMouseLeave();
+    setShowMention(false);
+    root.focus({ preventScroll: true });
+    const range = document.createRange();
+    range.setStartAfter(source);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    cancelChipDragRef.current = startMentionChipDrag({
+      root, source, pointerId: event.pointerId,
+      clientX: event.clientX, clientY: event.clientY, onCommit: emitDOM,
+      isCurrent: () => useAppStore.getState().currentProjectId === currentProjectId,
+    });
+  }, [currentProjectId, emitDOM, handleEditorMouseLeave]);
+  const chipPreview = chipTip && chipTip.ownerNodeId === nodeId
+    ? resolveMentionPreview(nodes, chipTip.id, chipTip.label, nodeMetaMap.get(chipTip.id)?.thumbnailUrl)
+    : null;
+  useEffect(() => {
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && lastHoverIdRef.current) handleEditorMouseLeave();
+    };
+    window.addEventListener('resize', handleEditorMouseLeave);
+    window.addEventListener('scroll', handleEditorMouseLeave, true);
+    window.addEventListener('keydown', escape);
+    return () => {
+      if (chipHoverTimer.current !== null) clearTimeout(chipHoverTimer.current);
+      lastHoverIdRef.current = null;
+      useAppStore.getState().setHoveredMentionNodeId(null);
+      window.removeEventListener('resize', handleEditorMouseLeave);
+      window.removeEventListener('scroll', handleEditorMouseLeave, true);
+      window.removeEventListener('keydown', escape);
+    };
+  }, [nodeId, handleEditorMouseLeave]);
 
   // ── @ 面板数据：输入图（画布节点） / 资产库（短剧资产） / ComfyUI 节点（工作流 IO） ──
   const dramaThumbOf = useCallback((item: { imageNodeId?: string; imageUrl?: string }) => {
@@ -1230,8 +1315,19 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
         className={`prompt-editor nodrag nowheel${!prompt ? ' is-empty' : ''}`}
         data-placeholder={placeholder}
         onInput={handleInput}
+        onCompositionStart={() => { composingRef.current = true; }}
+        onCompositionEnd={() => {
+          composingRef.current = false;
+          emitDOM();
+          // 合并后提示词可能与 Store 相同，仍需刷新组合输入期间暂缓的 DOM。
+          setCompositionRevision((revision) => revision + 1);
+        }}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
+        onPointerDown={handleChipPointerDown}
+        onDragStart={(event) => {
+          if (editorRef.current && findDraggableMentionChip(editorRef.current, event.target)) event.preventDefault();
+        }}
         onMouseOver={handleEditorMouseOver}
         onMouseLeave={handleEditorMouseLeave}
         onFocus={() => {
@@ -1239,26 +1335,49 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
           onFocus?.();
         }}
         onBlur={() => {
-          onBlur?.();
+          const wasComposing = composingRef.current;
+          composingRef.current = false;
           emitDOM();
+          if (wasComposing) setCompositionRevision((revision) => revision + 1);
+          onBlur?.();
         }}
         onPointerDown={(event) => event.stopPropagation()}
         spellCheck={false}
       />
 
-      {/* 芯片 hover 名字浮层（Portal，避免被编辑器 overflow 裁剪）*/}
+      {/* 保留 chip-name-tip 的 Portal 标记，宿主点外关闭逻辑继续识别。 */}
       {createPortal(
         <AnimatePresence>
-          {chipTip && (
+          {chipTip && chipPreview && (
             <motion.div
-              className="chip-name-tip"
-              style={{ left: chipTip.x, top: chipTip.y }}
-              initial={{ opacity: 0, y: 4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 4, transition: fadeFast }}
+              key={chipTip.id}
+              className="chip-name-tip reference-chip-card ui-card p-2"
+              role="tooltip"
+              data-reference-preview-open=""
+              style={{ left: chipTip.x, top: chipTip.y, width: chipTip.width }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, transition: fadeFast }}
               transition={fadeFast}
             >
-              {chipTip.label}
+              <div className="reference-chip-content flex h-32 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-canvas-bg">
+                {chipPreview.thumbnailUrl ? (
+                  chipPreview.sprite ? (
+                    <div role="img" aria-label={chipPreview.label} className="h-full w-full bg-no-repeat" style={{ backgroundImage: `url(${JSON.stringify(chipPreview.thumbnailUrl)})`, ...chipPreview.sprite }} />
+                  ) : (
+                    <img src={chipPreview.thumbnailUrl} alt={chipPreview.label} className="h-full w-full object-contain" />
+                  )
+                ) : chipPreview.text ? (
+                  <p className="line-clamp-5 whitespace-pre-wrap break-words p-2 text-xs leading-5 text-canvas-text-secondary">{chipPreview.text}</p>
+                ) : (
+                  <Icon icon={MEDIA_ICONS[chipPreview.outputType]} className="text-3xl text-canvas-text-muted" aria-hidden="true" />
+                )}
+              </div>
+              <p className="mt-2 line-clamp-2 break-words text-xs font-medium text-canvas-text">{chipPreview.label}</p>
+              <span className="mt-1 text-[11px] text-canvas-text-muted">
+                {chipPreview.displayId != null ? `#${chipPreview.displayId} · ` : ''}
+                {chipPreview.missing ? '引用节点已不存在' : ({ image: '图像素材', video: '视频素材', audio: '音频素材', text: '文本内容' }[chipPreview.outputType])}
+              </span>
             </motion.div>
           )}
         </AnimatePresence>,

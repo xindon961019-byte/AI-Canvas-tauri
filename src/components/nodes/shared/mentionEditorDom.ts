@@ -5,6 +5,7 @@
  */
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { WorkflowIONodeType, StoryboardCellOverride } from '../../../types';
+import type { MediaReferenceKind } from '../../../types/aiTypes';
 import type { AppState } from '../../../store/useAppStore';
 import { useAppStore } from '../../../store/useAppStore';
 import { getFileCategory } from '../../../services/fileService';
@@ -21,6 +22,35 @@ const CHIP_STYLE: Record<string, string> = {
   'ai-markdown': 'chip-markdown',
   'ai-storyboard': 'chip-image',
 };
+const NODE_CHIP_ICON_PATHS: Record<string, string> = {
+  'ai-text': 'M4 4h16v16H4zM8 8h8M8 12h8M8 16h5',
+  'ai-video': 'm16 8 5-3v14l-5-3M3 5h11a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z',
+  'ai-audio': 'm11 5-5 4H3v6h3l5 4V5ZM15.54 8.46a5 5 0 0 1 0 7.08M19.07 4.93a10 10 0 0 1 0 14.14',
+};
+
+/** 编辑器与生成信息共用引用图标，源节点和 Markdown 沿用对应类型。 */
+export function getNodeChipIconPath(nodeType: string): string | undefined {
+  const type = nodeType === 'ai-markdown' ? 'ai-text' : nodeType.replace(/^source-/, 'ai-');
+  return NODE_CHIP_ICON_PATHS[type];
+}
+
+function buildNodeChipIconEl(iconPath: string): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('width', '12');
+  svg.setAttribute('height', '12');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.8');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  path.setAttribute('d', iconPath);
+  svg.appendChild(path);
+  return svg;
+}
+
 const WF_IO_STYLE: Record<string, string> = {
   prompt: 'chip-workflow-prompt',
   image: 'chip-workflow-image',
@@ -44,9 +74,10 @@ const IMAGE_REFERENCE_NODE_TYPES = new Set([
 
 type NodeMeta = {
   type: string;
-  displayId: number | undefined;
+  displayId?: number;
   thumbnailUrl?: string;
   imageReferenceKey?: string;
+  mediaReference?: { kind: MediaReferenceKind; key: string };
 };
 
 const nodeMetaCache = new WeakMap<AppState['nodes'], Map<string, NodeMeta>>();
@@ -81,13 +112,22 @@ export function getNodeMetaMap(nodes: AppState['nodes']) {
     const directorCaptureUrl = type === 'ai-director' && Array.isArray(node.data.directorCaptureUrls)
       ? node.data.directorCaptureUrls.find((url) => typeof url === 'string' && url.trim())
       : undefined;
+    const imageReferenceKey = IMAGE_REFERENCE_NODE_TYPES.has(type) && (thumbnailUrl || directorCaptureUrl)
+      ? `node:${node.id}${!thumbnailUrl && directorCaptureUrl ? ':cap0' : ''}`
+      : undefined;
+    const mediaReference: NodeMeta['mediaReference'] = imageReferenceKey
+      ? { kind: 'image', key: imageReferenceKey }
+      : typeof node.data.videoUrl === 'string' && node.data.videoUrl.trim()
+        ? { kind: 'video', key: `node:${node.id}` }
+        : typeof node.data.audioUrl === 'string' && node.data.audioUrl.trim()
+          ? { kind: 'audio', key: `node:${node.id}` }
+          : undefined;
     map.set(node.id, {
       type,
       displayId: node.data.displayId as number | undefined,
       thumbnailUrl,
-      imageReferenceKey: IMAGE_REFERENCE_NODE_TYPES.has(type) && (thumbnailUrl || directorCaptureUrl)
-        ? `node:${node.id}${!thumbnailUrl && directorCaptureUrl ? ':cap0' : ''}`
-        : undefined,
+      imageReferenceKey,
+      mediaReference,
     });
     if (node.data.type !== 'ai-storyboard') continue;
     const cols = Math.max(1, (node.data.storyboardCols as number) || 3);
@@ -103,6 +143,7 @@ export function getNodeMetaMap(nodes: AppState['nodes']) {
           displayId: undefined,
           thumbnailUrl,
           imageReferenceKey: `sbcell:${cellId}`,
+          mediaReference: { kind: 'image', key: `sbcell:${cellId}` },
         });
       }
     }
@@ -139,39 +180,55 @@ export function normalizeChipSlots(root: HTMLElement): void {
   for (const chip of Array.from(chips)) ensureCaretSlotBeforeChip(chip);
 }
 
-export function numberImageReferenceKeys(keys: Array<string | undefined>): Array<number | undefined> {
-  const indexByKey = new Map<string, number>();
-  return keys.map((key) => {
-    if (!key) return undefined;
-    const existing = indexByKey.get(key);
-    if (existing !== undefined) return existing;
-    const index = indexByKey.size + 1;
-    indexByKey.set(key, index);
-    return index;
+export function numberMediaReferenceLabels(references: Array<NodeMeta['mediaReference']>): Array<string | undefined> {
+  const indices: Record<MediaReferenceKind, Map<string, number>> = {
+    image: new Map(), video: new Map(), audio: new Map(),
+  };
+  const names = { image: '图', video: '视频', audio: '音频' };
+  return references.map((reference) => {
+    if (!reference?.key) return undefined;
+    const indexByKey = indices[reference.kind];
+    let index = indexByKey.get(reference.key);
+    if (index === undefined) {
+      index = indexByKey.size + 1;
+      indexByKey.set(reference.key, index);
+    }
+    return `(${names[reference.kind]}${index})`;
   });
 }
 
-export function syncImageReferenceLabels(root: HTMLElement, metaMap: Map<string, NodeMeta>): void {
-  const chips = Array.from(root.querySelectorAll<HTMLElement>('[data-ref-id],[data-image-ref-key]'));
-  const keys = chips.map((chip) => {
+export function syncMediaReferenceLabels(root: HTMLElement, metaMap: Map<string, NodeMeta>): void {
+  const chips = Array.from(root.querySelectorAll<HTMLElement>('[data-ref-id],[data-image-ref-key],[data-media-ref-key]'));
+  const references = chips.map((chip): NodeMeta['mediaReference'] => {
     const nodeId = chip.getAttribute('data-ref-id');
-    return nodeId ? metaMap.get(nodeId)?.imageReferenceKey : chip.getAttribute('data-image-ref-key') || undefined;
+    if (nodeId) {
+      const meta = metaMap.get(nodeId);
+      return meta?.mediaReference || (meta?.imageReferenceKey ? { kind: 'image', key: meta.imageReferenceKey } : undefined);
+    }
+    const key = chip.getAttribute('data-image-ref-key');
+    if (key) return { kind: 'image', key };
+    const mediaKey = chip.getAttribute('data-media-ref-key');
+    const kind = chip.getAttribute('data-media-ref-kind');
+    return mediaKey && (kind === 'video' || kind === 'audio') ? { kind, key: mediaKey } : undefined;
   });
-  const indices = numberImageReferenceKeys(keys);
+  const labels = numberMediaReferenceLabels(references);
 
   chips.forEach((chip, position) => {
     const existing = Array.from(chip.children).find((child) => child.classList.contains('prompt-chip-image-index'));
-    const index = indices[position];
-    if (index === undefined) {
+    const text = labels[position];
+    if (text === undefined) {
       existing?.remove();
       return;
     }
     const label = existing || document.createElement('span');
-    label.className = 'prompt-chip-id prompt-chip-image-index text-canvas-text-secondary';
-    label.textContent = `(图${index})`;
+    label.className = 'prompt-chip-id prompt-chip-image-index prompt-chip-media-index text-canvas-text-secondary';
+    label.textContent = text;
     if (!existing) chip.appendChild(label);
   });
 }
+
+// 保留编辑器现有调用入口，所有媒体标签统一由同一套同步逻辑处理。
+export const syncImageReferenceLabels = syncMediaReferenceLabels;
 
 export function serializeDOM(root: HTMLElement): string {
   let result = '';
@@ -224,8 +281,11 @@ export function buildChipEl(
   const icon = document.createElement('span');
   icon.className = 'prompt-chip-icon';
   icon.setAttribute('aria-hidden', 'true');
+  const iconPath = getNodeChipIconPath(nodeType);
   const isMedia = nodeType === 'ai-image' || nodeType === 'ai-video' || nodeType === 'ai-storyboard';
-  if (isMedia && meta?.thumbnailUrl) {
+  if (iconPath) {
+    icon.appendChild(buildNodeChipIconEl(iconPath));
+  } else if (isMedia && meta?.thumbnailUrl) {
     icon.classList.add('has-thumbnail');
     const image = document.createElement('img');
     image.src = meta.thumbnailUrl;
@@ -285,7 +345,10 @@ export function buildDramaChipEl(dramaId: string, name: string, kind: string, th
   span.setAttribute('data-drama-label', name);
   span.setAttribute('data-drama-kind', kind);
   span.title = name;
-  if (thumbUrl) span.setAttribute('data-image-ref-key', `drama:${dramaId}`);
+  if (kind === 'voice' || kind === 'action-video') {
+    span.setAttribute('data-media-ref-key', `drama:${dramaId}`);
+    span.setAttribute('data-media-ref-kind', kind === 'voice' ? 'audio' : 'video');
+  } else if (thumbUrl) span.setAttribute('data-image-ref-key', `drama:${dramaId}`);
   const icon = document.createElement('span');
   icon.className = 'prompt-chip-icon';
   if (thumbUrl) {

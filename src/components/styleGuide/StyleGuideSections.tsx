@@ -12,8 +12,10 @@ import NumberStepper from '../shared/NumberStepper';
 import Tabs from '../shared/Tabs';
 import PopupCloseButton from '../shared/PopupCloseButton';
 import VideoPlayer from '../shared/VideoPlayer';
+import Timeline from '../shared/Timeline';
 import MarkdownEditor from '../shared/MarkdownEditor';
 import FileUploadButton from '../shared/FileUploadButton';
+import ProviderBadge from '../shared/ProviderBadge';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import StyleGuideMascot from './StyleGuideMascot';
 import StyleGuideGenerationEffects from './StyleGuideGenerationEffects';
@@ -205,7 +207,7 @@ function TypographySection() {
   );
 }
 
-function ButtonsSection() {
+function ButtonsSection({ theme }: { theme: 'dark' | 'light' }) {
   return (
     <Section
       id="sg-buttons"
@@ -219,6 +221,29 @@ function ButtonsSection() {
           <button type="button" className="ui-btn ui-btn--ghost">幽灵</button>
           <button type="button" className="ui-btn ui-btn--danger">删除</button>
           <button type="button" className="ui-btn ui-btn--link">了解更多</button>
+        </div>
+      </Demo>
+
+      <Demo label="提示词栏共用按钮 · 28px 高度与 14px 金属厂商文字" code="prompt-btn / model-selector--pill > model-selector-trigger prompt-btn + ui-model-pill__avatar（ProviderBadge appearance=metal）+ ui-model-pill__label + ui-model-pill__action">
+        <div className="ui-row">
+          {['Seedance 2.0', '超长模型名称 · 视频生成预览版本'].map((label) => (
+            <div key={label} className="model-selector model-selector--pill w-48">
+              <button type="button" className="model-selector-trigger prompt-btn text-xs" title={label}>
+                <span className="ui-model-pill__avatar"><ProviderBadge providerId="apimart" size="medium" appearance="metal" theme={theme} /></span>
+                <span className="ui-model-pill__label">{label}</span>
+                <span className="ui-model-pill__action" aria-hidden="true">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="m6 6 12 12M18 6 6 18" />
+                  </svg>
+                </span>
+              </button>
+            </div>
+          ))}
+          <button type="button" className="prompt-btn" aria-label="画风按钮样例">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path d="M12 3C9 7 5 10.5 5 15a7 7 0 0 0 14 0c0-4.5-4-8-7-12Z" />
+            </svg>
+          </button>
         </div>
       </Demo>
 
@@ -1278,12 +1303,28 @@ function LayoutSection() {
 /* ==========================================================================
    内容装配
    ========================================================================== */
+function TimelineDemo() {
+  const [playhead, setPlayhead] = useState(12);
+  const [markers, setMarkers] = useState([{ id: 'cut-demo', time: 20 }]);
+  const boundaries = [0, ...markers.map((marker) => marker.time).sort((a, b) => a - b), 60];
+  return <Demo label="共用时间轴 · 时间码刻度与图标工具栏" code="Timeline / TimelineRuler / TimelineThumbnails · ui-timeline / ui-icon-btn--ghost">
+    <Timeline duration={60} playhead={playhead} onSeek={setPlayhead} thumbnails={[]} markers={markers}
+      segments={boundaries.slice(0, -1).map((start, index) => ({ id: String(index), start, end: boundaries[index + 1], label: `${index + 1}: ${start.toFixed(1)}–${boundaries[index + 1].toFixed(1)}s` }))}
+      labels={{ title: '时间轴', playhead: '播放头', track: '示例视频', segments: '分段', addMarker: '添加切点',
+        removeMarker: '删除切点', resetMarkers: '恢复自动分段', zoomIn: '放大', zoomOut: '缩小', fit: '适应', position: '位置（秒）', marker: '切点' }}
+      onAddMarker={(time) => { if (time > 0 && time < 60 && !markers.some((marker) => Math.abs(marker.time - time) < 0.001)) setMarkers([...markers, { id: crypto.randomUUID(), time }]); }}
+      onMoveMarker={(id, time) => { if (time > 0 && time < 60 && !markers.some((marker) => marker.id !== id && Math.abs(marker.time - time) < 0.001)) setMarkers(markers.map((marker) => marker.id === id ? { ...marker, time } : marker)); }}
+      onRemoveMarker={(id) => setMarkers(markers.filter((marker) => marker.id !== id))} onResetMarkers={() => setMarkers([])} />
+  </Demo>;
+}
+
 function VideoPlayerSection() {
   const [media, setMedia] = useState<{ src: string; name: string } | null>(null);
+  const [compact, setCompact] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => () => { if (media) URL.revokeObjectURL(media.src); }, [media]);
-  return <Section id="sg-video-player" title="视频播放器" desc="公用 VideoPlayer；主题色进度、倍速、音量、悬停预览与全屏。选择本地视频试播，样例仅在本窗口使用，关闭或替换时释放资源。">
-    <Demo code={'<VideoPlayer src={videoUrl} name="示例视频" onMetadata={handleMetadata} />'}>
+  return <Section id="sg-video-player" title="视频播放器" desc="公用 VideoPlayer；主题色进度、倍速、音量、悬停预览与全屏。进度滑块悬浮轻微放大，拖动时按方向倾斜，松手回弹恢复；支持减少动态效果。音量使用 ui-slider，在按钮右侧同一行展开；紧凑模式时间靠右。下方展示共用 Timeline 的缩放、打点和切点调整。选择本地视频试播，样例仅在本窗口使用，关闭或替换时释放资源。">
+    <Demo code={'<VideoPlayer src={videoUrl} name="示例视频" compact={compact} onMetadata={handleMetadata} /> · ui-video-player--compact'}>
       <div className="ui-stack">
         <div className="ui-row">
           <FileUploadButton label="选择视频" accept="video/*" aria-label="选择视频样例" fileName={media?.name ?? ''} placeholder="选择本地视频试播" className="min-w-0 flex-1" onChange={(event) => {
@@ -1294,13 +1335,15 @@ function VideoPlayerSection() {
             setError(''); setMedia({ src: URL.createObjectURL(file), name: file.name });
           }} />
           <button type="button" className="ui-btn ui-btn--ghost" disabled={!media} onClick={() => setMedia(null)}>移除样例</button>
+          <button type="button" className={`ui-btn ui-btn--ghost${compact ? ' is-active' : ''}`} aria-pressed={compact} onClick={() => setCompact(!compact)}>紧凑模式</button>
         </div>
         {error && <p role="status" className="text-xs text-canvas-text-secondary">{error}</p>}
-        <div className="h-[380px] min-w-0 rounded-lg bg-canvas-bg">
-          <VideoPlayer key={media?.src ?? 'empty'} src={media?.src} name={media?.name ?? '视频样例'} unavailable={!media} />
+        <div className={`${compact ? 'h-[158px] w-[280px] max-w-full' : 'h-[380px]'} min-w-0 rounded-lg bg-canvas-bg`}>
+          <VideoPlayer key={media?.src ?? 'empty'} src={media?.src} name={media?.name ?? '视频样例'} unavailable={!media} compact={compact} />
         </div>
       </div>
     </Demo>
+    <TimelineDemo />
   </Section>;
 }
 
@@ -1327,7 +1370,7 @@ export function StyleGuideContent({ theme }: { theme: 'dark' | 'light' }) {
 
       <ColorsSection />
       <TypographySection />
-      <ButtonsSection />
+      <ButtonsSection theme={theme} />
       <ChipsSection />
       <InputsSection />
       <SelectsSection />

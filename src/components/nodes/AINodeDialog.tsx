@@ -56,6 +56,7 @@ import { cancelRunningHubNodeTask, completeRunningHubNodeTask } from '../../serv
 import { completeCanvasDerivation, isCanvasDerivationFresh, registerCanvasDerivation } from '../../services/canvasDerivationGuard';
 import { animationProcessing, animationResultPatch } from '../../services/animationService';
 import { useT } from '../../i18n';
+import { mergeAppendedNodeMentions } from '../../utils/promptConnectionMentions';
 
 const DIALOG_VIEWPORT_MARGIN = 16;
 
@@ -85,7 +86,6 @@ function AINodeDialog() {
   const directorDialogBlocked = (node?.type === 'ai-director' || nodeType === 'ai-director') && !isPrevis;
 
   const panelRef = useRef<HTMLDivElement>(null);
-  const previewRef = useRef<HTMLDivElement>(null);
   const cancellingNodeIdsRef = useRef(new Set<string>());
   const [isExpanded, setIsExpanded] = useState(false);
   const [billingOpen, setBillingOpen] = useState(false);
@@ -104,7 +104,6 @@ function AINodeDialog() {
 
   useLayoutEffect(() => {
     const panel = panelRef.current;
-    const preview = previewRef.current;
     if (!panel || !activeNodeId || isExpanded) return;
 
     let scheduledFrame = 0;
@@ -123,10 +122,6 @@ function AINodeDialog() {
       const offsetY = computeVerticalOffset(nodeHasMedia);
       panel.style.left = `${anchor.x}px`;
       panel.style.top = `${anchor.y + offsetY}px`;
-      if (preview) {
-        preview.style.left = `${anchor.x}px`;
-        preview.style.top = `${anchor.y + offsetY - 42}px`;
-      }
     };
 
     const readNodeHasMedia = (): boolean => {
@@ -158,12 +153,10 @@ function AINodeDialog() {
     const panCanvasWithDialog = (deltaX: number, deltaY: number, duration: number) => {
       cancelAnimationFrame(releaseTransitionFrame);
       panel.style.transition = 'none';
-      if (preview) preview.style.transition = 'none';
       const startAnchor = syncDialogToNode();
       if (!startAnchor) {
         adjustmentLocked = false;
         panel.style.removeProperty('transition');
-        preview?.style.removeProperty('transition');
         return;
       }
 
@@ -190,7 +183,6 @@ function AINodeDialog() {
           useAppStore.getState().openNodeDialog(activeNodeId, finalAnchor);
           releaseTransitionFrame = requestAnimationFrame(() => {
             panel.style.removeProperty('transition');
-            preview?.style.removeProperty('transition');
             adjustmentLocked = false;
             scheduleUpdate();
           });
@@ -253,7 +245,6 @@ function AINodeDialog() {
       cancelAnimationFrame(releaseTransitionFrame);
       window.clearTimeout(settleTimer);
       panel.style.removeProperty('transition');
-      preview?.style.removeProperty('transition');
       observer.disconnect();
       window.removeEventListener('resize', scheduleUpdate);
       window.visualViewport?.removeEventListener('resize', scheduleUpdate);
@@ -306,6 +297,8 @@ function AINodeDialog() {
         }
         // 先让顶层 UI Kit 下拉处理 Escape，保留当前节点参数弹窗。
         if (document.querySelector('[data-ui-select-portal]')) return;
+        // 引用扇形和芯片预览先处理 Escape，再关闭节点对话框。
+        if (document.querySelector('[data-reference-preview-open]')) return;
         e.stopPropagation();
         if (polishOpen) {
           closePolish();
@@ -324,10 +317,15 @@ function AINodeDialog() {
 
   // All hooks must be called before any early return
   const onPromptChange = useCallback(
-    (value: string) => {
-      const current = useAppStore.getState().nodes.find((item) => item.id === activeNodeId)?.data;
-      if (isCloudWorkflow(useAppStore.getState().workflows.find((item) => item.id === current?.workflowId))) {
-        updateContinuousNodeData({ prompt: value }); return;
+    (value: string, previousValue?: string) => {
+      const state = useAppStore.getState();
+      if (state.currentProjectId !== currentProjectId || state.activeNodeId !== activeNodeId) return;
+      const current = state.nodes.find((item) => item.id === activeNodeId)?.data;
+      if (!current) return;
+      const nextValue = previousValue === undefined ? value
+        : mergeAppendedNodeMentions(previousValue, value, current.prompt ?? '');
+      if (isCloudWorkflow(state.workflows.find((item) => item.id === current.workflowId))) {
+        updateContinuousNodeData({ prompt: nextValue }); return;
       }
       // Extract workflow IO node assignments from the prompt string
       // Format: @wf{ioNodeId|title|type}(value content)
@@ -340,14 +338,14 @@ function AINodeDialog() {
       }
       wfRegex.lastIndex = 0;
       let match: RegExpExecArray | null;
-      while ((match = wfRegex.exec(value)) !== null) {
+      while ((match = wfRegex.exec(nextValue)) !== null) {
         const ioNodeId = match[1]; // Full ID (may contain ":")
         const valueText = match[4].replace(/\n$/, '');
         workflowInputs[ioNodeId] = valueText;
       }
-      updateContinuousNodeData({ prompt: value, workflowInputs: Object.keys(workflowInputs).length > 0 ? workflowInputs : undefined });
+      updateContinuousNodeData({ prompt: nextValue, workflowInputs: Object.keys(workflowInputs).length > 0 ? workflowInputs : undefined });
     },
-    [activeNodeId, updateContinuousNodeData]
+    [activeNodeId, currentProjectId, updateContinuousNodeData]
   );
 
   // 调用选中模型生成（文本 or 图片）
@@ -899,6 +897,23 @@ function AINodeDialog() {
     [activeNodeId, updateNodeData]
   );
 
+  const onClearModel = useCallback(() => {
+    if (!activeNodeId) return;
+    updateNodeData(activeNodeId, {
+      model: '',
+      provider: undefined,
+      workflowId: undefined,
+      workflowInputs: undefined,
+      audioPurpose: undefined,
+      runninghubModelParameters: undefined,
+      runninghubOutputs: undefined,
+      runninghubStage: undefined,
+      workflowApiOutputs: undefined,
+      workflowApiStage: undefined,
+      ...(nodeType === 'ai-director' ? { directorPrevisModel: '', directorPrevisProvider: undefined } : {}),
+    });
+  }, [activeNodeId, nodeType, updateNodeData]);
+
   const onChangeImageSize = useCallback(
     (value: string) => updateNodeData(activeNodeId!, { imageSize: value }),
     [activeNodeId, updateNodeData]
@@ -1068,21 +1083,6 @@ function AINodeDialog() {
 
   return (
     <>
-      {/* Connected nodes preview — below dialog (model-dropdown covers it) */}
-      {!isExpanded && (
-        <div
-          ref={previewRef}
-          className="ai-dialog-preview-float"
-          style={dialogPosition ? {
-            left: `${dialogPosition.x}px`,
-            top: `${dialogPosition.y + dialogOffsetY - 58}px`,
-            transform: 'translateX(-50%)',
-          } : undefined}
-        >
-          <ConnectedNodesPreview nodeId={activeNodeId} onInsertMention={handleInsertMention} />
-        </div>
-      )}
-
       {isExpanded && (
         <button
           type="button"
@@ -1105,6 +1105,14 @@ function AINodeDialog() {
         }}
         onMouseDown={(e) => e.stopPropagation()}
       >
+        {!isExpanded && (
+          <ConnectedNodesPreview
+            key={`${currentProjectId}:${activeNodeId}`}
+            nodeId={activeNodeId}
+            onInsertMention={handleInsertMention}
+            presentation="corner"
+          />
+        )}
         {data.status === 'loading' && !performanceMode && (
           <LazyLoadBoundary label="生成边框特效" errorFallback={null}>
             <Suspense fallback={null}>
@@ -1204,8 +1212,8 @@ function AINodeDialog() {
           nodeType={isPrevis ? 'ai-text' : nodeType}
           nodeId={activeNodeId}
           prompt={data.prompt || (isPrevis ? data.directorPrevisPrompt : '') || ''}
-          placeholder={isPrevis ? t('按 @ 引用连线图片或完整分镜表，描述空间、人物走位和运镜；\nShift+Enter 生成 AI 镜头预演，Enter 换行。') : t('按 @ 引用素材；连线素材需 @ 后才会传给模型，仅连线不生效；\n描述想要生成的内容；\n/ 呼出指令；\n(Enter 换行，Shift+Enter 发送)')}
-          selectedModel={data.model || (isPrevis ? data.directorPrevisModel : undefined)}
+          placeholder={isPrevis ? t('按 @ 引用连线图片或完整分镜表，描述空间、人物走位和运镜；') : t('按 @ 引用素材；连线素材需 @ 后才会传给模型，仅连线不生效；\n描述想要生成的内容；\n/ 呼出指令；')}
+          selectedModel={data.model ?? (isPrevis ? data.directorPrevisModel : undefined)}
           selectedProvider={data.provider || (isPrevis ? data.directorPrevisProvider : undefined)}
           selectedWorkflowId={data.workflowId}
           costEstimate={<VolcengineCostEstimate data={data} onOpenRecords={() => setBillingOpen(true)} />}
@@ -1220,6 +1228,7 @@ function AINodeDialog() {
           onContinuousEditEnd={finishContinuousEdit}
           onSubmit={onSubmit}
           onModelSelect={onModelSelect}
+          onClearModel={onClearModel}
           onWorkflowSelect={onWorkflowSelect}
           runninghubModelParameters={data.runninghubModelParameters}
           onRunninghubModelParametersChange={(runninghubModelParameters) => updateNodeData(activeNodeId, { runninghubModelParameters })}

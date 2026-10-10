@@ -1,15 +1,17 @@
 /**
  * plugins/pluginModelCatalog — 插件可见的可调用模型目录。
  *
- * 只输出 ID、名称、厂商、分类与输入模态，不含 API Key、接口地址或任何厂商凭据。
+ * 只输出模型身份、分类与能力，不含 API Key、接口地址或任何厂商凭据。
  * 自定义节点与节点工具共用同一份枚举逻辑，避免两处各自维护导致目录漂移。
  */
 import { useAppStore } from '../../store/useAppStore';
-import type { GeneralModelCategory, NodeType } from '../../types';
+import type { GeneralModelCategory, NodeType, WorkflowDefinition } from '../../types';
 import type { PluginModelSummary } from '../../types/plugin';
+import { resolveVideoModelCapability } from '../ai/videoModelCapabilityResolver';
 import {
   defaultModelGroups,
   getConfiguredModelGroups,
+  getMediaModelOptions,
   hasVisionInputCapability,
   isProviderCategoryVisible,
 } from '../../components/nodes/shared/defaultModels';
@@ -24,6 +26,11 @@ const CATEGORY_NODE_TYPES: Record<GeneralModelCategory, NodeType> = {
 };
 
 export const ALL_MODEL_CATEGORIES: GeneralModelCategory[] = ['text', 'image', 'video', 'audio'];
+
+function videoCapabilitySummary(category: GeneralModelCategory, modelId: string, config: AppConfig): Pick<PluginModelSummary, 'videoCapability'> {
+  const capability = category === 'video' ? resolveVideoModelCapability(modelId, config) : undefined;
+  return capability ? { videoCapability: capability } : {};
+}
 
 /** 旧目录没有显式模态时复用宿主既有视觉能力判断，让插件不用复制模型 ID 规则。 */
 export function resolvePluginModelInputModalities(
@@ -50,6 +57,7 @@ export function collectDeclaredModelCategories(
 export function buildPluginModelCatalog(
   config: AppConfig,
   categories: GeneralModelCategory[],
+  workflows: WorkflowDefinition[] = useAppStore.getState().workflows ?? [],
 ): PluginModelSummary[] {
   const models = categories.flatMap((category) => {
     const builtIn = getConfiguredModelGroups(
@@ -64,6 +72,7 @@ export function buildPluginModelCatalog(
       category,
       description: model.description,
       inputModalities: resolvePluginModelInputModalities(category, model.value, model.inputModalities),
+      ...videoCapabilitySummary(category, model.value, config),
     })));
     const general = (config.generalModels ?? [])
       .filter((model) => (
@@ -78,8 +87,17 @@ export function buildPluginModelCatalog(
         category,
         description: model.description || `ID: ${model.modelId}`,
         inputModalities: resolvePluginModelInputModalities(category, model.modelId, model.inputModalities),
+        ...videoCapabilitySummary(category, `general/${model.id}`, config),
       }));
     return [...builtIn, ...general];
   });
-  return [...new Map(models.map((model) => [model.id, model])).values()];
+  const videoWorkflows = categories.includes('video') ? workflows.filter((workflow) => {
+    const boundUrl = config.comfyServers?.find((server) => server.id === workflow.serverId)?.url;
+    return workflow.category === 'ai-video' && (!workflow.adapterType || workflow.adapterType === 'comfyui')
+      && !!workflow.fileContent.trim() && !!(boundUrl?.trim() || config.comfyUIUrl?.trim());
+  }) : [];
+  const workflowModels: PluginModelSummary[] = getMediaModelOptions([], config, videoWorkflows)
+    .filter((option) => !!option.workflowId && option.provider === 'comfyui')
+    .map((option) => ({ id: option.value, name: option.label, provider: 'comfyui', category: 'video', description: 'ComfyUI 工作流' }));
+  return [...new Map([...models, ...workflowModels].map((model) => [model.id, model])).values()];
 }

@@ -2,12 +2,14 @@
  * FullscreenOverlay — 全屏蒙层组件
  * 通过 Portal 渲染到 document.body，使用 framer-motion 动画
  */
-import { useEffect, useCallback } from 'react';
+import { useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import type { ReactNode } from 'react';
-import { EASE_OUT_EXPO } from '../../utils/motion';
+import { fadeFast, fadeNormal } from '../../utils/motion';
 import PopupCloseButton from './PopupCloseButton';
+import { useDialogFocus } from '../../hooks/useDialogFocus';
+import { useT } from '../../i18n';
 
 export interface FullscreenOverlayProps {
   isOpen: boolean;
@@ -31,10 +33,10 @@ export interface FullscreenOverlayProps {
 }
 
 const backdropVariants = {
-  hidden: { opacity: 0 },
+  hidden: { opacity: 0, transition: fadeFast },
   visible: {
     opacity: 1,
-    transition: { duration: 1, ease: EASE_OUT_EXPO },
+    transition: fadeNormal,
   },
 };
 
@@ -45,19 +47,23 @@ const backdropVariantsInstant = {
 };
 
 const panelVariants = {
-  hidden: { opacity: 0, scale: 0.96, y: 18 },
+  hidden: { opacity: 0, transform: 'translate3d(0, 12px, 0) scale(0.98)' },
   visible: {
     opacity: 1,
-    scale: 1,
-    y: 0,
-    transition: { duration: 1, ease: EASE_OUT_EXPO },
+    transform: 'translate3d(0, 0, 0) scale(1)',
+    transition: fadeNormal,
   },
   exit: {
     opacity: 0,
-    scale: 0.985,
-    y: 10,
-    transition: { duration: 1, ease: EASE_OUT_EXPO },
+    transform: 'translate3d(0, 6px, 0) scale(0.99)',
+    transition: fadeFast,
   },
+};
+
+const reducedPanelVariants = {
+  hidden: { opacity: 0, transform: 'none' },
+  visible: { opacity: 1, transform: 'none', transition: fadeFast },
+  exit: { opacity: 0, transform: 'none', transition: fadeFast },
 };
 
 export default function FullscreenOverlay({
@@ -73,30 +79,26 @@ export default function FullscreenOverlay({
   headerContent,
   unmountOnClose = false,
 }: FullscreenOverlayProps) {
-  // Close on Escape release so child keydown handlers cannot swallow the shortcut.
-  const handleKeyUp = useCallback(
-    (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    },
-    [onClose],
-  );
-
-  useEffect(() => {
-    if (isOpen) {
-      window.addEventListener('keyup', handleKeyUp, true);
-      return () => window.removeEventListener('keyup', handleKeyUp, true);
-    }
-  }, [isOpen, handleKeyUp]);
+  const t = useT();
+  const reduceMotion = useReducedMotion();
+  const overlayRef = useRef<HTMLDivElement>(null);
+  // 保留松开 Escape 关闭的语义，并与嵌套弹窗共享焦点/键盘层级。
+  useDialogFocus(isOpen, overlayRef, onClose, { escapeOnKeyUp: true });
 
   const overlay = isOpen ? (
         <motion.div
+          ref={overlayRef}
+          role="dialog"
+          aria-modal="true"
+          aria-label={title || t('全屏预览')}
+          tabIndex={-1}
           data-tauri-drag-region
           className={`fullscreen-overlay${hidePanel ? ' fullscreen-overlay--transparent' : ''} ${className}`}
           variants={hidePanel ? backdropVariantsInstant : backdropVariants}
           initial="hidden"
           animate="visible"
           exit="hidden"
-          transition={{ duration: 1, ease: EASE_OUT_EXPO }}
+          transition={fadeFast}
           onClick={hidePanel ? undefined : onClose}
         >
           {hidePanel ? (
@@ -112,7 +114,7 @@ export default function FullscreenOverlay({
             <motion.div
               className="fullscreen-panel"
               style={{ width: panelWidth }}
-              variants={panelVariants}
+              variants={reduceMotion ? reducedPanelVariants : panelVariants}
               initial="hidden"
               animate="visible"
               exit="exit"
@@ -145,7 +147,7 @@ export default function FullscreenOverlay({
         </motion.div>
   ) : null;
 
-  // hidePanel 均为图片、视频或编辑器舞台；关闭时保留一秒退场会与底层预览重叠占用资源。
+  // hidePanel 均为图片、视频或编辑器舞台；退场期间保留子树会与底层预览重叠占用资源。
   const shouldUnmountImmediately = hidePanel || unmountOnClose;
 
   return createPortal(

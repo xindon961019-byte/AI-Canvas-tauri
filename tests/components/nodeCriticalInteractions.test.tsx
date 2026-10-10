@@ -40,7 +40,7 @@ interface TestStore {
   addNode: ReturnType<typeof vi.fn>;
   addNodeTransient: ReturnType<typeof vi.fn>;
   updateNodeData: ReturnType<typeof vi.fn>;
-  updateNodeDataTransient: ReturnType<typeof vi.fn>;
+  updateNodeDataTransient: ReturnType<typeof vi.fn<(nodeId: string, patch: Record<string, unknown>) => void>>;
   commitToHistory: ReturnType<typeof vi.fn>;
   recordOutputHistory: ReturnType<typeof vi.fn>;
   showToast: ReturnType<typeof vi.fn>;
@@ -742,6 +742,9 @@ describe('critical canvas node interactions', () => {
     vi.doMock('../../src/components/nodes/shared/VideoNodeToolbar', () => ({
       default: function VideoNodeToolbarMock() { return null; },
     }));
+    vi.doMock('../../src/components/shared/VideoPlayer', () => ({
+      default: function VideoPlayerMock() { return null; },
+    }));
     vi.doMock('../../src/services/fileService', () => ({
       buildNodeFileName: () => 'frame.png',
       saveDataUrlToProjectData: vi.fn(),
@@ -763,14 +766,14 @@ describe('critical canvas node interactions', () => {
     ) => unknown;
     store.selectedNodeIds = ['video-source'];
     const tree = VideoNode({ id: 'video-source', data: store.nodes[0].data, selected: true });
-    const video = findElement(tree, (element) => element.type === 'video' && element.props.className === 'video-preview-player compact');
+    const video = findElement(tree, (element) => componentName(element) === 'VideoPlayerMock' && element.props.compact === true);
     const toolbar = findElement(tree, (element) => componentName(element) === 'VideoNodeToolbarMock');
-    (video.props.ref as { current: unknown }).current = {
+    (video.props.mediaRef as (video: unknown) => void)({
       readyState: 2,
       videoWidth: 1920,
       videoHeight: 1080,
       currentTime: 12.5,
-    };
+    });
 
     const completion = (toolbar.props.onCaptureFrame as () => Promise<void>)();
     revision = 2;
@@ -1053,6 +1056,17 @@ describe('critical canvas node interactions', () => {
     const AINodeDialog = (await import('../../src/components/nodes/AINodeDialog')).default as unknown as () => unknown;
     const tree = AINodeDialog();
     const promptPanel = findElement(tree, (element) => componentName(element) === 'PromptPanelMock');
+    const changePrompt = promptPanel.props.onChange as (value: string, previousValue?: string) => void;
+    // 后连线已经写入 Store，但编辑器还持有旧 DOM；继续输入不能抹掉新引用。
+    store.updateNodeDataTransient('video-node', { prompt: 'old prompt @{image:新参考图} @{audio:新声音}' });
+    changePrompt('正在编辑的内容', 'old prompt');
+    expect(store.nodes[0].data.prompt).toBe('正在编辑的内容 @{image:新参考图} @{audio:新声音}');
+    (promptPanel.props.onContinuousEditEnd as () => void)();
+    const editWrites = store.updateNodeDataTransient.mock.calls.length;
+    store.currentProjectId = 'project-b';
+    changePrompt('旧项目迟到的输入', '正在编辑的内容');
+    expect(store.updateNodeDataTransient).toHaveBeenCalledTimes(editWrites);
+    store.currentProjectId = 'project-a';
     (promptPanel.props.onModelSelect as (model: Record<string, unknown>) => void)({
       value: 'general/custom-video',
       label: 'Custom Video',

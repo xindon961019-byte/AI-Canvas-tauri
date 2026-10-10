@@ -8,6 +8,7 @@ import { confirmAction } from '../../services/confirmDialog';
 import {
   comparePluginVersions,
   loadPluginMarketplace,
+  pluginMarketplaceKey,
   resolveGithubPlugin,
 } from '../../services/plugins/pluginMarketplace';
 import type { PluginMarketplaceItem } from '../../services/plugins/pluginMarketplace';
@@ -37,6 +38,12 @@ const CATEGORY_LABELS: Record<PluginCategory, string> = {
 function pluginNodeTypeLabel(nodeType: string): string {
   const label = getNodeTypeConfig(nodeType.replace(/^source-/u, 'ai-')).label;
   return nodeType.startsWith('source-') ? label.replace(/^生成/u, '') : label;
+}
+
+function pluginIcon(manifest: PluginManifest): string {
+  return manifest.contributes.nodeTools.find((tool) => tool.icon)?.icon
+    || manifest.contributes.nodes?.find((node) => node.icon)?.icon
+    || 'lucide:blocks';
 }
 
 function isUpdateAvailable(latest: string, current: string): boolean {
@@ -433,7 +440,7 @@ export default function PluginSettings() {
 
   const installGithubPlugin = async (repository: string, item?: PluginMarketplaceItem) => {
     if (!repository.trim() || installingRepository) return;
-    setInstallingRepository(repository);
+    setInstallingRepository(item ? pluginMarketplaceKey(item) : repository);
     try {
       const plugin = item?.status === 'ready'
         ? item
@@ -867,10 +874,11 @@ export default function PluginSettings() {
             </div>
           )}
           {visibleMarketplaceItems.map((item) => {
+            const itemKey = pluginMarketplaceKey(item);
             if (item.status === 'error') {
               return (
-                <article key={item.repository} className="rounded-lg border border-canvas-border bg-canvas-surface p-3">
-                  <div className="truncate text-xs font-medium text-canvas-text">{item.repository}</div>
+                <article key={itemKey} className="rounded-lg border border-canvas-border bg-canvas-surface p-3">
+                  <div className="truncate text-xs font-medium text-canvas-text">{item.repository}{item.directory ? ` / ${item.directory}` : ''}</div>
                   <div className="mt-1 text-[11px] text-red-400">{item.error}</div>
                 </article>
               );
@@ -881,10 +889,10 @@ export default function PluginSettings() {
               : false;
             const actionDisabled = Boolean(installed && !updateAvailable) || Boolean(installingRepository);
             return (
-              <article key={item.repository} className="rounded-lg border border-canvas-border bg-canvas-surface p-3">
+              <article key={itemKey} className="rounded-lg border border-canvas-border bg-canvas-surface p-3">
                 <div className="flex items-start gap-3">
                   <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
-                    <Icon icon="lucide:blocks" width={18} height={18} />
+                    <Icon icon={pluginIcon(item.manifest)} width={18} height={18} />
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-1.5">
@@ -902,12 +910,12 @@ export default function PluginSettings() {
                         详细信息
                       </summary>
                       <a
-                        href={item.repository}
+                        href={item.directory ? `${item.repository}/tree/${encodeURIComponent(item.releaseTag)}/${item.directory}` : item.repository}
                         target="_blank"
                         rel="noreferrer"
                         className="mt-1 block truncate text-[10px] text-canvas-text-muted hover:text-indigo-400"
                       >
-                        {item.repository.replace('https://github.com/', '')}
+                        {item.repository.replace('https://github.com/', '')}{item.directory ? ` / ${item.directory}` : ''}
                       </a>
                       <div className="mt-1 break-words text-[10px] text-canvas-text-muted">
                         {CATEGORY_LABELS[item.manifest.category]} · 权限：{item.manifest.permissions.join('、')}
@@ -920,7 +928,7 @@ export default function PluginSettings() {
                     className="shrink-0 rounded-md bg-indigo-500/10 px-2.5 py-1.5 text-[11px] font-medium text-indigo-400 hover:bg-indigo-500/15 disabled:cursor-not-allowed disabled:bg-canvas-card disabled:text-canvas-text-muted"
                     onClick={() => void installGithubPlugin(item.repository, item)}
                   >
-                    {installingRepository === item.repository
+                    {installingRepository === itemKey
                       ? '安装中…'
                       : updateAvailable
                         ? '更新'
@@ -976,7 +984,7 @@ export default function PluginSettings() {
             <article key={plugin.id} className="rounded-xl border border-canvas-border bg-canvas-card p-3">
               <div className="flex items-start gap-3">
                 <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/10 text-indigo-400">
-                  <Icon icon="lucide:blocks" width={18} height={18} />
+                  <Icon icon={pluginIcon(plugin.manifest)} width={18} height={18} />
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
